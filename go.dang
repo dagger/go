@@ -163,7 +163,7 @@ type GoModule {
       .withDirectory(".", source)
       .withDirectory(".", testdata)
       .withWorkdir(path)
-      .withExec(["go", "test", "./..."])
+      .withExec(["go", "test", "./..."], experimentalPrivilegedNesting: true)
   }
 
   """
