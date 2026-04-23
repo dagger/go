@@ -1,0 +1,13 @@
+{
+  "name": "e2e",
+  "engineVersion": "v0.20.6",
+  "sdk": {
+    "source": "dang"
+  },
+  "dependencies": [
+    {
+      "name": "go",
+      "source": "../../.."
+    }
+  ]
+}

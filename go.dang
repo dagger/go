@@ -1,0 +1,175 @@
+"""
+A Dagger module for Go - a programming language for building simple, secure, scalable systems.
+
+https://dagger.io
+https://golang.org
+"""
+type Go {
+  """
+  Go version to use.
+  """
+  pub version: String! = "1.26"
+
+  """
+  Extra workspace files to include when running Go commands.
+  Use this for project-specific fixtures or generated assets needed by tests.
+  """
+  pub includeExtraFiles: [String!]! = []
+
+  """
+  Go module path globs to include when discovering modules.
+  When unset, every discovered module is included.
+  """
+  pub selectModules: [String!] = null
+
+  """
+  Hardcoded workspace paths needed for Go commands.
+  """
+  let include: [String!]! {
+    [
+      "**/*.go",
+      "**/*.c",
+      "**/*.h",
+      "**/*.s",
+      "**/*.S",
+      "**/*.syso",
+      "**/go.mod",
+      "**/go.sum",
+      "**/go.work",
+      "**/go.work.sum",
+    ] + includeExtraFiles
+  }
+
+  """
+  Hardcoded test fixture paths mounted only while running tests.
+  """
+  let testdataInclude: [String!]! {
+    [
+      "**/testdata/**",
+    ]
+  }
+
+  """
+  Hardcoded workspace paths to omit from Go command inputs.
+  """
+  let exclude: [String!]! {
+    [
+      "vendor/",
+      "**/vendor/",
+    ]
+  }
+
+  """
+  Discover go.mod paths selected by selectModules.
+  """
+  let goModPaths(ws: Workspace!): [String!]! {
+    if (selectModules != null and selectModules.length == 0) {
+      [] :: [String!]!
+    } else {
+      let include = if (selectModules == null) {
+        ["**/go.mod"]
+      } else {
+        selectModules.map { modulePath =>
+          modulePath.trimSuffix("/") + "/go.mod"
+        }
+      }
+      ws
+        .directory(".", include: include, exclude: exclude)
+        .glob("**/go.mod")
+    }
+  }
+
+  """
+  Scan the workspace for Go modules.
+  """
+  pub modules(ws: Workspace!): [GoModule!]! {
+    let source = ws.directory(".", include: include, exclude: exclude)
+    let testdata = ws.directory(".", include: testdataInclude, exclude: exclude)
+    goModPaths(ws)
+      .map { modPath =>
+        let rawPath = modPath.trimSuffix("go.mod").trimSuffix("/")
+        let path = if (rawPath == "") { "." } else { rawPath }
+        GoModule(
+          path: path,
+          version: version,
+          source: source,
+          testdata: testdata,
+        )
+      }
+  }
+
+  """
+  Run tests in every discovered Go module.
+  """
+  pub check(ws: Workspace!): Void @check {
+    let layers = modules(ws).reduce(directory) { layers, mod =>
+      layers.withDirectory(mod.path, mod.testLayer)
+    }
+    layers.sync
+    null
+  }
+
+}
+
+"""
+A discovered Go module in the workspace.
+"""
+type GoModule {
+  """
+  Path of the module directory in the workspace.
+  """
+  pub path: String!
+
+  """
+  Go version to use.
+  """
+  let version: String!
+
+  """
+  Filtered workspace source mounted for Go commands.
+  """
+  let source: Directory!
+
+  """
+  Filtered test fixture files mounted only while running tests.
+  """
+  let testdata: Directory!
+
+  """
+  Base container for Go commands.
+  """
+  let base: Container! {
+    container
+      .from("golang:" + version + "-alpine")
+      .withoutEntrypoint
+      .withWorkdir("/ws")
+      .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
+      .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+  }
+
+  """
+  Run tests in this module.
+  """
+  pub test: Void @check {
+    testExec.sync
+    null
+  }
+
+  """
+  Container state after running this module's test check.
+  """
+  let testExec: Container! {
+    base
+      .withDirectory(".", source)
+      .withDirectory(".", testdata)
+      .withWorkdir(path)
+      .withExec(["go", "test", "./..."])
+  }
+
+  """
+  Directory layer used to run module checks in parallel.
+  """
+  let testLayer: Directory! {
+    directory.withFile("go.mod", testExec.file("go.mod"))
+  }
+}

@@ -1,0 +1,18 @@
+"""
+End-to-end checks for the Go module.
+"""
+type E2e {
+  """
+  Run the imported Go module against one selected fixture module.
+  """
+  pub singleModuleCheck(ws: Workspace!): Void @check {
+    go(
+      version: "1.25",
+      includeExtra: ["testdata/go-module-with-testdata/**"],
+      excludeExtra: [
+        "**",
+        "!testdata/go-module-with-testdata/**",
+      ],
+    ).check(ws)
+  }
+}
