@@ -59,7 +59,7 @@ type Go {
       ["**/*_test.go"]
     } else {
       selectModules.map { modulePath =>
-        modulePath.trimSuffix("/") + "/**/*_test.go"
+        (modulePath.trimSuffix("/") + "/**/*_test.go").trimPrefix("./").trimPrefix("/")
       }
     }
   }
@@ -85,11 +85,11 @@ type Go {
         ["**/go.mod"]
       } else {
         selectModules.map { modulePath =>
-          modulePath.trimSuffix("/") + "/go.mod"
+          (modulePath.trimSuffix("/") + "/go.mod").trimPrefix("./").trimPrefix("/")
         }
       }
       ws
-        .directory(".", include: include, exclude: exclude)
+        .directory("/", include: include, exclude: exclude)
         .glob("**/go.mod")
     }
   }
@@ -103,33 +103,31 @@ type Go {
     if (testFileInclude.length == 0) {
       [] :: [String!]!
     } else {
-      let testFiles = testFileInclude.map { pattern =>
-        if (pattern.hasPrefix("/")) {
-          pattern.trimPrefix("/")
-        } else {
-          (ws.path.trimSuffix("/") + "/" + pattern).trimPrefix("./").trimPrefix("/")
-        }
+      let testFiles = ws.directory("/", include: testFileInclude, exclude: exclude).glob("**/*_test.go")
+      if (testFiles.length == 0) {
+        [] :: [String!]!
+      } else {
+        ws
+          .directory("/", include: testFiles, exclude: exclude)
+          .search(pattern: "^\\s*//\\s*workspace:include\\s+\\S+\\s*$", paths: testFiles)
+          .{filePath, matchedLines}
+          .reduce([] :: [String!]!) { includes, match =>
+            let testDir = match.filePath.split("/").dropLast().join("/")
+            let pattern = match.matchedLines
+              .trimSpace()
+              .trimPrefix("//")
+              .trimSpace()
+              .trimPrefix("workspace:include")
+              .trimSpace()
+            includes + [
+              if (pattern.hasPrefix("/")) {
+                pattern.trimPrefix("/")
+              } else {
+                (testDir + "/" + pattern).trimPrefix("/")
+              }
+            ]
+          }
       }
-      ws
-        .directory("/", include: testFiles, exclude: exclude)
-        .search(pattern: "^\\s*//\\s*workspace:include\\s+\\S+\\s*$", globs: testFiles)
-        .{filePath, matchedLines}
-        .reduce([] :: [String!]!) { includes, match =>
-          let testDir = match.filePath.split("/").dropLast().join("/")
-          let pattern = match.matchedLines
-            .trimSpace()
-            .trimPrefix("//")
-            .trimSpace()
-            .trimPrefix("workspace:include")
-            .trimSpace()
-          includes + [
-            if (pattern.hasPrefix("/")) {
-              pattern.trimPrefix("/")
-            } else {
-              (testDir + "/" + pattern).trimPrefix("/")
-            }
-          ]
-        }
     }
   }
 
@@ -138,18 +136,10 @@ type Go {
   """
   pub modules(ws: Workspace!): [GoModule!]! {
     let source = ws.directory("/", include: include.map { pattern =>
-      if (pattern.hasPrefix("/")) {
-        pattern.trimPrefix("/")
-      } else {
-        (ws.path.trimSuffix("/") + "/" + pattern).trimPrefix("./").trimPrefix("/")
-      }
+      pattern.trimPrefix("./").trimPrefix("/")
     }, exclude: exclude)
     let testdata = ws.directory("/", include: testdataInclude.map { pattern =>
-      if (pattern.hasPrefix("/")) {
-        pattern.trimPrefix("/")
-      } else {
-        (ws.path.trimSuffix("/") + "/" + pattern).trimPrefix("./").trimPrefix("/")
-      }
+      pattern.trimPrefix("./").trimPrefix("/")
     } + testWorkspaceInclude(ws), exclude: exclude)
     goModPaths(ws)
       .map { modPath =>
@@ -157,7 +147,7 @@ type Go {
         let path = if (rawPath == "") { "." } else { rawPath }
         GoModule(
           path: path,
-          workdir: (ws.path.trimSuffix("/") + "/" + path).trimPrefix("./").trimPrefix("/"),
+          workdir: path,
           version: version,
           source: source,
           testdata: testdata,
@@ -234,6 +224,8 @@ type GoModule {
     base
       .withDirectory(".", source)
       .withDirectory(".", testdata)
+      # Nested Dagger clients find the workspace boundary by walking up to .git.
+      .withNewFile(".git/HEAD", "ref: refs/heads/main\n")
       .withWorkdir(workdir)
       .withExec(["go", "test", "./..."], experimentalPrivilegedNesting: true)
   }
