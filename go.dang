@@ -50,6 +50,21 @@ type Go {
   }
 
   """
+  Go test files to scan for workspace include annotations.
+  """
+  let testFileInclude: [String!]! {
+    if (selectModules != null and selectModules.length == 0) {
+      [] :: [String!]!
+    } else if (selectModules == null) {
+      ["**/*_test.go"]
+    } else {
+      selectModules.map { modulePath =>
+        modulePath.trimSuffix("/") + "/**/*_test.go"
+      }
+    }
+  }
+
+  """
   Hardcoded workspace paths to omit from Go command inputs.
   """
   let exclude: [String!]! {
@@ -80,17 +95,86 @@ type Go {
   }
 
   """
+  Convert include patterns relative to the current workspace directory into
+  patterns relative to the workspace boundary.
+  """
+  let workspaceRootInclude(ws: Workspace!, patterns: [String!]!): [String!]! {
+    patterns.map { pattern =>
+      workspaceRootPattern(ws.path, pattern)
+    }
+  }
+
+  """
+  Convert one include pattern into a workspace-boundary-relative pattern.
+  """
+  let workspaceRootPattern(workspacePath: String!, pattern: String!): String! {
+    if (pattern.hasPrefix("/")) {
+      pattern.trimPrefix("/")
+    } else if (workspacePath == "." or workspacePath == "") {
+      pattern
+    } else {
+      workspacePath.trimSuffix("/") + "/" + pattern
+    }
+  }
+
+  """
+  Convert a module-relative path into a workspace-boundary-relative path.
+  """
+  let workspaceRootPath(ws: Workspace!, path: String!): String! {
+    if (path == "." or path == "") {
+      if (ws.path == "." or ws.path == "") { "." } else { ws.path }
+    } else {
+      workspaceRootPattern(ws.path, path)
+    }
+  }
+
+  """
+  Extra test-only include patterns discovered from go test file annotations.
+  Each workspace:include directive accepts one pattern. Use multiple directives
+  for multiple patterns.
+  """
+  let testWorkspaceInclude(ws: Workspace!): [String!]! {
+    if (testFileInclude.length == 0) {
+      [] :: [String!]!
+    } else {
+      ws
+        .directory("/", include: workspaceRootInclude(ws, testFileInclude), exclude: exclude)
+        .search(pattern: "^\\s*//\\s*workspace:include\\s+\\S+", globs: workspaceRootInclude(ws, testFileInclude))
+        .{filePath, matchedLines}
+        .reduce([] :: [String!]!) { includes, match =>
+          let testDir = match.filePath.split("/").dropLast().join("/")
+          let pattern = match.matchedLines
+            .trimSpace()
+            .trimPrefix("//")
+            .trimSpace()
+            .trimPrefix("workspace:include")
+            .trimSpace()
+          includes + [
+            if (pattern.hasPrefix("/")) {
+              pattern.trimPrefix("/")
+            } else if (testDir == "") {
+              pattern
+            } else {
+              testDir + "/" + pattern
+            }
+          ]
+        }
+    }
+  }
+
+  """
   Scan the workspace for Go modules.
   """
   pub modules(ws: Workspace!): [GoModule!]! {
-    let source = ws.directory(".", include: include, exclude: exclude)
-    let testdata = ws.directory(".", include: testdataInclude, exclude: exclude)
+    let source = ws.directory("/", include: workspaceRootInclude(ws, include), exclude: exclude)
+    let testdata = ws.directory("/", include: workspaceRootInclude(ws, testdataInclude) + testWorkspaceInclude(ws), exclude: exclude)
     goModPaths(ws)
       .map { modPath =>
         let rawPath = modPath.trimSuffix("go.mod").trimSuffix("/")
         let path = if (rawPath == "") { "." } else { rawPath }
         GoModule(
           path: path,
+          workdir: workspaceRootPath(ws, path),
           version: version,
           source: source,
           testdata: testdata,
@@ -136,6 +220,11 @@ type GoModule {
   let testdata: Directory!
 
   """
+  Module directory path relative to the mounted workspace boundary.
+  """
+  let workdir: String!
+
+  """
   Base container for Go commands.
   """
   let base: Container! {
@@ -162,7 +251,7 @@ type GoModule {
     base
       .withDirectory(".", source)
       .withDirectory(".", testdata)
-      .withWorkdir(path)
+      .withWorkdir(workdir)
       .withExec(["go", "test", "./..."], experimentalPrivilegedNesting: true)
   }
 
