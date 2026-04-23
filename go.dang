@@ -23,6 +23,12 @@ type Go {
   pub selectModules: [String!] = null
 
   """
+  Single Go module path glob to include when legacy callers cannot pass arrays.
+  Ignored when selectModules is set.
+  """
+  pub selectModule: String = null
+
+  """
   Hardcoded workspace paths needed for Go commands.
   """
   let include: [String!]! {
@@ -55,12 +61,14 @@ type Go {
   let testFileInclude: [String!]! {
     if (selectModules != null and selectModules.length == 0) {
       [] :: [String!]!
-    } else if (selectModules == null) {
-      ["**/*_test.go"]
-    } else {
+    } else if (selectModules != null) {
       selectModules.map { modulePath =>
         (modulePath.trimSuffix("/") + "/**/*_test.go").trimPrefix("./").trimPrefix("/")
       }
+    } else if (selectModule != null) {
+      [(selectModule.trimSuffix("/") + "/**/*_test.go").trimPrefix("./").trimPrefix("/")]
+    } else {
+      ["**/*_test.go"]
     }
   }
 
@@ -75,18 +83,20 @@ type Go {
   }
 
   """
-  Discover go.mod paths selected by selectModules.
+  Discover go.mod paths selected by selectModule or selectModules.
   """
   let goModPaths(ws: Workspace!): [String!]! {
     if (selectModules != null and selectModules.length == 0) {
       [] :: [String!]!
     } else {
-      let include = if (selectModules == null) {
-        ["**/go.mod"]
-      } else {
+      let include = if (selectModules != null) {
         selectModules.map { modulePath =>
           (modulePath.trimSuffix("/") + "/go.mod").trimPrefix("./").trimPrefix("/")
         }
+      } else if (selectModule != null) {
+        [(selectModule.trimSuffix("/") + "/go.mod").trimPrefix("./").trimPrefix("/")]
+      } else {
+        ["**/go.mod"]
       }
       ws
         .directory("/", include: include, exclude: exclude)
@@ -109,22 +119,22 @@ type Go {
       } else {
         ws
           .directory("/", include: testFiles, exclude: exclude)
-          .search(pattern: "^\\s*//\\s*workspace:include\\s+\\S+\\s*$", paths: testFiles)
-          .{filePath, matchedLines}
+          .search(pattern: "^\\s*//\\s*workspace:include\\s+\\S+\\s*$", paths: testFiles).{filePath, matchedLines}
           .reduce([] :: [String!]!) { includes, match =>
-            let testDir = match.filePath.split("/").dropLast().join("/")
-            let pattern = match.matchedLines
-              .trimSpace()
+            let testDir = match.filePath.split("/").dropLast.join("/")
+            let pattern = match
+              .matchedLines
+              .trimSpace
               .trimPrefix("//")
-              .trimSpace()
+              .trimSpace
               .trimPrefix("workspace:include")
-              .trimSpace()
+              .trimSpace
             includes + [
               if (pattern.hasPrefix("/")) {
                 pattern.trimPrefix("/")
               } else {
                 (testDir + "/" + pattern).trimPrefix("/")
-              }
+              },
             ]
           }
       }
@@ -135,12 +145,20 @@ type Go {
   Scan the workspace for Go modules.
   """
   pub modules(ws: Workspace!): [GoModule!]! {
-    let source = ws.directory("/", include: include.map { pattern =>
-      pattern.trimPrefix("./").trimPrefix("/")
-    }, exclude: exclude)
-    let testdata = ws.directory("/", include: testdataInclude.map { pattern =>
-      pattern.trimPrefix("./").trimPrefix("/")
-    } + testWorkspaceInclude(ws), exclude: exclude)
+    let source = ws.directory(
+      "/",
+      include: include.map { pattern =>
+        pattern.trimPrefix("./").trimPrefix("/")
+      },
+      exclude: exclude,
+    )
+    let testdata = ws.directory(
+      "/",
+      include: testdataInclude.map { pattern =>
+        pattern.trimPrefix("./").trimPrefix("/")
+      } + testWorkspaceInclude(ws),
+      exclude: exclude,
+    )
     goModPaths(ws)
       .map { modPath =>
         let rawPath = modPath.trimSuffix("go.mod").trimSuffix("/")
