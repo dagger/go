@@ -176,7 +176,7 @@ type Go {
   """
   Run tests in every discovered Go module.
   """
-  pub check(ws: Workspace!): Void @check {
+  pub testAll(ws: Workspace!): Void @check {
     let layers = modules(ws).reduce(directory) { layers, mod =>
       layers.withDirectory(mod.path, mod.testLayer)
     }
