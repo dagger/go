@@ -225,6 +225,7 @@ type GoModule {
       .withWorkdir("/ws")
       .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
       .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+      .withExec(["go", "install", "github.com/dagger/otel-go/cmd/otelgotest@latest"])
   }
 
   """
@@ -245,7 +246,7 @@ type GoModule {
       # Nested Dagger clients find the workspace boundary by walking up to .git.
       .withNewFile(".git/HEAD", "ref: refs/heads/main\n")
       .withWorkdir(workdir)
-      .withExec(["go", "test", "./..."], experimentalPrivilegedNesting: true)
+      .withExec(["otelgotest", "./..."], experimentalPrivilegedNesting: true)
   }
 
   """
