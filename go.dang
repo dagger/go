@@ -257,7 +257,7 @@ type GoModule {
   """
   let testExec: Container! {
     base
-      .withExec(["go", "install", "github.com/dagger/otel-go/cmd/otelgotest@latest"])
+      .withExec(["go", "install", "github.com/dagger/otel-go/cmd/otelgotest@main"])
       .withDirectory(".", source)
       .withDirectory(".", testdata)
       # Nested Dagger clients find the workspace boundary by walking up to .git.
