@@ -224,7 +224,7 @@ type GoModule {
   """
   Base container for Go commands.
   """
-  let base: Container! {
+  pub base: Container! {
     container
       .from("golang:" + version + "-alpine")
       .withoutEntrypoint
