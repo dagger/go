@@ -12,7 +12,8 @@ type Go {
 
   """
   Extra workspace files to include when running Go commands.
-  Use this for project-specific fixtures or generated assets needed by tests.
+  Use this for project-specific fixtures, generator inputs, or other files
+  not covered by the built-in Go patterns.
   """
   pub includeExtraFiles: [String!]! = []
 
@@ -56,19 +57,19 @@ type Go {
   }
 
   """
-  Go test files to scan for workspace include annotations.
+  Resolve workspace paths selected by selectModule or selectModules.
   """
-  let testFileInclude: [String!]! {
+  let selectedPaths(pattern: String!, allPattern: String!): [String!]! {
     if (selectModules != null and selectModules.length == 0) {
       [] :: [String!]!
     } else if (selectModules != null) {
       selectModules.map { modulePath =>
-        (modulePath.trimSuffix("/") + "/**/*_test.go").trimPrefix("./").trimPrefix("/")
+        (modulePath.trimSuffix("/") + "/" + pattern).trimPrefix("./").trimPrefix("/")
       }
     } else if (selectModule != null) {
-      [(selectModule.trimSuffix("/") + "/**/*_test.go").trimPrefix("./").trimPrefix("/")]
+      [(selectModule.trimSuffix("/") + "/" + pattern).trimPrefix("./").trimPrefix("/")]
     } else {
-      ["**/*_test.go"]
+      [allPattern]
     }
   }
 
@@ -89,39 +90,30 @@ type Go {
     if (selectModules != null and selectModules.length == 0) {
       [] :: [String!]!
     } else {
-      let include = if (selectModules != null) {
-        selectModules.map { modulePath =>
-          (modulePath.trimSuffix("/") + "/go.mod").trimPrefix("./").trimPrefix("/")
-        }
-      } else if (selectModule != null) {
-        [(selectModule.trimSuffix("/") + "/go.mod").trimPrefix("./").trimPrefix("/")]
-      } else {
-        ["**/go.mod"]
-      }
       ws
-        .directory("/", include: include, exclude: exclude)
+        .directory("/", include: selectedPaths("go.mod", "**/go.mod"), exclude: exclude)
         .glob("**/go.mod")
     }
   }
 
   """
-  Extra test-only include patterns discovered from go test file annotations.
+  Extra include patterns discovered from Go file annotations.
   Each workspace:include directive accepts one pattern. Use multiple directives
   for multiple patterns.
   """
-  let testWorkspaceInclude(ws: Workspace!): [String!]! {
-    if (testFileInclude.length == 0) {
+  let workspaceInclude(ws: Workspace!, fileInclude: [String!]!, glob: String!): [String!]! {
+    if (fileInclude.length == 0) {
       [] :: [String!]!
     } else {
-      let testFiles = ws.directory("/", include: testFileInclude, exclude: exclude).glob("**/*_test.go")
-      if (testFiles.length == 0) {
+      let files = ws.directory("/", include: fileInclude, exclude: exclude).glob(glob)
+      if (files.length == 0) {
         [] :: [String!]!
       } else {
         ws
-          .directory("/", include: testFiles, exclude: exclude)
-          .search(pattern: "^\\s*//\\s*workspace:include\\s+\\S+\\s*$", paths: testFiles).{filePath, matchedLines}
+          .directory("/", include: files, exclude: exclude)
+          .search(pattern: "^\\s*//\\s*workspace:include\\s+\\S+\\s*$", paths: files).{filePath, matchedLines}
           .reduce([] :: [String!]!) { includes, match =>
-            let testDir = match.filePath.split("/").dropLast.join("/")
+            let fileDir = match.filePath.split("/").dropLast.join("/")
             let pattern = match
               .matchedLines
               .trimSpace
@@ -133,7 +125,7 @@ type Go {
               if (pattern.hasPrefix("/")) {
                 pattern.trimPrefix("/")
               } else {
-                (testDir + "/" + pattern).trimPrefix("/")
+                (fileDir + "/" + pattern).trimPrefix("/")
               },
             ]
           }
@@ -149,14 +141,14 @@ type Go {
       "/",
       include: include.map { pattern =>
         pattern.trimPrefix("./").trimPrefix("/")
-      },
+      } + workspaceInclude(ws, selectedPaths("**/*.go", "**/*.go"), "**/*.go"),
       exclude: exclude,
     )
     let testdata = ws.directory(
       "/",
       include: testdataInclude.map { pattern =>
         pattern.trimPrefix("./").trimPrefix("/")
-      } + testWorkspaceInclude(ws),
+      },
       exclude: exclude,
     )
     goModPaths(ws)
@@ -182,6 +174,20 @@ type Go {
     }
     layers.sync
     null
+  }
+
+  """
+  Run go generate in every discovered Go module.
+  """
+  pub generate(ws: Workspace!): Changeset! @generate {
+    let mods = modules(ws)
+    let before = mods.reduce(directory) { before, mod =>
+      before.withDirectory(mod.path, mod.source.directory(mod.path))
+    }
+    let after = mods.reduce(before) { after, mod =>
+      after.withDirectory(mod.path, mod.generate)
+    }
+    after.changes(before)
   }
 
 }
@@ -225,7 +231,6 @@ type GoModule {
       .withWorkdir("/ws")
       .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
       .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
-      .withExec(["go", "install", "github.com/dagger/otel-go/cmd/otelgotest@latest"])
   }
 
   """
@@ -237,10 +242,22 @@ type GoModule {
   }
 
   """
+  Module directory after running go generate.
+  """
+  pub generate: Directory! {
+    base
+      .withDirectory(".", source)
+      .withWorkdir(workdir)
+      .withExec(["go", "generate", "./..."])
+      .directory(".")
+  }
+
+  """
   Container state after running this module's test check.
   """
   let testExec: Container! {
     base
+      .withExec(["go", "install", "github.com/dagger/otel-go/cmd/otelgotest@latest"])
       .withDirectory(".", source)
       .withDirectory(".", testdata)
       # Nested Dagger clients find the workspace boundary by walking up to .git.
