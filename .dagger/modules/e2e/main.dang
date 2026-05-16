@@ -4,7 +4,16 @@ End-to-end checks for the Go module.
 type E2e {
   let generatedFixturePath: String! = "testdata/go-module-generate"
   let generatedFilePath: String! = generatedFixturePath + "/generated.go"
+  let baseFixturePath: String! = "testdata/go-module-custom-base"
+  let baseGeneratedFilePath: String! = baseFixturePath + "/generated.go"
   let emptyFixturePath: String! = "testdata/go-module-empty"
+
+  let base: Container! {
+    container
+      .from("golang:1.25-alpine")
+      .withEnvVariable("DAGGER_GO_CUSTOM_BASE", "yes")
+      .withNewFile("/custom-go-base", "yes\n")
+  }
 
   let assert(condition: Boolean!, message: String!): Void {
     if (condition == false) {
@@ -59,18 +68,70 @@ type E2e {
   }
 
   """
+  A custom base container must be used for Go helpers, tests, and generate.
+  """
+  pub baseCheck(ws: Workspace!): Void @check {
+    let tool = go(
+      base: base,
+      skipLintFilename: ".dagger-skip-lint-disabled",
+      skipTestFilename: ".dagger-skip-test-disabled",
+      skipGenerateFilename: ".dagger-skip-generate-disabled",
+    )
+    let mod = tool.module(ws, baseFixturePath)
+
+    assert(
+      tool.version == null,
+      "base-only constructor exposed a Go version for a black-box base image",
+    )
+
+    let conflict = try {
+      go(version: "1.25", base: base).version ?? "missing conflict"
+    } catch {
+      err => err.message
+    }
+    assert(
+      conflict.contains("version and base are mutually exclusive"),
+      "constructor did not reject version and base together: " + conflict,
+    )
+
+    let testDirs = mod.testDirectories(ws)
+    assert(
+      containsModulePath(testDirs.{path}, baseFixturePath),
+      "custom base test directory discovery did not include expected path",
+    )
+
+    mod.test(ws)
+
+    let changes = mod.generate(ws)
+    assert(
+      containsPath(changes.addedPaths, baseGeneratedFilePath),
+      "custom base generate did not add expected path: " + baseGeneratedFilePath,
+    )
+    assert(
+      changes.layer.file(baseGeneratedFilePath).contents.contains("GeneratedFromBase"),
+      "custom base generate did not produce expected contents",
+    )
+
+    null
+  }
+
+  """
   Per-module introspection fields must expose the source selection intermediates.
   """
   pub moduleIntrospectionCheck(ws: Workspace!): Void @check {
     let mod = go(version: "1.25").module(ws, "testdata/go-module-with-testdata/testdata")
 
     assert(
+      go().version == "1.26",
+      "default constructor did not expose default Go version",
+    )
+    assert(
       mod.path == "testdata/go-module-with-testdata",
       "module lookup did not snap to containing module: " + mod.path,
     )
     assert(
       mod.version == "1.25",
-      "module did not expose inherited Go version: " + mod.version,
+      "module did not expose inherited Go version: " + (mod.version ?? "<null>"),
     )
 
     let direct = go(version: "1.25").module(ws, "testdata/go-module-with-testdata/testdata", findUp: false)

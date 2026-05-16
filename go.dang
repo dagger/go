@@ -6,9 +6,56 @@ https://golang.org
 """
 type Go {
   """
-  Go version used for test and generate commands.
+  Go version used for the default Go base image. Null when a custom base is set.
   """
-  pub version: String! = "1.26"
+  pub version: String
+
+  """
+  Base image used for Go test, generate, and helper containers.
+  """
+  pub base: Container!
+
+  new(
+    """
+    Go version used for the default Go base image.
+    """
+    version: String = null,
+    """
+    Base image used for Go test, generate, and helper containers.
+    Mutually exclusive with version.
+    """
+    base: Container = null,
+    """
+    Extra workspace-root include patterns mounted for each module's Go commands.
+    Use this for fixtures, generator inputs, or other files not covered by the
+    built-in Go patterns.
+    """
+    includeExtraFiles: [String!]! = [],
+    """
+    Marker filename that skips lint checks when found at or above a Go module root.
+    """
+    skipLintFilename: String! = ".dagger-skip-go-lint",
+    """
+    Marker filename that skips tests when found at or above a Go module root.
+    """
+    skipTestFilename: String! = ".dagger-skip-go-test",
+    """
+    Marker filename that skips go generate when found at or above a Go module root.
+    """
+    skipGenerateFilename: String! = ".dagger-skip-go-generate",
+  ) {
+    if (version != null and base != null) {
+      raise "version and base are mutually exclusive"
+    } else {
+      self.version = if (base == null) { version ?? "1.26" } else { null }
+      self.base = base ?? container.from("golang:" + (version ?? "1.26") + "-alpine")
+      self.includeExtraFiles = includeExtraFiles
+      self.skipLintFilename = skipLintFilename
+      self.skipTestFilename = skipTestFilename
+      self.skipGenerateFilename = skipGenerateFilename
+      self
+    }
+  }
 
   """
   Extra workspace-root include patterns mounted for each module's Go commands.
@@ -67,6 +114,7 @@ type Go {
         GoModule(
           path: modPath,
           version: version,
+          baseImage: base,
           includeExtraFiles: includeExtraFiles,
           skipLintFilename: skipLintFilename,
           skipTestFilename: skipTestFilename,
@@ -133,6 +181,7 @@ type Go {
         path.trimPrefix("/")
       },
       version: version,
+      baseImage: base,
       includeExtraFiles: includeExtraFiles,
       skipLintFilename: skipLintFilename,
       skipTestFilename: skipTestFilename,
@@ -218,9 +267,14 @@ type GoModule {
   pub path: String!
 
   """
-  Go version used by this module's test and generate containers.
+  Go version configured on the root Go module. Null when a custom base is set.
   """
-  pub version: String!
+  pub version: String
+
+  """
+  Base image used by this module's Go containers.
+  """
+  let baseImage: Container!
 
   """
   Extra workspace-root include patterns mounted for this module's Go commands.
@@ -268,8 +322,7 @@ type GoModule {
   Base container for the Go include helper.
   """
   let goIncludesHelper(ws: Workspace!): Container! {
-    container
-      .from("golang:" + version + "-alpine")
+    baseImage
       .withoutEntrypoint
       .withWorkdir("/helpers/go-includes")
       .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
@@ -380,7 +433,7 @@ type GoModule {
           path: testPath,
           ws: ws,
           modulePath: path,
-          version: version,
+          baseImage: baseImage,
           includeExtraFiles: includeExtraFiles,
           skipTestFilename: skipTestFilename,
           testSkipMarkers: testSkipMarkers,
@@ -472,8 +525,7 @@ type GoModule {
   Base Go container before source files and commands are added.
   """
   pub base: Container! {
-    container
-      .from("golang:" + version + "-alpine")
+    baseImage
       .withoutEntrypoint
       .withWorkdir("/ws")
       .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
@@ -599,14 +651,14 @@ type GoDirectory {
   let modulePath: String!
 
   """
-  Go version used by this directory's test container.
-  """
-  let version: String!
-
-  """
   Extra workspace-root include patterns mounted for this directory's Go tests.
   """
   let includeExtraFiles: [String!]!
+
+  """
+  Base image used by this directory's Go containers.
+  """
+  let baseImage: Container!
 
   """
   Marker filename that skips tests when found at or above this directory's Go module root.
@@ -637,8 +689,7 @@ type GoDirectory {
   Base container for the Go include helper.
   """
   let goIncludesHelper: Container! {
-    container
-      .from("golang:" + version + "-alpine")
+    baseImage
       .withoutEntrypoint
       .withWorkdir("/helpers/go-includes")
       .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
@@ -709,8 +760,7 @@ type GoDirectory {
   Base Go container before source files and commands are added.
   """
   let base: Container! {
-    container
-      .from("golang:" + version + "-alpine")
+    baseImage
       .withoutEntrypoint
       .withWorkdir("/ws")
       .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
