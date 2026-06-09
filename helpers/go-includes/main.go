@@ -1,5 +1,6 @@
 // go.dang runs this helper to discover workspace include patterns.
-// It emits one include pattern per line.
+// Results are written to the path given by --output, one entry per line, so
+// they don't pollute the user's terminal as exec "logs".
 package main
 
 import (
@@ -28,38 +29,52 @@ func main() {
 	ctx := telemetry.Init(context.Background(), telemetry.Config{Detect: true})
 	defer telemetry.Close()
 
-	targetModule, testDirs, err := newTargetModuleFromArgs(ctx, os.Args[1:])
+	targetModule, testDirs, outputPath, err := newTargetModuleFromArgs(ctx, os.Args[1:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	out, err := os.Create(outputPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 	if testDirs {
-		err = targetModule.printTestDirectories(ctx, os.Stdout)
+		err = targetModule.printTestDirectories(ctx, out)
 	} else {
-		err = targetModule.printIncludes(ctx, os.Stdout)
+		err = targetModule.printIncludes(ctx, out)
 	}
 	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		_ = out.Close()
+		os.Exit(1)
+	}
+	if err := out.Close(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
 // newTargetModuleFromArgs parses CLI flags and resolves the requested module.
-func newTargetModuleFromArgs(ctx context.Context, cliArgs []string) (*targetModule, bool, error) {
+func newTargetModuleFromArgs(ctx context.Context, cliArgs []string) (*targetModule, bool, string, error) {
 	flags := flag.NewFlagSet("go-includes", flag.ExitOnError)
 	flags.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: go-includes [--lint] [--test] [--generate] [--test-dirs] [/DIR]")
+		fmt.Fprintln(os.Stderr, "usage: go-includes --output PATH [--lint] [--test] [--generate] [--test-dirs] [/DIR]")
 		flags.PrintDefaults()
 	}
 	lint := flags.Bool("lint", false, "include lint inputs")
 	test := flags.Bool("test", false, "include test inputs")
 	generate := flags.Bool("generate", false, "include generate inputs")
 	testDirs := flags.Bool("test-dirs", false, "print directories containing Go tests")
+	output := flags.String("output", "", "file to write results to (one entry per line)")
 	if err := flags.Parse(cliArgs); err != nil {
-		return nil, false, err
+		return nil, false, "", err
+	}
+	if *output == "" {
+		return nil, false, "", fmt.Errorf("--output is required")
 	}
 	if flags.NArg() > 1 {
-		return nil, false, fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
+		return nil, false, "", fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
 	}
 	if !*lint && !*test && !*generate && !*testDirs {
 		*test = true
@@ -68,22 +83,22 @@ func newTargetModuleFromArgs(ctx context.Context, cliArgs []string) (*targetModu
 	if flags.NArg() == 1 {
 		modulePath = flags.Arg(0)
 		if !strings.HasPrefix(modulePath, "/") {
-			return nil, false, fmt.Errorf("workspace path must be absolute: %s", modulePath)
+			return nil, false, "", fmt.Errorf("workspace path must be absolute: %s", modulePath)
 		}
 	}
 	ws, err := newWorkspace(ctx)
 	if err != nil {
-		return nil, false, err
+		return nil, false, "", err
 	}
 	moduleRoot, ok := ws.containingModuleDir(modulePath)
 	if !ok {
-		return nil, false, fmt.Errorf("no go.mod found containing path: %s", modulePath)
+		return nil, false, "", fmt.Errorf("no go.mod found containing path: %s", modulePath)
 	}
 	module, err := newTargetModule(ws, moduleRoot, *lint, *test, *generate)
 	if err != nil {
-		return nil, false, err
+		return nil, false, "", err
 	}
-	return module, *testDirs, nil
+	return module, *testDirs, *output, nil
 }
 
 // newTargetModule builds one target module with shared workspace and modes.

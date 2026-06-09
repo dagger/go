@@ -374,10 +374,11 @@ type GoModule {
   ): [String!]! {
     goIncludesHelper(ws)
       .withExec(
-        ["go-includes"] + includeFlags(lint, test, generate) + [workspacePath],
+        ["go-includes", "--output", "/output"] + includeFlags(lint, test, generate) + [workspacePath],
         experimentalPrivilegedNesting: true,
       )
-      .stdout
+      .file("/output")
+      .contents
       .split("\n")
       .filter { pattern => pattern != "" }
   }
@@ -388,10 +389,11 @@ type GoModule {
   pub testDirectories(ws: Workspace!): [GoDirectory!]! {
     goIncludesHelper(ws)
       .withExec(
-        ["go-includes", "--test-dirs", workspacePath],
+        ["go-includes", "--output", "/output", "--test-dirs", workspacePath],
         experimentalPrivilegedNesting: true,
       )
-      .stdout
+      .file("/output")
+      .contents
       .split("\n")
       .filter { testPath => testPath != "" }
       .map { testPath =>
@@ -680,10 +682,11 @@ type GoDirectory {
   let includeDiscovered: [String!]! {
     goIncludesHelper
       .withExec(
-        ["go-includes", "--test", workspacePath],
+        ["go-includes", "--output", "/output", "--test", workspacePath],
         experimentalPrivilegedNesting: true,
       )
-      .stdout
+      .file("/output")
+      .contents
       .split("\n")
       .filter { pattern => pattern != "" }
   }

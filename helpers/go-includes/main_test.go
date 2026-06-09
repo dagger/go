@@ -150,7 +150,7 @@ func TestInvalidQuotedDirectiveArg(t *testing.T) {
 }
 
 func TestRelativeCLIPathRejected(t *testing.T) {
-	_, _, err := newTargetModuleFromArgs(t.Context(), []string{"relative/module"})
+	_, _, _, err := newTargetModuleFromArgs(t.Context(), []string{"--output", "/tmp/out", "relative/module"})
 	if err == nil {
 		t.Fatal("expected error")
 	}
