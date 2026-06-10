@@ -435,6 +435,19 @@ type GoModule {
   Directories in this module containing Go test files.
   """
   pub testDirectories(ws: Workspace!): [GoDirectory!]! {
+    testDirectoryPaths(ws).map { testPath =>
+      GoDirectory(
+        path: testPath,
+        ws: ws,
+        modulePath: path,
+        baseImage: baseImage,
+        includeExtraFiles: includeExtraFiles,
+        skipTestPaths: skipTestPaths,
+      )
+    }
+  }
+
+  let testDirectoryPaths(ws: Workspace!): [String!]! {
     goIncludesHelper(ws)
       .withExec(
         ["go-includes", "--output", "/output", "--test-dirs", workspacePath],
@@ -444,16 +457,20 @@ type GoModule {
       .contents
       .split("\n")
       .filter { testPath => testPath != "" }
-      .map { testPath =>
-        GoDirectory(
-          path: testPath,
-          ws: ws,
-          modulePath: path,
-          baseImage: baseImage,
-          includeExtraFiles: includeExtraFiles,
-          skipTestPaths: skipTestPaths,
-        )
-      }
+  }
+
+  """
+  The test directories of this module, as a collection keyed by path.
+  """
+  pub testDirs(ws: Workspace!): GoTestDirs! {
+    GoTestDirs(
+      paths: testDirectoryPaths(ws),
+      ws: ws,
+      modulePath: path,
+      baseImage: baseImage,
+      includeExtraFiles: includeExtraFiles,
+      skipTestPaths: skipTestPaths,
+    )
   }
 
   """
@@ -649,6 +666,36 @@ type GoModule {
 """
 A workspace directory containing Go test files.
 """
+"""
+Test directories of a Go module, keyed by workspace-relative path.
+"""
+type GoTestDirs {
+  """
+  Workspace-relative test directory paths in discovery order.
+  """
+  pub paths: [String!]! @keys
+
+  let ws: Workspace!
+  let modulePath: String!
+  let baseImage: Container!
+  let includeExtraFiles: [String!]!
+  let skipTestPaths: [String!]!
+
+  """
+  Return the test directory with the given workspace-relative path.
+  """
+  pub directory(path: String!): GoDirectory! @get {
+    GoDirectory(
+      path: path,
+      ws: ws,
+      modulePath: modulePath,
+      baseImage: baseImage,
+      includeExtraFiles: includeExtraFiles,
+      skipTestPaths: skipTestPaths,
+    )
+  }
+}
+
 type GoDirectory {
   """
   Workspace-relative path of this directory.
@@ -805,4 +852,89 @@ type GoDirectory {
     null
   }
 
+  """
+  Go test container for this directory, before a test command is added.
+  """
+  pub testContainer(): Container! {
+    base
+      .withDirectory(".", source)
+      .withDirectory(".", testData)
+      .withWorkdir(path)
+  }
+
+  """
+  The tests in this directory, as a collection keyed by test name.
+  Skipped directories produce an empty collection.
+  """
+  pub tests(): GoTests! {
+    let names = if (skipTest) {
+      []
+    } else {
+      testContainer()
+        .withExec(["sh", "-c", "go test -list '.*' . | grep '^Test' || true"])
+        .stdout
+        .split("\n")
+        .filter { name => name != "" }
+    }
+    GoTests(names: names, dir: self)
+  }
+
+}
+
+"""
+Tests in a Go directory, keyed by test name.
+"""
+type GoTests {
+  """
+  Test names in listing order.
+  """
+  pub names: [String!]! @keys
+
+  let dir: GoDirectory!
+
+  """
+  Return the test with the given name.
+  """
+  pub test(name: String!): GoTest! @get {
+    GoTest(name: name, dir: dir)
+  }
+
+  """
+  Run every test in the current subset in a single go test invocation.
+  """
+  pub run(): Void @check {
+    if (names.length == 0) {
+      null
+    } else {
+      dir
+        .testContainer()
+        .withExec(["go", "test", "-run", "^(" + names.join("|") + ")$", "."])
+        .sync
+      null
+    }
+  }
+}
+
+"""
+A single Go test.
+"""
+type GoTest {
+  """
+  The test's name.
+  """
+  pub name: String!
+
+  let dir: GoDirectory!
+
+  """
+  Run this test. Batched through the collection when several tests are
+  selected together.
+  """
+  pub run(): Void @check {
+    dir
+      .testContainer()
+      .withExec(["go", "test", "-run", "^" + name + "$", "."])
+      .sync
+    null
+  }
 }
