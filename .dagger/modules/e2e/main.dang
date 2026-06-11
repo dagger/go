@@ -433,6 +433,56 @@ type E2e {
       ),
       "go:generate scoped include did not include generator support files",
     )
+
+    # Test directory collection surface and static test discovery.
+    # cross-include-b has two top-level Test functions in a single file —
+    # exercises ripgrep-based listing and multi-match handling.
+    let crossB = tool.module(ws, "fixtures/go-module-cross-include-b")
+    let crossBTestDirs = crossB.testDirs(ws)
+    assert(
+      containsPath(crossBTestDirs.keys, "fixtures/go-module-cross-include-b"),
+      "testDirs collection did not include expected test directory",
+    )
+    assert(
+      crossBTestDirs
+        .get(key: "fixtures/go-module-cross-include-b")
+        .path == "fixtures/go-module-cross-include-b",
+      "testDirs collection get did not return the requested directory",
+    )
+
+    let crossBTests = crossBTestDirs
+      .get(key: "fixtures/go-module-cross-include-b")
+      .tests()
+    assert(
+      crossBTests.keys.length == 2,
+      "tests collection did not discover expected number of tests",
+    )
+    assert(
+      containsPath(crossBTests.keys, "TestSiblingModuleDirectiveIncludeIsNotMounted"),
+      "tests collection did not include expected test name",
+    )
+    assert(
+      containsPath(crossBTests.keys, "TestSiblingModuleTestdataIsNotMounted"),
+      "tests collection did not include second test from same file",
+    )
+    assert(
+      crossBTests
+        .get(key: "TestSiblingModuleDirectiveIncludeIsNotMounted")
+        .name == "TestSiblingModuleDirectiveIncludeIsNotMounted",
+      "tests collection get did not return the requested test",
+    )
+
+    # Skip-configured directory should report no tests at all.
+    let skippedTests = tool
+      .module(ws, "testdata/go-module-excluded")
+      .testDirs(ws)
+      .get(key: "testdata/go-module-excluded")
+      .tests()
+    assert(
+      skippedTests.keys.length == 0,
+      "tests collection on a skipped directory was not empty",
+    )
+
     null
   }
 

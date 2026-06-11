@@ -865,15 +865,26 @@ type GoDirectory {
   """
   The tests in this directory, as a collection keyed by test name.
   Skipped directories produce an empty collection.
+
+  Test names are discovered by statically matching top-level test function
+  declarations in *_test.go files, without compiling or running go test.
   """
   pub tests(): GoTests! {
     let names = if (skipTest) {
       []
     } else {
-      testContainer()
-        .withExec(["sh", "-c", "go test -list '.*' . | grep '^Test' || true"])
-        .stdout
-        .split("\n")
+      let glob = if (path == ".") {
+        "*_test.go"
+      } else {
+        path.trimSuffix("/") + "/*_test.go"
+      }
+      ws
+        .directory("/", include: [glob])
+        .search(pattern: "^func Test\\w+\\(")
+        .{matchedLines}
+        .map { result =>
+          result.matchedLines.trimSpace.trimPrefix("func ").split("(")[0] ?? ""
+        }
         .filter { name => name != "" }
     }
     GoTests(names: names, dir: self)
