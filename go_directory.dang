@@ -1,0 +1,160 @@
+"""
+A workspace directory containing Go test files.
+"""
+type GoDirectory {
+  """
+  Workspace-relative path of this directory.
+  """
+  pub path: String!
+
+  """
+  Workspace containing this directory.
+  """
+  let ws: Workspace!
+
+  """
+  Workspace-relative path of this directory's Go module root.
+  """
+  let modulePath: String!
+
+  """
+  Extra workspace-root include patterns mounted for this directory's Go tests.
+  """
+  let includeExtraFiles: [String!]!
+
+  """
+  Base image used by this directory's Go containers.
+  """
+  let baseImage: Container!
+
+  """
+  Workspace-relative module roots or ancestor subtrees to skip for tests.
+  """
+  let skipTestPaths: [String!]!
+
+  """
+  Return a workspace-root path for a module-relative subpath.
+  """
+  let subpath(relativePath: String!): String! {
+    if (modulePath == ".") {
+      relativePath
+    } else {
+      modulePath.trimSuffix("/") + "/" + relativePath
+    }
+  }
+
+  """
+  Absolute workspace path for this directory's Go module root.
+  """
+  let workspacePath: String! {
+    if (modulePath == ".") { "/" } else { "/" + modulePath.trimSuffix("/") }
+  }
+
+  """
+  Base container for the Go include helper.
+  """
+  let goIncludesHelper: Container! {
+    baseImage
+      .withoutEntrypoint
+      .withWorkdir("/helpers/go-includes")
+      .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
+      .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+      .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
+      .withExec(["go", "build", "-o", "/usr/local/bin/go-includes", "."])
+      .withDirectory("/ws", directory)
+      .withWorkdir("/ws")
+      .withEnvVariable("DAGGER_GO_WORKSPACE_ID", toJSON(ws.id))
+  }
+
+  """
+  Whether this directory's module is at or below a configured test skip path.
+  """
+  let skipTest: Boolean! {
+    skipTestPaths.any { skipPath =>
+      let clean = skipPath.trimPrefix("/").trimSuffix("/")
+      clean == "." or clean == "" or modulePath == clean or modulePath.hasPrefix(clean + "/")
+    }
+  }
+
+  """
+  Additional workspace include patterns discovered for this directory's Go tests.
+  """
+  let includeDiscovered: [String!]! {
+    goIncludesHelper
+      .withExec(
+        ["go-includes", "--output", "/output", "--test", workspacePath],
+        experimentalPrivilegedNesting: true,
+      )
+      .file("/output")
+      .contents
+      .split("\n")
+      .filter { pattern => pattern != "" }
+  }
+
+  """
+  Final workspace include patterns used to build this directory's source.
+  """
+  let include: [String!]! {
+    includeExtraFiles + includeDiscovered
+  }
+
+  """
+  Workspace source mounted for this directory's Go tests.
+  """
+  let source: Directory! {
+    ws.directory("/", include: include)
+  }
+
+  """
+  Workspace testdata directories mounted while testing this directory.
+  """
+  let testData: Directory! {
+    ws.directory(
+      "/",
+      include: [
+        subpath("testdata/**"),
+        subpath("**/testdata/**"),
+      ],
+    )
+  }
+
+  """
+  Base Go container before source files and commands are added.
+  """
+  let base: Container! {
+    baseImage
+      .withoutEntrypoint
+      .withWorkdir("/ws")
+      .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
+      .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+  }
+
+  """
+  Container synced by this directory's test check.
+  """
+  let testExec: Container! {
+    if (skipTest) {
+      base
+        .withDirectory(".", ws.directory("/", include: [subpath("go.mod")]))
+        .withWorkdir(modulePath)
+    } else {
+      base
+        .withExec(["go", "install", "github.com/dagger/otel-go/cmd/otelgotest@main"])
+        .withDirectory(".", source)
+        .withDirectory(".", testData)
+        # Nested Dagger clients find the workspace boundary by walking up to .git.
+        .withNewFile(".git/HEAD", "ref: refs/heads/main\n")
+        .withWorkdir(path)
+        .withExec(["otelgotest"], experimentalPrivilegedNesting: true)
+    }
+  }
+
+  """
+  Run Go tests in this directory.
+  """
+  pub execute(): Void @check {
+    testExec.sync
+    null
+  }
+
+}
