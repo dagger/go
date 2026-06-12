@@ -1,0 +1,5 @@
+name = "dang-skill"
+engineVersion = "v0.20.6"
+
+[runtime]
+  source = "dang"

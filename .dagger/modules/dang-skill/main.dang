@@ -1,0 +1,31 @@
+"""
+Fetch the dang-language skill from vito/dang@main and install it into the
+workspace as skills/dang-language, with whole-directory symlinks from
+.claude/skills and .codex/skills so multiple agent runtimes pick it up.
+"""
+type DangSkill {
+  let upstreamRepo: String! = "https://github.com/vito/dang"
+  let upstreamPath: String! = ".agents/skills/dang-language"
+
+  """
+  Pull the latest dang-language skill from upstream and stage it under
+  skills/, ensuring .claude/skills and .codex/skills are symlinks to it.
+  """
+  pub generate(ws: Workspace!): Changeset! @generate {
+    let upstream = git(upstreamRepo).head.tree.directory(upstreamPath)
+
+    let before = ws.directory("/", include: [
+      "skills/**",
+      ".claude/skills",
+      ".codex/skills",
+    ])
+    let after = before
+      .withDirectory("skills/dang-language", upstream)
+      .withoutFile(".claude/skills")
+      .withSymlink(target: "../skills", linkName: ".claude/skills")
+      .withoutFile(".codex/skills")
+      .withSymlink(target: "../skills", linkName: ".codex/skills")
+
+    after.changes(before)
+  }
+}

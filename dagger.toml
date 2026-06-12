@@ -8,3 +8,6 @@ source = "github.com/dagger/dang-sdk"
 
 [modules.e2e]
 source = ".dagger/modules/e2e"
+
+[modules.dang-skill]
+source = ".dagger/modules/dang-skill"

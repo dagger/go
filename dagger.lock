@@ -1,0 +1,4 @@
+[["version","1"]]
+["","container.from",["docker.io/library/golang:1.26-alpine","linux/amd64"],"sha256:7a3e50096189ad57c9f9f865e7e4aa8585ed1585248513dc5cda498e2f41812c","pin"]
+["","git.head",["https://github.com/dagger/dang-sdk"],"25ab8892f3cc8b8161b054444f8027cd96274e78","float"]
+["","git.head",["https://github.com/vito/dang"],"4e1898fe2a44bb9b161ebd64c3ea3d8d275f3bcd","float"]
