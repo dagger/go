@@ -80,7 +80,8 @@ type Go {
   pub skipGenerate: [String!]! = []
 
   """
-  Return every Go module discovered from workspace go.mod files.
+  Return Go modules discovered from workspace go.mod files, as a collection
+  keyed by module root path.
   Optional include/exclude patterns filter discovered module root directories.
   """
   pub modules(
@@ -90,8 +91,14 @@ type Go {
     includeSkipLint: Boolean! = true,
     includeSkipTest: Boolean! = true,
     includeSkipGenerate: Boolean! = true,
-  ): [GoModule!]! {
-    ws
+  ): GoModules! {
+    # Single workspace-wide snapshot of every *_test.go file, materialized
+    # once at this Workspace boundary and threaded down through the
+    # collection so GoDirectory.tests() can search/filter without ever
+    # touching Workspace again. Functions taking Workspace always invalidate;
+    # operations on a Directory receiver cache by content hash.
+    let testFilesDir = ws.directory("/", include: ["**/*_test.go"])
+    let paths = ws
       .directory("/", include: ["**/go.mod"])
       .glob("**/go.mod")
       .map { modPath =>
@@ -109,6 +116,7 @@ type Go {
           skipLintPaths: skipLint,
           skipTestPaths: skipTest,
           skipGeneratePaths: skipGenerate,
+          testFilesDir: testFilesDir,
         )
       }
       .filter { mod =>
@@ -116,6 +124,18 @@ type Go {
         (includeSkipTest or mod.skipTest(ws) == false) and
         (includeSkipGenerate or mod.skipGenerate(ws) == false)
       }
+      .map { mod => mod.path }
+
+    GoModules(
+      paths: paths,
+      version: version,
+      baseImage: base,
+      includeExtraFiles: includeExtraFiles,
+      skipLintPaths: skipLint,
+      skipTestPaths: skipTest,
+      skipGeneratePaths: skipGenerate,
+      testFilesDir: testFilesDir,
+    )
   }
 
   let modulePathIncluded(
@@ -163,6 +183,7 @@ type Go {
       skipLintPaths: skipLint,
       skipTestPaths: skipTest,
       skipGeneratePaths: skipGenerate,
+      testFilesDir: ws.directory("/", include: ["**/*_test.go"]),
     )
   }
 
@@ -171,7 +192,9 @@ type Go {
   Modules configured to skip lint are skipped.
   """
   pub lintAll(ws: Workspace!): Void @check {
-    let layers = modules(ws, includeSkipLint: false).reduce(directory) { layers, mod =>
+    let mods = modules(ws, includeSkipLint: false)
+    let layers = mods.paths.reduce(directory) { layers, path =>
+      let mod = mods.module(path)
       layers.withDirectory(
         mod.path,
         directory.withFile("go.mod", mod.lintExec(ws).file("go.mod")),
@@ -190,8 +213,9 @@ type Go {
   Modules configured to skip tests are skipped.
   """
   pub testAll(ws: Workspace!): Void @check {
-    let mods = modules(ws, includeSkipTest: false)
-    let layers = mods.reduce(directory) { layers, mod =>
+    let collection = modules(ws, includeSkipTest: false)
+    let layers = collection.paths.reduce(directory) { layers, path =>
+      let mod = collection.module(path)
       layers.withDirectory(
         mod.path,
         directory.withFile("go.mod", mod.testExec(ws).file("go.mod")),
@@ -211,7 +235,8 @@ type Go {
   are skipped.
   """
   pub generateAll(ws: Workspace!): Changeset! @generate {
-    let mods = modules(ws).filter { mod =>
+    let collection = modules(ws)
+    let mods = collection.paths.map { path => collection.module(path) }.filter { mod =>
       mod.skipGenerate(ws) == false and mod.hasGenerateDirectives(ws)
     }
 
@@ -229,6 +254,40 @@ type Go {
     after.changes(before)
   }
 
+}
+
+"""
+Go modules discovered in a workspace, keyed by module root path.
+"""
+type GoModules {
+  """
+  Workspace-relative module root paths in discovery order.
+  """
+  pub paths: [String!]! @keys
+
+  let version: String
+  let baseImage: Container!
+  let includeExtraFiles: [String!]!
+  let skipLintPaths: [String!]!
+  let skipTestPaths: [String!]!
+  let skipGeneratePaths: [String!]!
+  let testFilesDir: Directory!
+
+  """
+  Return the discovered Go module with the given workspace-relative root path.
+  """
+  pub module(path: String!): GoModule! @get {
+    GoModule(
+      path: path,
+      version: version,
+      baseImage: baseImage,
+      includeExtraFiles: includeExtraFiles,
+      skipLintPaths: skipLintPaths,
+      skipTestPaths: skipTestPaths,
+      skipGeneratePaths: skipGeneratePaths,
+      testFilesDir: testFilesDir,
+    )
+  }
 }
 
 """
@@ -269,6 +328,13 @@ type GoModule {
   Workspace-relative module roots or ancestor subtrees to skip for go generate.
   """
   let skipGeneratePaths: [String!]!
+
+  """
+  Workspace-wide snapshot of every *_test.go file, threaded down from the
+  Go.modules / Go.module constructor. Used by GoDirectory.tests so that
+  test discovery never crosses Workspace again.
+  """
+  let testFilesDir: Directory!
 
   """
   Return a workspace-root path for a module-relative subpath.
@@ -387,6 +453,20 @@ type GoModule {
   Directories in this module containing Go test files.
   """
   pub testDirectories(ws: Workspace!): [GoDirectory!]! {
+    testDirectoryPaths(ws).map { testPath =>
+      GoDirectory(
+        path: testPath,
+        ws: ws,
+        modulePath: path,
+        baseImage: baseImage,
+        includeExtraFiles: includeExtraFiles,
+        skipTestPaths: skipTestPaths,
+        testFilesDir: testFilesDir,
+      )
+    }
+  }
+
+  let testDirectoryPaths(ws: Workspace!): [String!]! {
     goIncludesHelper(ws)
       .withExec(
         ["go-includes", "--output", "/output", "--test-dirs", workspacePath],
@@ -396,16 +476,21 @@ type GoModule {
       .contents
       .split("\n")
       .filter { testPath => testPath != "" }
-      .map { testPath =>
-        GoDirectory(
-          path: testPath,
-          ws: ws,
-          modulePath: path,
-          baseImage: baseImage,
-          includeExtraFiles: includeExtraFiles,
-          skipTestPaths: skipTestPaths,
-        )
-      }
+  }
+
+  """
+  The test directories of this module, as a collection keyed by path.
+  """
+  pub testDirs(ws: Workspace!): GoTestDirs! {
+    GoTestDirs(
+      paths: testDirectoryPaths(ws),
+      ws: ws,
+      modulePath: path,
+      baseImage: baseImage,
+      includeExtraFiles: includeExtraFiles,
+      skipTestPaths: skipTestPaths,
+      testFilesDir: testFilesDir,
+    )
   }
 
   """
@@ -601,6 +686,38 @@ type GoModule {
 """
 A workspace directory containing Go test files.
 """
+"""
+Test directories of a Go module, keyed by workspace-relative path.
+"""
+type GoTestDirs {
+  """
+  Workspace-relative test directory paths in discovery order.
+  """
+  pub paths: [String!]! @keys
+
+  let ws: Workspace!
+  let modulePath: String!
+  let baseImage: Container!
+  let includeExtraFiles: [String!]!
+  let skipTestPaths: [String!]!
+  let testFilesDir: Directory!
+
+  """
+  Return the test directory with the given workspace-relative path.
+  """
+  pub directory(path: String!): GoDirectory! @get {
+    GoDirectory(
+      path: path,
+      ws: ws,
+      modulePath: modulePath,
+      baseImage: baseImage,
+      includeExtraFiles: includeExtraFiles,
+      skipTestPaths: skipTestPaths,
+      testFilesDir: testFilesDir,
+    )
+  }
+}
+
 type GoDirectory {
   """
   Workspace-relative path of this directory.
@@ -631,6 +748,13 @@ type GoDirectory {
   Workspace-relative module roots or ancestor subtrees to skip for tests.
   """
   let skipTestPaths: [String!]!
+
+  """
+  Workspace-wide snapshot of every *_test.go file, threaded down from the
+  parent collection. tests() searches/filters this directory so the cost
+  is paid once per session (Directory receiver = content-addressed cache).
+  """
+  let testFilesDir: Directory!
 
   """
   Return a workspace-root path for a module-relative subpath.
@@ -757,4 +881,108 @@ type GoDirectory {
     null
   }
 
+  """
+  Go test container for this directory, before a test command is added.
+  """
+  pub testContainer(): Container! {
+    base
+      .withDirectory(".", source)
+      .withDirectory(".", testData)
+      .withWorkdir(path)
+  }
+
+  """
+  The tests in this directory, as a collection keyed by test name.
+  Skipped directories produce an empty collection.
+
+  Test names are discovered by statically matching top-level test function
+  declarations in *_test.go files, without compiling or running go test.
+
+  Search runs against testFilesDir, a Directory threaded from the parent
+  collection. The search arguments are identical for every GoDirectory,
+  so the result is cached once per session and reused; per-directory
+  restriction is a pure-Dang filter on the returned filePath.
+  """
+  pub tests(): GoTests! {
+    let names = if (skipTest) {
+      []
+    } else {
+      let prefix = if (path == ".") { "" } else { path.trimSuffix("/") + "/" }
+      testFilesDir
+        .search(pattern: "^func Test\\w+\\(")
+        .{filePath, matchedLines}
+        .filter { result =>
+          if (path == ".") {
+            result.filePath.contains("/") == false
+          } else {
+            result.filePath.hasPrefix(prefix) and
+              result.filePath.trimPrefix(prefix).contains("/") == false
+          }
+        }
+        .map { result =>
+          result.matchedLines.trimSpace.trimPrefix("func ").split("(")[0] ?? ""
+        }
+        .filter { name => name != "" }
+    }
+    GoTests(names: names, dir: self)
+  }
+
+}
+
+"""
+Tests in a Go directory, keyed by test name.
+"""
+type GoTests {
+  """
+  Test names in listing order.
+  """
+  pub names: [String!]! @keys
+
+  let dir: GoDirectory!
+
+  """
+  Return the test with the given name.
+  """
+  pub test(name: String!): GoTest! @get {
+    GoTest(name: name, dir: dir)
+  }
+
+  """
+  Run every test in the current subset in a single go test invocation.
+  """
+  pub run(): Void @check {
+    if (names.length == 0) {
+      null
+    } else {
+      dir
+        .testContainer()
+        .withExec(["go", "test", "-run", "^(" + names.join("|") + ")$", "."])
+        .sync
+      null
+    }
+  }
+}
+
+"""
+A single Go test.
+"""
+type GoTest {
+  """
+  The test's name.
+  """
+  pub name: String!
+
+  let dir: GoDirectory!
+
+  """
+  Run this test. Batched through the collection when several tests are
+  selected together.
+  """
+  pub run(): Void @check {
+    dir
+      .testContainer()
+      .withExec(["go", "test", "-run", "^" + name + "$", "."])
+      .sync
+    null
+  }
 }

@@ -46,10 +46,8 @@ type E2e {
       .length > 0
   }
 
-  let containsModulePath(mods: [{{path: String!}}!]!, want: String!): Boolean! {
-    mods
-      .filter { mod => mod.path == want }
-      .length > 0
+  let containsModulePath(paths: [String!]!, want: String!): Boolean! {
+    containsPath(paths, want)
   }
 
   """
@@ -112,7 +110,7 @@ type E2e {
 
     let testDirs = mod.testDirectories(ws)
     assert(
-      containsModulePath(testDirs.{path}, baseFixturePath),
+      containsModulePath(testDirs.{path}.map { dir => dir.path }, baseFixturePath),
       "custom base test directory discovery did not include expected path",
     )
 
@@ -157,7 +155,8 @@ type E2e {
     )
 
     let tool = go(version: "1.26.1", skipLint: skipLint, skipTest: skipTest, skipGenerate: skipGenerate)
-    let allModulePaths = tool.modules(ws).{path}
+    let allModules = tool.modules(ws)
+    let allModulePaths = allModules.keys
     assert(
       containsModulePath(allModulePaths, "fixtures/go-module-cross-include-a"),
       "unfiltered modules did not include expected fixture module",
@@ -170,10 +169,18 @@ type E2e {
       containsModulePath(allModulePaths, "testdata/go-module-excluded"),
       "unfiltered modules did not include skipped fixture module by default",
     )
+    assert(
+      allModules.get(key: "testdata/go-module-with-testdata").path == "testdata/go-module-with-testdata",
+      "module collection get did not return the requested module",
+    )
+    assert(
+      allModules.subset(keys: ["fixtures/go-module-cross-include-a"]).keys.length == 1,
+      "module collection subset did not narrow to the requested keys",
+    )
 
     let includedModulePaths = tool
       .modules(ws, include: ["fixtures/go-module-cross-include-a"])
-      .{path}
+      .keys
     assert(
       containsModulePath(includedModulePaths, "fixtures/go-module-cross-include-a"),
       "modules include filter did not include matching module root",
@@ -185,7 +192,7 @@ type E2e {
 
     let excludedModulePaths = tool
       .modules(ws, exclude: ["fixtures/go-module-cross-include-a"])
-      .{path}
+      .keys
     assert(
       containsModulePath(excludedModulePaths, "fixtures/go-module-cross-include-a") == false,
       "modules exclude filter included excluded module root",
@@ -197,7 +204,7 @@ type E2e {
         include: ["fixtures/go-module-cross-include-*"],
         exclude: ["fixtures/go-module-cross-include-b"],
       )
-      .{path}
+      .keys
     assert(
       containsModulePath(combinedModulePaths, "fixtures/go-module-cross-include-a"),
       "modules combined filters did not include matching module root",
@@ -209,7 +216,7 @@ type E2e {
 
     let contentMatchedModulePaths = tool
       .modules(ws, include: ["**/module-a-only.data"])
-      .{path}
+      .keys
     assert(
       containsModulePath(contentMatchedModulePaths, "fixtures/go-module-cross-include-a"),
       "modules include filter did not match module directory contents",
@@ -221,7 +228,7 @@ type E2e {
 
     let lintSkippedModulePaths = tool
       .modules(ws, includeSkipLint: false)
-      .{path}
+      .keys
     assert(
       containsModulePath(lintSkippedModulePaths, "testdata/go-module-excluded") == false,
       "modules includeSkipLint false included lint-skipped module",
@@ -241,7 +248,7 @@ type E2e {
 
     let testSkippedModulePaths = tool
       .modules(ws, includeSkipTest: false)
-      .{path}
+      .keys
     assert(
       containsModulePath(testSkippedModulePaths, "testdata/go-module-excluded") == false,
       "modules includeSkipTest false included test-skipped module",
@@ -261,7 +268,7 @@ type E2e {
 
     let generateSkippedModulePaths = tool
       .modules(ws, includeSkipGenerate: false)
-      .{path}
+      .keys
     assert(
       containsModulePath(generateSkippedModulePaths, "testdata/go-module-excluded") == false,
       "modules includeSkipGenerate false included generate-skipped module",
@@ -426,6 +433,56 @@ type E2e {
       ),
       "go:generate scoped include did not include generator support files",
     )
+
+    # Test directory collection surface and static test discovery.
+    # cross-include-b has two top-level Test functions in a single file —
+    # exercises ripgrep-based listing and multi-match handling.
+    let crossB = tool.module(ws, "fixtures/go-module-cross-include-b")
+    let crossBTestDirs = crossB.testDirs(ws)
+    assert(
+      containsPath(crossBTestDirs.keys, "fixtures/go-module-cross-include-b"),
+      "testDirs collection did not include expected test directory",
+    )
+    assert(
+      crossBTestDirs
+        .get(key: "fixtures/go-module-cross-include-b")
+        .path == "fixtures/go-module-cross-include-b",
+      "testDirs collection get did not return the requested directory",
+    )
+
+    let crossBTests = crossBTestDirs
+      .get(key: "fixtures/go-module-cross-include-b")
+      .tests()
+    assert(
+      crossBTests.keys.length == 2,
+      "tests collection did not discover expected number of tests",
+    )
+    assert(
+      containsPath(crossBTests.keys, "TestSiblingModuleDirectiveIncludeIsNotMounted"),
+      "tests collection did not include expected test name",
+    )
+    assert(
+      containsPath(crossBTests.keys, "TestSiblingModuleTestdataIsNotMounted"),
+      "tests collection did not include second test from same file",
+    )
+    assert(
+      crossBTests
+        .get(key: "TestSiblingModuleDirectiveIncludeIsNotMounted")
+        .name == "TestSiblingModuleDirectiveIncludeIsNotMounted",
+      "tests collection get did not return the requested test",
+    )
+
+    # Skip-configured directory should report no tests at all.
+    let skippedTests = tool
+      .module(ws, "testdata/go-module-excluded")
+      .testDirs(ws)
+      .get(key: "testdata/go-module-excluded")
+      .tests()
+    assert(
+      skippedTests.keys.length == 0,
+      "tests collection on a skipped directory was not empty",
+    )
+
     null
   }
 
