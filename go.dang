@@ -92,6 +92,12 @@ type Go {
     includeSkipTest: Boolean! = true,
     includeSkipGenerate: Boolean! = true,
   ): GoModules! {
+    # Single workspace-wide snapshot of every *_test.go file, materialized
+    # once at this Workspace boundary and threaded down through the
+    # collection so GoDirectory.tests() can search/filter without ever
+    # touching Workspace again. Functions taking Workspace always invalidate;
+    # operations on a Directory receiver cache by content hash.
+    let testFilesDir = ws.directory("/", include: ["**/*_test.go"])
     let paths = ws
       .directory("/", include: ["**/go.mod"])
       .glob("**/go.mod")
@@ -110,6 +116,7 @@ type Go {
           skipLintPaths: skipLint,
           skipTestPaths: skipTest,
           skipGeneratePaths: skipGenerate,
+          testFilesDir: testFilesDir,
         )
       }
       .filter { mod =>
@@ -127,6 +134,7 @@ type Go {
       skipLintPaths: skipLint,
       skipTestPaths: skipTest,
       skipGeneratePaths: skipGenerate,
+      testFilesDir: testFilesDir,
     )
   }
 
@@ -175,6 +183,7 @@ type Go {
       skipLintPaths: skipLint,
       skipTestPaths: skipTest,
       skipGeneratePaths: skipGenerate,
+      testFilesDir: ws.directory("/", include: ["**/*_test.go"]),
     )
   }
 
@@ -262,6 +271,7 @@ type GoModules {
   let skipLintPaths: [String!]!
   let skipTestPaths: [String!]!
   let skipGeneratePaths: [String!]!
+  let testFilesDir: Directory!
 
   """
   Return the discovered Go module with the given workspace-relative root path.
@@ -275,6 +285,7 @@ type GoModules {
       skipLintPaths: skipLintPaths,
       skipTestPaths: skipTestPaths,
       skipGeneratePaths: skipGeneratePaths,
+      testFilesDir: testFilesDir,
     )
   }
 }
@@ -317,6 +328,13 @@ type GoModule {
   Workspace-relative module roots or ancestor subtrees to skip for go generate.
   """
   let skipGeneratePaths: [String!]!
+
+  """
+  Workspace-wide snapshot of every *_test.go file, threaded down from the
+  Go.modules / Go.module constructor. Used by GoDirectory.tests so that
+  test discovery never crosses Workspace again.
+  """
+  let testFilesDir: Directory!
 
   """
   Return a workspace-root path for a module-relative subpath.
@@ -443,6 +461,7 @@ type GoModule {
         baseImage: baseImage,
         includeExtraFiles: includeExtraFiles,
         skipTestPaths: skipTestPaths,
+        testFilesDir: testFilesDir,
       )
     }
   }
@@ -470,6 +489,7 @@ type GoModule {
       baseImage: baseImage,
       includeExtraFiles: includeExtraFiles,
       skipTestPaths: skipTestPaths,
+      testFilesDir: testFilesDir,
     )
   }
 
@@ -680,6 +700,7 @@ type GoTestDirs {
   let baseImage: Container!
   let includeExtraFiles: [String!]!
   let skipTestPaths: [String!]!
+  let testFilesDir: Directory!
 
   """
   Return the test directory with the given workspace-relative path.
@@ -692,6 +713,7 @@ type GoTestDirs {
       baseImage: baseImage,
       includeExtraFiles: includeExtraFiles,
       skipTestPaths: skipTestPaths,
+      testFilesDir: testFilesDir,
     )
   }
 }
@@ -726,6 +748,13 @@ type GoDirectory {
   Workspace-relative module roots or ancestor subtrees to skip for tests.
   """
   let skipTestPaths: [String!]!
+
+  """
+  Workspace-wide snapshot of every *_test.go file, threaded down from the
+  parent collection. tests() searches/filters this directory so the cost
+  is paid once per session (Directory receiver = content-addressed cache).
+  """
+  let testFilesDir: Directory!
 
   """
   Return a workspace-root path for a module-relative subpath.
@@ -868,20 +897,28 @@ type GoDirectory {
 
   Test names are discovered by statically matching top-level test function
   declarations in *_test.go files, without compiling or running go test.
+
+  Search runs against testFilesDir, a Directory threaded from the parent
+  collection. The search arguments are identical for every GoDirectory,
+  so the result is cached once per session and reused; per-directory
+  restriction is a pure-Dang filter on the returned filePath.
   """
   pub tests(): GoTests! {
     let names = if (skipTest) {
       []
     } else {
-      let glob = if (path == ".") {
-        "*_test.go"
-      } else {
-        path.trimSuffix("/") + "/*_test.go"
-      }
-      ws
-        .directory("/", include: [glob])
+      let prefix = if (path == ".") { "" } else { path.trimSuffix("/") + "/" }
+      testFilesDir
         .search(pattern: "^func Test\\w+\\(")
-        .{matchedLines}
+        .{filePath, matchedLines}
+        .filter { result =>
+          if (path == ".") {
+            result.filePath.contains("/") == false
+          } else {
+            result.filePath.hasPrefix(prefix) and
+              result.filePath.trimPrefix(prefix).contains("/") == false
+          }
+        }
         .map { result =>
           result.matchedLines.trimSpace.trimPrefix("func ").split("(")[0] ?? ""
         }
