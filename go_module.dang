@@ -23,19 +23,19 @@ type GoModule {
   pub includeExtraFiles: [String!]!
 
   """
-  Workspace-relative module roots or ancestor subtrees to skip for lint checks.
+  Gitignore-style globs selecting which module roots to lint.
   """
-  let skipLintPaths: [String!]!
+  let lintPatterns: [String!]!
 
   """
-  Workspace-relative module roots or ancestor subtrees to skip for tests.
+  Gitignore-style globs selecting which module roots to test.
   """
-  let skipTestPaths: [String!]!
+  let testPatterns: [String!]!
 
   """
-  Workspace-relative module roots or ancestor subtrees to skip for go generate.
+  Gitignore-style globs selecting which module roots to run go generate in.
   """
-  let skipGeneratePaths: [String!]!
+  let generatePatterns: [String!]!
 
   """
   Return a workspace-root path for a module-relative subpath.
@@ -72,24 +72,24 @@ type GoModule {
   }
 
   """
-  Whether this module or an ancestor subtree is configured to skip lint.
+  Whether this module falls outside the configured lint selection.
   """
   pub skipLint(ws: Workspace!): Boolean! {
-    hasSkipPath(skipLintPaths)
+    outOfScope(lintPatterns)
   }
 
   """
-  Whether this module or an ancestor subtree is configured to skip tests.
+  Whether this module falls outside the configured test selection.
   """
   pub skipTest(ws: Workspace!): Boolean! {
-    hasSkipPath(skipTestPaths)
+    outOfScope(testPatterns)
   }
 
   """
-  Whether this module or an ancestor subtree is configured to skip go generate.
+  Whether this module falls outside the configured go generate selection.
   """
   pub skipGenerate(ws: Workspace!): Boolean! {
-    hasSkipPath(skipGeneratePaths)
+    outOfScope(generatePatterns)
   }
 
   """
@@ -119,15 +119,32 @@ type GoModule {
   }
 
   """
-  Whether this module root is at or below a configured skip path.
+  Whether this module root falls outside the selection `patterns`.
 
-  A path matches the module root exactly or any subtree below it. "." matches
-  the root module only; "*" matches every module.
+  Matching is on the module root path only — no workspace files are read. A
+  bare pattern includes; a "!"-prefixed pattern excludes. With no include
+  pattern, every module is included. A module is in scope when it matches an
+  include and no exclude; an exclude always wins regardless of order.
   """
-  let hasSkipPath(skipPaths: [String!]!): Boolean! {
-    skipPaths.any { skipPath =>
-      let clean = skipPath.trimPrefix("/").trimSuffix("/")
-      clean == "*" or path == clean or path.hasPrefix(clean + "/")
+  let outOfScope(patterns: [String!]!): Boolean! {
+    let included = patterns.filter { p => p.hasPrefix("!") == false }
+    let excluded = patterns.filter { p => p.hasPrefix("!") }.map { p => p.trimPrefix("!") }
+    let isIncluded = included.length == 0 or included.any { p => matchesModulePath(p) }
+    let isExcluded = excluded.any { p => matchesModulePath(p) }
+    isIncluded == false or isExcluded
+  }
+
+  """
+  Whether this module root matches a single glob: "**"/"*" match everything,
+  "X/**" or bare "X" match X and any module below it.
+  """
+  let matchesModulePath(pattern: String!): Boolean! {
+    let p = pattern.trimPrefix("/").trimSuffix("/")
+    if (p == "**" or p == "*") {
+      true
+    } else {
+      let prefix = p.trimSuffix("/**")
+      path == prefix or path.hasPrefix(prefix + "/")
     }
   }
 
@@ -173,7 +190,7 @@ type GoModule {
           modulePath: path,
           baseImage: baseImage,
           includeExtraFiles: includeExtraFiles,
-          skipTestPaths: skipTestPaths,
+          testPatterns: testPatterns,
         )
       }
   }

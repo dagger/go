@@ -32,20 +32,23 @@ type Go {
     """
     includeExtraFiles: [String!]! = [],
     """
-    Workspace-relative module roots or ancestor subtrees to skip for lint checks.
-    Use "." for the root module only, or "*" for every module.
+    Module roots to lint. A bare pattern selects, a "!"-prefixed pattern
+    excludes, and an exclude always wins (order does not matter). With no
+    selecting pattern, every module is linted. Supported patterns: "**" or "*"
+    (all modules), and "X" or "X/**" (module X and any module below it); other
+    glob forms (mid-path "**", single-segment "*") are not interpreted. For
+    example ["**", "!docs"] lints all but docs; ["e2e/**"] lints only e2e;
+    ["!**"] lints nothing.
     """
-    skipLint: [String!]! = [],
+    lint: [String!]! = ["**"],
     """
-    Workspace-relative module roots or ancestor subtrees to skip for tests.
-    Use "." for the root module only, or "*" for every module.
+    Module roots to test. Same selection rules as `lint`.
     """
-    skipTest: [String!]! = [],
+    test: [String!]! = ["**"],
     """
-    Workspace-relative module roots or ancestor subtrees to skip for go generate.
-    Use "." for the root module only, or "*" for every module.
+    Module roots to run go generate in. Same selection rules as `lint`.
     """
-    skipGenerate: [String!]! = [],
+    generate: [String!]! = ["**"],
   ) {
     if (version != null and base != null) {
       raise "version and base are mutually exclusive"
@@ -53,9 +56,9 @@ type Go {
       self.version = if (base == null) { version ?? "1.26" } else { null }
       self.base = base ?? container.from("golang:" + (version ?? "1.26") + "-alpine")
       self.includeExtraFiles = includeExtraFiles
-      self.skipLint = skipLint
-      self.skipTest = skipTest
-      self.skipGenerate = skipGenerate
+      self.lint = lint
+      self.test = test
+      self.generate = generate
       self
     }
   }
@@ -68,19 +71,19 @@ type Go {
   pub includeExtraFiles: [String!]! = []
 
   """
-  Workspace-relative module roots or ancestor subtrees to skip for lint checks.
+  Module roots to lint ("!" excludes; see the `lint` constructor argument).
   """
-  pub skipLint: [String!]! = []
+  pub lint: [String!]! = ["**"]
 
   """
-  Workspace-relative module roots or ancestor subtrees to skip for tests.
+  Module roots to test ("!" excludes; see the `lint` constructor argument).
   """
-  pub skipTest: [String!]! = []
+  pub test: [String!]! = ["**"]
 
   """
-  Workspace-relative module roots or ancestor subtrees to skip for go generate.
+  Module roots to run go generate in ("!" excludes; see `lint`).
   """
-  pub skipGenerate: [String!]! = []
+  pub generate: [String!]! = ["**"]
 
   """
   Return every Go module discovered from workspace go.mod files.
@@ -109,9 +112,9 @@ type Go {
           version: version,
           baseImage: base,
           includeExtraFiles: includeExtraFiles,
-          skipLintPaths: skipLint,
-          skipTestPaths: skipTest,
-          skipGeneratePaths: skipGenerate,
+          lintPatterns: lint,
+          testPatterns: test,
+          generatePatterns: generate,
         )
       }
       .filter { mod =>
@@ -163,9 +166,9 @@ type Go {
       version: version,
       baseImage: base,
       includeExtraFiles: includeExtraFiles,
-      skipLintPaths: skipLint,
-      skipTestPaths: skipTest,
-      skipGeneratePaths: skipGenerate,
+      lintPatterns: lint,
+      testPatterns: test,
+      generatePatterns: generate,
     )
   }
 

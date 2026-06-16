@@ -7,23 +7,26 @@ type E2e {
   let baseFixturePath: String! = "testdata/go-module-custom-base"
   let baseGeneratedFilePath: String! = baseFixturePath + "/generated.go"
   let emptyFixturePath: String! = "testdata/go-module-empty"
-  let skipLint: [String!]! = [
-    baseFixturePath,
-    emptyFixturePath,
-    "testdata/go-module-excluded",
-    "testdata/go-module-skip-tree",
+  let lint: [String!]! = [
+    "**",
+    "!" + baseFixturePath,
+    "!" + emptyFixturePath,
+    "!testdata/go-module-excluded",
+    "!testdata/go-module-skip-tree",
   ]
-  let skipTest: [String!]! = [
-    baseFixturePath,
-    emptyFixturePath,
-    "testdata/go-module-excluded",
-    "testdata/go-module-skip-tree",
+  let test: [String!]! = [
+    "**",
+    "!" + baseFixturePath,
+    "!" + emptyFixturePath,
+    "!testdata/go-module-excluded",
+    "!testdata/go-module-skip-tree",
   ]
-  let skipGenerate: [String!]! = [
-    "helpers/go-includes",
-    baseFixturePath,
-    "testdata/go-module-excluded",
-    "testdata/go-module-skip-tree",
+  let generate: [String!]! = [
+    "**",
+    "!helpers/go-includes",
+    "!" + baseFixturePath,
+    "!testdata/go-module-excluded",
+    "!testdata/go-module-skip-tree",
   ]
 
   let base: Container! {
@@ -53,10 +56,18 @@ type E2e {
   }
 
   """
+  Whether a module at modPath is excluded from generate selection `patterns`.
+  Uses findUp: false so modPath need not be a real module on disk.
+  """
+  let selectsOut(ws: Workspace!, patterns: [String!]!, modPath: String!): Boolean! {
+    go(version: "1.26.1", generate: patterns).module(ws, modPath, findUp: false).skipGenerate(ws)
+  }
+
+  """
   Run testAll while respecting per-module skip configuration.
   """
   pub singleModuleCheck(ws: Workspace!): Void @check {
-    let tool = go(version: "1.26.1", skipLint: skipLint, skipTest: skipTest, skipGenerate: skipGenerate)
+    let tool = go(version: "1.26.1", lint: lint, test: test, generate: generate)
     tool.lintAll(ws)
     tool.testAll(ws)
     tool.module(ws, "testdata/go-module-excluded").lint(ws)
@@ -156,7 +167,7 @@ type E2e {
       "module lookup unexpectedly snapped with findUp false: " + direct.path,
     )
 
-    let tool = go(version: "1.26.1", skipLint: skipLint, skipTest: skipTest, skipGenerate: skipGenerate)
+    let tool = go(version: "1.26.1", lint: lint, test: test, generate: generate)
     let allModulePaths = tool.modules(ws).{path}
     assert(
       containsModulePath(allModulePaths, "fixtures/go-module-cross-include-a"),
@@ -439,7 +450,7 @@ type E2e {
       .layer
       .sync
 
-    let changes = go(version: "1.26.1", skipGenerate: skipGenerate).generateAll(ws)
+    let changes = go(version: "1.26.1", generate: generate).generateAll(ws)
 
     assert(
       changes.addedPaths.length == 1,
@@ -466,7 +477,7 @@ type E2e {
 
     let emptyChanges = go(
       version: "1.26.1",
-      skipGenerate: [generatedFixturePath],
+      generate: ["**", "!" + generatedFixturePath],
     ).module(ws, generatedFixturePath).generate(ws)
     assert(
       emptyChanges.addedPaths.length == 0,
@@ -499,20 +510,55 @@ type E2e {
   }
 
   """
-  "." skips only the root module; "*" skips every module.
+  Gitignore-style selection: "!" excludes, an include-only list scopes down.
   """
-  pub skipSentinelCheck(ws: Workspace!): Void @check {
-    let rootOnly = go(version: "1.26.1", skipGenerate: ["."])
+  pub selectionCheck(ws: Workspace!): Void @check {
+    # Real fixture modules: exclude and include-only.
+    let excluded = go(version: "1.26.1", generate: ["**", "!" + generatedFixturePath])
     assert(
-      rootOnly.module(ws, generatedFixturePath).skipGenerate(ws) == false,
-      "'.' skip pattern unexpectedly skipped a non-root module",
+      excluded.module(ws, generatedFixturePath).skipGenerate(ws),
+      "'!' pattern did not exclude its module",
+    )
+    let includeOnly = go(version: "1.26.1", generate: ["fixtures/**"])
+    assert(
+      includeOnly.module(ws, generatedFixturePath).skipGenerate(ws),
+      "include-only selection did not exclude an out-of-scope module",
+    )
+    assert(
+      includeOnly.module(ws, "fixtures/go-module-cross-include-a").skipGenerate(ws) == false,
+      "include-only selection excluded an in-scope module",
     )
 
-    let all = go(version: "1.26.1", skipGenerate: ["*"])
-    assert(
-      all.module(ws, generatedFixturePath).skipGenerate(ws),
-      "'*' skip pattern did not skip a module",
-    )
+    # Default "**" selects every module.
+    assert(selectsOut(ws, ["**"], "a/b") == false, "\"**\" did not select a module")
+    assert(selectsOut(ws, ["*"], "a/b") == false, "\"*\" did not select a module")
+
+    # A bare path and "X/**" both mean "X and everything below it".
+    assert(selectsOut(ws, ["**", "!docs"], "docs"), "exclude missed the module itself")
+    assert(selectsOut(ws, ["**", "!docs"], "docs/snippets"), "exclude missed a nested module")
+    assert(selectsOut(ws, ["**", "!docs/**"], "docs/snippets"), "\"X/**\" exclude missed a nested module")
+
+    # The subtree boundary: "docs" must not match a sibling sharing the prefix.
+    assert(selectsOut(ws, ["**", "!docs"], "docs-tools") == false, "exclude leaked across a name-prefix boundary")
+
+    # No includes means "everything", minus excludes.
+    assert(selectsOut(ws, ["!docs"], "docs"), "exclude-only list did not exclude")
+    assert(selectsOut(ws, ["!docs"], "core") == false, "exclude-only list did not include the rest")
+
+    # "." selects only the root module.
+    assert(selectsOut(ws, ["."], "core"), "\".\" leaked to a non-root module")
+    assert(selectsOut(ws, ["."], ".") == false, "\".\" did not select the root module")
+    assert(selectsOut(ws, ["!."], "."), "\"!.\" did not exclude the root module")
+
+    # An exclude always wins; a later bare pattern does not re-include.
+    assert(selectsOut(ws, ["**", "!docs", "docs/keep"], "docs/keep"), "a later include overrode an exclude")
+
+    # Edge lists: [] selects all, ["!**"] selects nothing.
+    assert(selectsOut(ws, [], "anything") == false, "empty selection did not select all")
+    assert(selectsOut(ws, ["!**"], "anything"), "\"!**\" selected a module")
+
+    # Unsupported glob shapes are not interpreted, so they select nothing.
+    assert(selectsOut(ws, ["a/**/b"], "a/x/b"), "mid-path \"**\" was unexpectedly interpreted")
 
     null
   }

@@ -28,9 +28,9 @@ type GoDirectory {
   let baseImage: Container!
 
   """
-  Workspace-relative module roots or ancestor subtrees to skip for tests.
+  Gitignore-style globs selecting which module roots to test.
   """
-  let skipTestPaths: [String!]!
+  let testPatterns: [String!]!
 
   """
   Return a workspace-root path for a module-relative subpath.
@@ -67,15 +67,31 @@ type GoDirectory {
   }
 
   """
-  Whether this directory's module is at or below a configured test skip path.
+  Whether this directory's module falls outside the configured test selection.
 
-  A path matches the module root exactly or any subtree below it. "." matches
-  the root module only; "*" matches every module.
+  Matching is on the module root path only — no workspace files are read. A
+  bare pattern includes; a "!"-prefixed pattern excludes; an exclude always
+  wins. With no include pattern, every module is included.
   """
   let skipTest: Boolean! {
-    skipTestPaths.any { skipPath =>
-      let clean = skipPath.trimPrefix("/").trimSuffix("/")
-      clean == "*" or modulePath == clean or modulePath.hasPrefix(clean + "/")
+    let included = testPatterns.filter { p => p.hasPrefix("!") == false }
+    let excluded = testPatterns.filter { p => p.hasPrefix("!") }.map { p => p.trimPrefix("!") }
+    let isIncluded = included.length == 0 or included.any { p => matchesModulePath(p) }
+    let isExcluded = excluded.any { p => matchesModulePath(p) }
+    isIncluded == false or isExcluded
+  }
+
+  """
+  Whether this directory's module root matches a single glob: "**"/"*" match
+  everything, "X/**" or bare "X" match X and any module below it.
+  """
+  let matchesModulePath(pattern: String!): Boolean! {
+    let p = pattern.trimPrefix("/").trimSuffix("/")
+    if (p == "**" or p == "*") {
+      true
+    } else {
+      let prefix = p.trimSuffix("/**")
+      modulePath == prefix or modulePath.hasPrefix(prefix + "/")
     }
   }
 
