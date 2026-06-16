@@ -149,6 +149,42 @@ type GoModule {
   }
 
   """
+  Helper container that computes includes for every module in one local pass
+  over a content-addressed Go-source snapshot of the workspace. It is identical
+  across all modules, so the engine runs it once and reuses the result; the
+  helper reads the snapshot from the local filesystem, so the exec caches on
+  source content and makes no workspace gateway round-trips.
+  """
+  let allIncludesHelper(ws: Workspace!): Container! {
+    baseImage
+      .withoutEntrypoint
+      .withWorkdir("/helpers/go-includes")
+      .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
+      .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+      .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
+      .withExec(["go", "build", "-o", "/usr/local/bin/go-includes", "."])
+      .withDirectory("/ws", ws.directory("/", include: ["**/*.go", "**/go.mod"]))
+      .withWorkdir("/ws")
+  }
+
+  """
+  Discovery output directory: one file of include patterns per module, named
+  "<moduleRoot>.inc" (the root module is "_root_.inc"). For a given mode every
+  module produces the same container and exec, so discovery runs once per
+  workspace rather than once per module, and each module reads only its own file.
+  """
+  let allIncludesDir(
+    ws: Workspace!,
+    lint: Boolean!,
+    test: Boolean!,
+    generate: Boolean!,
+  ): Directory! {
+    allIncludesHelper(ws)
+      .withExec(["go-includes", "--all", "--output-dir", "/output"] + includeFlags(lint, test, generate))
+      .directory("/output")
+  }
+
+  """
   Additional workspace include patterns discovered by scanning Go directives
   and local go.mod replaces reachable from this module's include graph.
   With no include flags, defaults to test inputs.
@@ -159,12 +195,9 @@ type GoModule {
     test: Boolean! = false,
     generate: Boolean! = false,
   ): [String!]! {
-    goIncludesHelper(ws)
-      .withExec(
-        ["go-includes", "--output", "/output"] + includeFlags(lint, test, generate) + [workspacePath],
-        experimentalPrivilegedNesting: true,
-      )
-      .file("/output")
+    let includeFile = (if (path == ".") { "_root_" } else { path }) + ".inc"
+    allIncludesDir(ws, lint: lint, test: test, generate: generate)
+      .file(includeFile)
       .contents
       .split("\n")
       .filter { pattern => pattern != "" }

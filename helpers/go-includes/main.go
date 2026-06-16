@@ -29,6 +29,18 @@ func main() {
 	ctx := telemetry.Init(context.Background(), telemetry.Config{Detect: true})
 	defer telemetry.Close()
 
+	// --all computes includes for every module in one local pass over a mounted
+	// workspace snapshot, with no gateway round-trips.
+	for _, arg := range os.Args[1:] {
+		if arg == "--all" {
+			if err := runAll(os.Args[1:]); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
+		}
+	}
+
 	targetModule, testDirs, outputPath, err := newTargetModuleFromArgs(ctx, os.Args[1:])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -166,9 +178,14 @@ func (w *workspace) indexModules(ctx context.Context) error {
 
 // containingModuleDir finds the nearest ancestor module root for a workspace path.
 func (w *workspace) containingModuleDir(dir string) (string, bool) {
+	return containingModuleDir(w.moduleSet, dir)
+}
+
+// containingModuleDir finds the nearest ancestor module root in moduleSet.
+func containingModuleDir(moduleSet map[string]bool, dir string) (string, bool) {
 	dir = path.Clean(strings.TrimPrefix(dir, "/"))
 	for {
-		if w.moduleSet[dir] {
+		if moduleSet[dir] {
 			return dir, true
 		}
 		if dir == "." {
@@ -353,6 +370,11 @@ func readRegularFile(ctx context.Context, dir *dagger.Directory, filePath string
 
 // includeBase returns the static Go source patterns for this module root.
 func (t targetModule) includeBase() []string {
+	return includeBasePatterns(t.moduleRoot)
+}
+
+// includeBasePatterns returns the static Go source patterns for a module root.
+func includeBasePatterns(moduleRoot string) []string {
 	patterns := []string{
 		"**/*.go",
 		"**/*.c",
@@ -370,7 +392,7 @@ func (t targetModule) includeBase() []string {
 		"go.work.sum",
 	}
 	for i, pattern := range patterns {
-		patterns[i] = t.subpath(pattern)
+		patterns[i] = path.Join(moduleRoot, pattern)
 	}
 	return patterns
 }
