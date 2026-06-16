@@ -176,7 +176,15 @@ type Go {
   Run golangci-lint in every discovered Go module.
   Modules configured to skip lint are skipped.
   """
-  pub lintAll(ws: Workspace!): Void @check {
+  pub lintAll(): Void @check {
+    lintAllWorkspace(currentWorkspace)
+  }
+
+  """
+  Run golangci-lint in every discovered Go module in the given workspace.
+  Modules configured to skip lint are skipped.
+  """
+  pub lintAllWorkspace(ws: Workspace!): Void {
     let layers = modules(ws, includeSkipLint: false).reduce(directory) { layers, mod =>
       layers.withDirectory(
         mod.path,
@@ -195,7 +203,15 @@ type Go {
   Run tests in every discovered Go module.
   Modules configured to skip tests are skipped.
   """
-  pub testAll(ws: Workspace!): Void @check {
+  pub testAll(): Void @check {
+    testAllWorkspace(currentWorkspace)
+  }
+
+  """
+  Run tests in every discovered Go module in the given workspace.
+  Modules configured to skip tests are skipped.
+  """
+  pub testAllWorkspace(ws: Workspace!): Void {
     let mods = modules(ws, includeSkipTest: false)
     let layers = mods.reduce(directory) { layers, mod =>
       layers.withDirectory(
@@ -216,7 +232,16 @@ type Go {
   Modules configured to skip generate, or without go:generate directives,
   are skipped.
   """
-  pub generateAll(ws: Workspace!): Changeset! @generate {
+  pub generateAll(): Changeset! @generate {
+    generateAllWorkspace(currentWorkspace)
+  }
+
+  """
+  Run go generate in every discovered Go module in the given workspace.
+  Modules configured to skip generate, or without go:generate directives,
+  are skipped.
+  """
+  pub generateAllWorkspace(ws: Workspace!): Changeset! {
     let mods = modules(ws).filter { mod =>
       mod.skipGenerate(ws) == false and mod.hasGenerateDirectives(ws)
     }
