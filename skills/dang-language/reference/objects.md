@@ -36,7 +36,7 @@ add(a: Int!, b: Int!): Int! { a + b }
 ```
 - Name, params, return type, body. The **last expression is the result** — no `return` needed for the normal result.
 - `return expr` is for *early* exit; unwinds through enclosing blocks/loops; valid in `new(...)` too. `return` outside any function → `return outside of function`.
-- No `;` separator; separate forms with newlines or `,`.
+- Separate forms with newlines or `;`.
 
 ### Zero-arity & auto-calling
 ```dang
@@ -66,7 +66,7 @@ motd: String! { "hello" }   # omit parens; it's a field with a function body
 { item, index => ... }    # multiple params, comma-separated, before =>
 { 42 }                    # no =>; a block expression evaluating to its last form
 ```
-- Body is a form sequence (newline/`,` separated); last form is the result.
+- Body is a form sequence (newline/`;` separated); last form is the result.
 - Blocks are the iteration protocol, the lambda-equivalent, AND the body of conditionals/loops.
 
 ### Block arguments to functions
@@ -212,7 +212,7 @@ union Pet = Cat | Dog
 ```
 - Members must be **object types** (no scalars/interfaces/enums) → `union member X must be an object type, got enum`. Flat unions only.
 - Members must exist; only members may be matched in `case` (`type X is not a member of union Pet`).
-- NOT statically exhaustive — a `case` missing members type-checks fine; an unmatched value is a *runtime* error `no case clause matched the value`. Add `else => ...`.
+- A `case` with type patterns covering every member is exhaustive (no `else` needed, non-null result); missing members still type-checks, but an unmatched value yields `null`, so the result type is nullable. Add `else => ...` to keep it non-null.
 
 ### Comparison
 | | what it is | members | discriminate with |
