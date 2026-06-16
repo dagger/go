@@ -497,4 +497,23 @@ type E2e {
 
     null
   }
+
+  """
+  "." skips only the root module; "*" skips every module.
+  """
+  pub skipSentinelCheck(ws: Workspace!): Void @check {
+    let rootOnly = go(version: "1.26.1", skipGenerate: ["."])
+    assert(
+      rootOnly.module(ws, generatedFixturePath).skipGenerate(ws) == false,
+      "'.' skip pattern unexpectedly skipped a non-root module",
+    )
+
+    let all = go(version: "1.26.1", skipGenerate: ["*"])
+    assert(
+      all.module(ws, generatedFixturePath).skipGenerate(ws),
+      "'*' skip pattern did not skip a module",
+    )
+
+    null
+  }
 }

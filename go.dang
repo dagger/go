@@ -33,14 +33,17 @@ type Go {
     includeExtraFiles: [String!]! = [],
     """
     Workspace-relative module roots or ancestor subtrees to skip for lint checks.
+    Use "." for the root module only, or "*" for every module.
     """
     skipLint: [String!]! = [],
     """
     Workspace-relative module roots or ancestor subtrees to skip for tests.
+    Use "." for the root module only, or "*" for every module.
     """
     skipTest: [String!]! = [],
     """
     Workspace-relative module roots or ancestor subtrees to skip for go generate.
+    Use "." for the root module only, or "*" for every module.
     """
     skipGenerate: [String!]! = [],
   ) {

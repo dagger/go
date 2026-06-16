@@ -120,11 +120,14 @@ type GoModule {
 
   """
   Whether this module root is at or below a configured skip path.
+
+  A path matches the module root exactly or any subtree below it. "." matches
+  the root module only; "*" matches every module.
   """
   let hasSkipPath(skipPaths: [String!]!): Boolean! {
     skipPaths.any { skipPath =>
       let clean = skipPath.trimPrefix("/").trimSuffix("/")
-      clean == "." or clean == "" or path == clean or path.hasPrefix(clean + "/")
+      clean == "*" or path == clean or path.hasPrefix(clean + "/")
     }
   }
 

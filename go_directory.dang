@@ -68,11 +68,14 @@ type GoDirectory {
 
   """
   Whether this directory's module is at or below a configured test skip path.
+
+  A path matches the module root exactly or any subtree below it. "." matches
+  the root module only; "*" matches every module.
   """
   let skipTest: Boolean! {
     skipTestPaths.any { skipPath =>
       let clean = skipPath.trimPrefix("/").trimSuffix("/")
-      clean == "." or clean == "" or modulePath == clean or modulePath.hasPrefix(clean + "/")
+      clean == "*" or modulePath == clean or modulePath.hasPrefix(clean + "/")
     }
   }
 
