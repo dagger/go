@@ -172,6 +172,21 @@ func TestTestDirectoriesFromFiles(t *testing.T) {
 	}
 }
 
+func TestLocalIndexTestDirectories(t *testing.T) {
+	index := &localIndex{goFilesByModule: map[string][]string{
+		"api": {
+			"api/auth/auth.go",
+			"api/auth/auth_test.go",
+			"api/auth/more_test.go",
+			"api/db/db_test.go",
+		},
+	}}
+	want := []string{"api/auth", "api/db"}
+	if got := index.testDirectoriesFor("api"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("testDirectoriesFor mismatch:\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
 func TestInvalidQuotedDirectiveArg(t *testing.T) {
 	_, err := (goDirective{
 		position: "test.go:1:1",
