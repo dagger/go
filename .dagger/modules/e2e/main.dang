@@ -7,15 +7,21 @@ type E2e {
   let baseFixturePath: String! = "testdata/go-module-custom-base"
   let baseGeneratedFilePath: String! = baseFixturePath + "/generated.go"
   let emptyFixturePath: String! = "testdata/go-module-empty"
+  let cgoCxxFixturePath: String! = "testdata/go-module-cgo-cxx"
+  let lintFailureFixturePath: String! = "testdata/go-module-lint-fail"
   let skipLint: [String!]! = [
     baseFixturePath,
+    cgoCxxFixturePath,
     emptyFixturePath,
+    lintFailureFixturePath,
     "testdata/go-module-excluded",
     "testdata/go-module-skip-tree",
   ]
   let skipTest: [String!]! = [
     baseFixturePath,
+    cgoCxxFixturePath,
     emptyFixturePath,
+    lintFailureFixturePath,
     "testdata/go-module-excluded",
     "testdata/go-module-skip-tree",
   ]
@@ -85,6 +91,13 @@ type E2e {
   }
 
   """
+  Lint can typecheck cgo packages that need a C++ compiler.
+  """
+  pub cgoCxxLintCheck(ws: Workspace!): Void @check {
+    go(version: "1.26.1").module(ws, cgoCxxFixturePath).lint(ws)
+  }
+
+  """
   A custom base container must be used for Go helpers, tests, and generate.
   """
   pub baseCheck(ws: Workspace!): Void @check {
@@ -110,7 +123,7 @@ type E2e {
 
     let testDirs = mod.testDirectories(ws)
     assert(
-      containsModulePath(testDirs.{path}.map { dir => dir.path }, baseFixturePath),
+      containsModulePath(testDirs.{{path}}.map { dir => dir.path }, baseFixturePath),
       "custom base test directory discovery did not include expected path",
     )
 
@@ -280,6 +293,40 @@ type E2e {
     assert(
       containsModulePath(generateSkippedModulePaths, "testdata/go-module-generate"),
       "modules includeSkipGenerate false excluded non-generate-skipped module",
+    )
+
+    let normalizedSkipTool = go(
+      version: "1.26.1",
+      skipLint: ["[\"" + emptyFixturePath + "\"", "\"" + lintFailureFixturePath + "\"]"],
+      skipTest: ["[\"" + emptyFixturePath + "\"", "\"" + lintFailureFixturePath + "\"]"],
+      skipGenerate: ["[\"" + emptyFixturePath + "\"", "\"" + lintFailureFixturePath + "\"]"],
+    )
+    assert(
+      normalizedSkipTool.module(ws, emptyFixturePath).skipLint(ws),
+      "module did not normalize beta workspace-settings lint skip array fragment",
+    )
+    assert(
+      normalizedSkipTool.module(ws, lintFailureFixturePath).skipLint(ws),
+      "module did not normalize trailing beta workspace-settings lint skip array fragment",
+    )
+    assert(
+      normalizedSkipTool.module(ws, "testdata/go-module-with-testdata").skipLint(ws) == false,
+      "normalized beta workspace-settings lint skip array skipped unrelated module",
+    )
+    assert(
+      normalizedSkipTool.module(ws, emptyFixturePath).skipTest(ws),
+      "module did not normalize beta workspace-settings test skip array fragment",
+    )
+    assert(
+      normalizedSkipTool.module(ws, lintFailureFixturePath).skipGenerate(ws),
+      "module did not normalize beta workspace-settings generate skip array fragment",
+    )
+    let normalizedLintSkippedModulePaths = normalizedSkipTool
+      .modules(ws, includeSkipLint: false)
+      .keys
+    assert(
+      containsModulePath(normalizedLintSkippedModulePaths, lintFailureFixturePath) == false,
+      "normalized beta workspace-settings lint skip array included skipped module",
     )
 
     let withExtraFiles = go(
