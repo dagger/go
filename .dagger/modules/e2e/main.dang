@@ -9,27 +9,30 @@ type E2e {
   let emptyFixturePath: String! = "testdata/go-module-empty"
   let cgoCxxFixturePath: String! = "testdata/go-module-cgo-cxx"
   let lintFailureFixturePath: String! = "testdata/go-module-lint-fail"
-  let skipLint: [String!]! = [
-    baseFixturePath,
-    cgoCxxFixturePath,
-    emptyFixturePath,
-    lintFailureFixturePath,
-    "testdata/go-module-excluded",
-    "testdata/go-module-skip-tree",
+  let lint: [String!]! = [
+    "**",
+    "!" + baseFixturePath,
+    "!" + cgoCxxFixturePath,
+    "!" + emptyFixturePath,
+    "!" + lintFailureFixturePath,
+    "!testdata/go-module-excluded",
+    "!testdata/go-module-skip-tree",
   ]
-  let skipTest: [String!]! = [
-    baseFixturePath,
-    cgoCxxFixturePath,
-    emptyFixturePath,
-    lintFailureFixturePath,
-    "testdata/go-module-excluded",
-    "testdata/go-module-skip-tree",
+  let test: [String!]! = [
+    "**",
+    "!" + baseFixturePath,
+    "!" + cgoCxxFixturePath,
+    "!" + emptyFixturePath,
+    "!" + lintFailureFixturePath,
+    "!testdata/go-module-excluded",
+    "!testdata/go-module-skip-tree",
   ]
-  let skipGenerate: [String!]! = [
-    "helpers/go-includes",
-    baseFixturePath,
-    "testdata/go-module-excluded",
-    "testdata/go-module-skip-tree",
+  let generate: [String!]! = [
+    "**",
+    "!helpers/go-includes",
+    "!" + baseFixturePath,
+    "!testdata/go-module-excluded",
+    "!testdata/go-module-skip-tree",
   ]
 
   let base: Container! {
@@ -57,10 +60,26 @@ type E2e {
   }
 
   """
+  Whether a module at modPath is excluded from generate selection `patterns`.
+  Uses findUp: false so modPath need not be a real module on disk.
+  """
+  let selectsOut(ws: Workspace!, patterns: [String!]!, modPath: String!): Boolean! {
+    go(version: "1.26.1", generate: patterns).module(ws, modPath, findUp: false).skipGenerate(ws)
+  }
+
+  """
+  Whether a module at modPath is excluded from lint selection `patterns`.
+  Uses findUp: false so modPath need not be a real module on disk.
+  """
+  let lintSelectsOut(ws: Workspace!, patterns: [String!]!, modPath: String!): Boolean! {
+    go(version: "1.26.1", lint: patterns).module(ws, modPath, findUp: false).skipLint(ws)
+  }
+
+  """
   Run testAll while respecting per-module skip configuration.
   """
   pub singleModuleCheck(ws: Workspace!): Void @check {
-    let tool = go(version: "1.26.1", skipLint: skipLint, skipTest: skipTest, skipGenerate: skipGenerate)
+    let tool = go(version: "1.26.1", lint: lint, test: test, generate: generate)
     tool.lintAll(ws)
     tool.testAll(ws)
     tool.module(ws, "testdata/go-module-excluded").lint(ws)
@@ -167,7 +186,7 @@ type E2e {
       "module lookup unexpectedly snapped with findUp false: " + direct.path,
     )
 
-    let tool = go(version: "1.26.1", skipLint: skipLint, skipTest: skipTest, skipGenerate: skipGenerate)
+    let tool = go(version: "1.26.1", lint: lint, test: test, generate: generate)
     let allModules = tool.modules(ws)
     let allModulePaths = allModules.keys
     assert(
@@ -179,8 +198,8 @@ type E2e {
       "unfiltered modules did not include expected fixture module",
     )
     assert(
-      containsModulePath(allModulePaths, "testdata/go-module-excluded"),
-      "unfiltered modules did not include skipped fixture module by default",
+      containsModulePath(allModulePaths, "testdata/go-module-excluded") == false,
+      "modules included fixture excluded from every operation",
     )
     assert(
       allModules.get(key: "testdata/go-module-with-testdata").path == "testdata/go-module-with-testdata",
@@ -295,38 +314,38 @@ type E2e {
       "modules includeSkipGenerate false excluded non-generate-skipped module",
     )
 
-    let normalizedSkipTool = go(
+    let normalizedSelectionTool = go(
       version: "1.26.1",
-      skipLint: ["[\"" + emptyFixturePath + "\"", "\"" + lintFailureFixturePath + "\"]"],
-      skipTest: ["[\"" + emptyFixturePath + "\"", "\"" + lintFailureFixturePath + "\"]"],
-      skipGenerate: ["[\"" + emptyFixturePath + "\"", "\"" + lintFailureFixturePath + "\"]"],
+      lint: ["[\"!" + emptyFixturePath + "\"", "\"!" + lintFailureFixturePath + "\"]"],
+      test: ["[\"!" + emptyFixturePath + "\"", "\"!" + lintFailureFixturePath + "\"]"],
+      generate: ["[\"!" + emptyFixturePath + "\"", "\"!" + lintFailureFixturePath + "\"]"],
     )
     assert(
-      normalizedSkipTool.module(ws, emptyFixturePath).skipLint(ws),
-      "module did not normalize beta workspace-settings lint skip array fragment",
+      normalizedSelectionTool.module(ws, emptyFixturePath).skipLint(ws),
+      "module did not normalize beta workspace-settings lint selector array fragment",
     )
     assert(
-      normalizedSkipTool.module(ws, lintFailureFixturePath).skipLint(ws),
-      "module did not normalize trailing beta workspace-settings lint skip array fragment",
+      normalizedSelectionTool.module(ws, lintFailureFixturePath).skipLint(ws),
+      "module did not normalize trailing beta workspace-settings lint selector array fragment",
     )
     assert(
-      normalizedSkipTool.module(ws, "testdata/go-module-with-testdata").skipLint(ws) == false,
-      "normalized beta workspace-settings lint skip array skipped unrelated module",
+      normalizedSelectionTool.module(ws, "testdata/go-module-with-testdata").skipLint(ws) == false,
+      "normalized beta workspace-settings lint selector array skipped unrelated module",
     )
     assert(
-      normalizedSkipTool.module(ws, emptyFixturePath).skipTest(ws),
-      "module did not normalize beta workspace-settings test skip array fragment",
+      normalizedSelectionTool.module(ws, emptyFixturePath).skipTest(ws),
+      "module did not normalize beta workspace-settings test selector array fragment",
     )
     assert(
-      normalizedSkipTool.module(ws, lintFailureFixturePath).skipGenerate(ws),
-      "module did not normalize beta workspace-settings generate skip array fragment",
+      normalizedSelectionTool.module(ws, lintFailureFixturePath).skipGenerate(ws),
+      "module did not normalize beta workspace-settings generate selector array fragment",
     )
-    let normalizedLintSkippedModulePaths = normalizedSkipTool
+    let normalizedLintSkippedModulePaths = normalizedSelectionTool
       .modules(ws, includeSkipLint: false)
       .keys
     assert(
       containsModulePath(normalizedLintSkippedModulePaths, lintFailureFixturePath) == false,
-      "normalized beta workspace-settings lint skip array included skipped module",
+      "normalized beta workspace-settings lint selector array included skipped module",
     )
 
     let withExtraFiles = go(
@@ -523,11 +542,10 @@ type E2e {
     let skippedTests = tool
       .module(ws, "testdata/go-module-excluded")
       .testDirs(ws)
-      .get(key: "testdata/go-module-excluded")
-      .tests()
+      .keys
     assert(
-      skippedTests.keys.length == 0,
-      "tests collection on a skipped directory was not empty",
+      skippedTests.length == 0,
+      "testDirs collection on a skipped module was not empty",
     )
 
     null
@@ -543,7 +561,7 @@ type E2e {
       .layer
       .sync
 
-    let changes = go(version: "1.26.1", skipGenerate: skipGenerate).generateAll(ws)
+    let changes = go(version: "1.26.1", generate: generate).generateAll(ws)
 
     assert(
       changes.addedPaths.length == 1,
@@ -570,7 +588,7 @@ type E2e {
 
     let emptyChanges = go(
       version: "1.26.1",
-      skipGenerate: [generatedFixturePath],
+      generate: ["**", "!" + generatedFixturePath],
     ).module(ws, generatedFixturePath).generate(ws)
     assert(
       emptyChanges.addedPaths.length == 0,
@@ -598,6 +616,82 @@ type E2e {
       noGoFileChanges.removedPaths.length == 0,
       "module without Go files generate produced removed paths",
     )
+
+    null
+  }
+
+  """
+  Gitignore-style selection: "!" excludes, an include-only list scopes down.
+  """
+  pub selectionCheck(ws: Workspace!): Void @check {
+    let excluded = go(version: "1.26.1", generate: ["**", "!" + generatedFixturePath])
+    assert(
+      excluded.module(ws, generatedFixturePath).skipGenerate(ws),
+      "'!' pattern did not exclude its module",
+    )
+
+    let includeOnly = go(version: "1.26.1", generate: ["fixtures/**"])
+    assert(
+      includeOnly.module(ws, generatedFixturePath).skipGenerate(ws),
+      "include-only selection did not exclude an out-of-scope module",
+    )
+    assert(
+      includeOnly.module(ws, "fixtures/go-module-cross-include-a").skipGenerate(ws) == false,
+      "include-only selection excluded an in-scope module",
+    )
+
+    assert(selectsOut(ws, ["**"], "a/b") == false, "\"**\" did not select a module")
+    assert(selectsOut(ws, ["*"], "a/b") == false, "\"*\" did not select a module")
+
+    assert(selectsOut(ws, ["**", "!docs"], "docs"), "exclude missed the module itself")
+    assert(selectsOut(ws, ["**", "!docs"], "docs/snippets"), "exclude missed a nested module")
+    assert(selectsOut(ws, ["**", "!docs/**"], "docs/snippets"), "\"X/**\" exclude missed a nested module")
+    assert(selectsOut(ws, ["**", "!docs"], "docs-tools") == false, "exclude leaked across a name-prefix boundary")
+
+    assert(selectsOut(ws, ["!docs"], "docs"), "exclude-only list did not exclude")
+    assert(selectsOut(ws, ["!docs"], "core") == false, "exclude-only list did not include the rest")
+    assert(lintSelectsOut(ws, ["!docs"], "docs"), "lint exclude-only list did not exclude")
+    assert(lintSelectsOut(ws, ["!docs"], "core") == false, "lint exclude-only list did not include the rest")
+    assert(
+      lintSelectsOut(ws, ["[\"!docs\"", "\"!tmp\"]"], "docs"),
+      "lint did not normalize beta workspace-settings array fragments before excluding",
+    )
+    assert(
+      lintSelectsOut(ws, ["[\"!docs\"", "\"!tmp\"]"], "core") == false,
+      "lint did not normalize beta workspace-settings array fragments before including the rest",
+    )
+
+    let excludeOnlyLintModules = go(
+      version: "1.26.1",
+      lint: ["!" + emptyFixturePath],
+    ).modules(ws, includeSkipLint: false).keys
+    assert(
+      containsModulePath(excludeOnlyLintModules, lintFailureFixturePath),
+      "exclude-only lint settings excluded every non-matching module",
+    )
+    assert(
+      containsModulePath(excludeOnlyLintModules, emptyFixturePath) == false,
+      "exclude-only lint settings included the excluded module",
+    )
+
+    let scoped = go(
+      version: "1.26.1",
+      lint: ["testdata", "!testdata/go-module-skip-tree"],
+      test: ["testdata", "!testdata/go-module-skip-tree"],
+      generate: ["testdata/go-module-generate"],
+    )
+    assert(
+      containsModulePath(scoped.modules(ws).keys, "testdata/go-module-with-testdata"),
+      "scoped module discovery excluded an included fixture",
+    )
+    assert(
+      containsModulePath(scoped.modules(ws).keys, "testdata/go-module-skip-tree/nested") == false,
+      "fully excluded nested module was discovered",
+    )
+
+    assert(selectsOut(ws, ["."], "core"), "\".\" leaked to a non-root module")
+    assert(selectsOut(ws, ["."], ".") == false, "\".\" did not select the root module")
+    assert(selectsOut(ws, ["!."], "."), "\"!.\" did not exclude the root module")
 
     null
   }

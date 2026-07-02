@@ -32,17 +32,21 @@ type Go {
     """
     includeExtraFiles: [String!]! = [],
     """
-    Workspace-relative module roots or ancestor subtrees to skip for lint checks.
+    Module roots to lint. A bare pattern selects, a "!"-prefixed pattern
+    excludes, and an exclude always wins within this operation. With no
+    selecting pattern, every module is linted. Supported patterns: "**" or "*"
+    (all modules), "." (root module only), and "X" or "X/**" (module X and any
+    module below it).
     """
-    skipLint: [String!]! = [],
+    lint: [String!]! = ["**"],
     """
-    Workspace-relative module roots or ancestor subtrees to skip for tests.
+    Module roots to test. Same selection rules as `lint`.
     """
-    skipTest: [String!]! = [],
+    test: [String!]! = ["**"],
     """
-    Workspace-relative module roots or ancestor subtrees to skip for go generate.
+    Module roots to run go generate in. Same selection rules as `lint`.
     """
-    skipGenerate: [String!]! = [],
+    generate: [String!]! = ["**"],
   ) {
     if (version != null and base != null) {
       raise "version and base are mutually exclusive"
@@ -50,9 +54,9 @@ type Go {
       self.version = if (base == null) { version ?? "1.26" } else { null }
       self.base = base ?? container.from("golang:" + (version ?? "1.26") + "-alpine")
       self.includeExtraFiles = includeExtraFiles
-      self.skipLint = normalizePatterns(skipLint)
-      self.skipTest = normalizePatterns(skipTest)
-      self.skipGenerate = normalizePatterns(skipGenerate)
+      self.lint = normalizePatterns(lint)
+      self.test = normalizePatterns(test)
+      self.generate = normalizePatterns(generate)
       self
     }
   }
@@ -61,7 +65,7 @@ type Go {
   Normalize selector strings from workspace module settings.
 
   Dagger v1.0.0-beta.4 may pass TOML string arrays as JSON-fragment strings
-  like ["[\"infra\"", "\"docs\"]"]; trim those wrappers so selection still
+  like ["[\"!infra\"", "\"!docs\"]"]; trim those wrappers so selection still
   sees the intended patterns.
   """
   let normalizePatterns(patterns: [String!]!): [String!]! {
@@ -78,19 +82,19 @@ type Go {
   pub includeExtraFiles: [String!]! = []
 
   """
-  Workspace-relative module roots or ancestor subtrees to skip for lint checks.
+  Module roots to lint ("!" excludes; see the `lint` constructor argument).
   """
-  pub skipLint: [String!]! = []
+  pub lint: [String!]! = ["**"]
 
   """
-  Workspace-relative module roots or ancestor subtrees to skip for tests.
+  Module roots to test ("!" excludes; see the `lint` constructor argument).
   """
-  pub skipTest: [String!]! = []
+  pub test: [String!]! = ["**"]
 
   """
-  Workspace-relative module roots or ancestor subtrees to skip for go generate.
+  Module roots to run go generate in ("!" excludes; see `lint`).
   """
-  pub skipGenerate: [String!]! = []
+  pub generate: [String!]! = ["**"]
 
   """
   Return Go modules discovered from workspace go.mod files, as a collection
@@ -110,13 +114,11 @@ type Go {
     # collection so GoDirectory.tests() can search/filter without ever
     # touching Workspace again. Functions taking Workspace always invalidate;
     # operations on a Directory receiver cache by content hash.
-    let testFilesDir = ws.directory("/", include: ["**/*_test.go"])
-    let paths = ws
-      .directory("/", include: ["**/go.mod"])
-      .glob("**/go.mod")
-      .map { modPath =>
-        if (modPath == "go.mod") { "." } else { modPath.trimSuffix("/go.mod") }
-      }
+    let paths = uniqueStrings(
+      moduleDiscoveryPaths(ws, lint) +
+      moduleDiscoveryPaths(ws, test) +
+      moduleDiscoveryPaths(ws, generate),
+    )
       .filter { modPath =>
         modulePathIncluded(ws, modPath, include, exclude)
       }
@@ -126,10 +128,12 @@ type Go {
           version: version,
           baseImage: base,
           includeExtraFiles: includeExtraFiles,
-          skipLintPaths: skipLint,
-          skipTestPaths: skipTest,
-          skipGeneratePaths: skipGenerate,
-          testFilesDir: testFilesDir,
+          lintPatterns: lint,
+          testPatterns: test,
+          generatePatterns: generate,
+          includeScanDir: selectedGoFilesDir(ws),
+          testScanDir: selectedTestScanDir(ws),
+          testFilesDir: selectedTestFilesDir(ws),
         )
       }
       .filter { mod =>
@@ -144,11 +148,155 @@ type Go {
       version: version,
       baseImage: base,
       includeExtraFiles: includeExtraFiles,
-      skipLintPaths: skipLint,
-      skipTestPaths: skipTest,
-      skipGeneratePaths: skipGenerate,
-      testFilesDir: testFilesDir,
+      lintPatterns: lint,
+      testPatterns: test,
+      generatePatterns: generate,
+      includeScanDir: selectedGoFilesDir(ws),
+      testScanDir: selectedTestScanDir(ws),
+      testFilesDir: selectedTestFilesDir(ws),
     )
+  }
+
+  let uniqueStrings(values: [String!]!): [String!]! {
+    values.reduce([]) { acc, value =>
+      if (acc.any { existing => existing == value }) {
+        acc
+      } else {
+        acc + [value]
+      }
+    }
+  }
+
+  let moduleDiscoveryPaths(ws: Workspace!, patterns: [String!]!): [String!]! {
+    ws
+      .directory(
+        "/",
+        include: selectorGoModIncludes(patterns),
+        exclude: selectorGoModExcludes(patterns),
+      )
+      .glob("**/go.mod")
+      .map { modPath =>
+        if (modPath == "go.mod") { "." } else { modPath.trimSuffix("/go.mod") }
+      }
+      .filter { modPath => moduleSelected(patterns, modPath) }
+  }
+
+  let selectedTestFilesDir(ws: Workspace!): Directory! {
+    ws.directory(
+      "/",
+      include: selectorTestFileIncludes(test),
+      exclude: selectorTestFileExcludes(test),
+    )
+  }
+
+  let selectedGoFilesDir(ws: Workspace!): Directory! {
+    ws.directory(
+      "/",
+      include: uniqueStrings(
+        selectorGoFileIncludes(lint) +
+        selectorGoFileIncludes(test) +
+        selectorGoFileIncludes(generate) +
+        selectorGoModIncludes(lint) +
+        selectorGoModIncludes(test) +
+        selectorGoModIncludes(generate),
+      ),
+      exclude: uniqueStrings(
+        selectorGoFileExcludes(lint) +
+        selectorGoFileExcludes(test) +
+        selectorGoFileExcludes(generate) +
+        selectorGoModExcludes(lint) +
+        selectorGoModExcludes(test) +
+        selectorGoModExcludes(generate),
+      ),
+    )
+  }
+
+  let selectedTestScanDir(ws: Workspace!): Directory! {
+    ws.directory(
+      "/",
+      include: uniqueStrings(
+        selectorGoFileIncludes(test) +
+        selectorGoModIncludes(test),
+      ),
+      exclude: uniqueStrings(
+        selectorGoFileExcludes(test) +
+        selectorGoModExcludes(test),
+      ),
+    )
+  }
+
+  let selectorGoModIncludes(patterns: [String!]!): [String!]! {
+    let included = patterns.filter { p => p.hasPrefix("!") == false }
+    if (included.length == 0) {
+      ["**/go.mod"]
+    } else {
+      included.map { p => selectorFileGlob(p, "go.mod") }
+    }
+  }
+
+  let selectorGoModExcludes(patterns: [String!]!): [String!]! {
+    patterns
+      .filter { p => p.hasPrefix("!") }
+      .map { p => selectorFileGlob(p.trimPrefix("!"), "go.mod") }
+  }
+
+  let selectorGoFileIncludes(patterns: [String!]!): [String!]! {
+    let included = patterns.filter { p => p.hasPrefix("!") == false }
+    if (included.length == 0) {
+      ["**/*.go"]
+    } else {
+      included.map { p => selectorFileGlob(p, "*.go") }
+    }
+  }
+
+  let selectorGoFileExcludes(patterns: [String!]!): [String!]! {
+    patterns
+      .filter { p => p.hasPrefix("!") }
+      .map { p => selectorFileGlob(p.trimPrefix("!"), "*.go") }
+  }
+
+  let selectorTestFileIncludes(patterns: [String!]!): [String!]! {
+    let included = patterns.filter { p => p.hasPrefix("!") == false }
+    if (included.length == 0) {
+      ["**/*_test.go"]
+    } else {
+      included.map { p => selectorFileGlob(p, "*_test.go") }
+    }
+  }
+
+  let selectorTestFileExcludes(patterns: [String!]!): [String!]! {
+    patterns
+      .filter { p => p.hasPrefix("!") }
+      .map { p => selectorFileGlob(p.trimPrefix("!"), "*_test.go") }
+  }
+
+  let selectorFileGlob(pattern: String!, filePattern: String!): String! {
+    let p = pattern.trimPrefix("/").trimSuffix("/")
+    if (p == "**" or p == "*") {
+      "**/" + filePattern
+    } else if (p == ".") {
+      filePattern
+    } else {
+      p.trimSuffix("/**") + "/**/" + filePattern
+    }
+  }
+
+  let moduleSelected(patterns: [String!]!, modPath: String!): Boolean! {
+    let included = patterns.filter { p => p.hasPrefix("!") == false }
+    let excluded = patterns.filter { p => p.hasPrefix("!") }.map { p => p.trimPrefix("!") }
+    let isIncluded = included.length == 0 or included.any { p => matchesModulePath(modPath, p) }
+    let isExcluded = excluded.any { p => matchesModulePath(modPath, p) }
+    isIncluded and isExcluded == false
+  }
+
+  let matchesModulePath(modPath: String!, pattern: String!): Boolean! {
+    let p = pattern.trimPrefix("/").trimSuffix("/")
+    if (p == "**" or p == "*") {
+      true
+    } else {
+      let prefix = p.trimSuffix("/**")
+      modPath == prefix or modPath.hasPrefix(prefix + "/")
+    }
   }
 
   let modulePathIncluded(
@@ -193,10 +341,12 @@ type Go {
       version: version,
       baseImage: base,
       includeExtraFiles: includeExtraFiles,
-      skipLintPaths: skipLint,
-      skipTestPaths: skipTest,
-      skipGeneratePaths: skipGenerate,
-      testFilesDir: ws.directory("/", include: ["**/*_test.go"]),
+      lintPatterns: lint,
+      testPatterns: test,
+      generatePatterns: generate,
+      includeScanDir: selectedGoFilesDir(ws),
+      testScanDir: selectedTestScanDir(ws),
+      testFilesDir: selectedTestFilesDir(ws),
     )
   }
 
@@ -281,9 +431,11 @@ type GoModules {
   let version: String
   let baseImage: Container!
   let includeExtraFiles: [String!]!
-  let skipLintPaths: [String!]!
-  let skipTestPaths: [String!]!
-  let skipGeneratePaths: [String!]!
+  let lintPatterns: [String!]!
+  let testPatterns: [String!]!
+  let generatePatterns: [String!]!
+  let includeScanDir: Directory!
+  let testScanDir: Directory!
   let testFilesDir: Directory!
 
   """
@@ -295,9 +447,11 @@ type GoModules {
       version: version,
       baseImage: baseImage,
       includeExtraFiles: includeExtraFiles,
-      skipLintPaths: skipLintPaths,
-      skipTestPaths: skipTestPaths,
-      skipGeneratePaths: skipGeneratePaths,
+      lintPatterns: lintPatterns,
+      testPatterns: testPatterns,
+      generatePatterns: generatePatterns,
+      includeScanDir: includeScanDir,
+      testScanDir: testScanDir,
       testFilesDir: testFilesDir,
     )
   }
@@ -328,19 +482,29 @@ type GoModule {
   pub includeExtraFiles: [String!]!
 
   """
-  Workspace-relative module roots or ancestor subtrees to skip for lint checks.
+  Gitignore-style globs selecting which module roots to lint.
   """
-  let skipLintPaths: [String!]!
+  let lintPatterns: [String!]!
 
   """
-  Workspace-relative module roots or ancestor subtrees to skip for tests.
+  Gitignore-style globs selecting which module roots to test.
   """
-  let skipTestPaths: [String!]!
+  let testPatterns: [String!]!
 
   """
-  Workspace-relative module roots or ancestor subtrees to skip for go generate.
+  Gitignore-style globs selecting which module roots to run go generate in.
   """
-  let skipGeneratePaths: [String!]!
+  let generatePatterns: [String!]!
+
+  """
+  Workspace snapshot used by the local include helper.
+  """
+  let includeScanDir: Directory!
+
+  """
+  Workspace snapshot used by the local test-directory helper.
+  """
+  let testScanDir: Directory!
 
   """
   Workspace-wide snapshot of every *_test.go file, threaded down from the
@@ -383,25 +547,56 @@ type GoModule {
       .withEnvVariable("DAGGER_GO_WORKSPACE_ID", toJSON(ws.id))
   }
 
+  let moduleOutputFile: String! {
+    (if (path == ".") { "_root_" } else { path }) + ".inc"
+  }
+
   """
-  Whether this module or an ancestor subtree is configured to skip lint.
+  Base container for local helper passes over a scoped workspace snapshot.
+  """
+  let localIncludesHelper(scanDir: Directory!): Container! {
+    baseImage
+      .withoutEntrypoint
+      .withWorkdir("/helpers/go-includes")
+      .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
+      .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+      .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
+      .withExec(["go", "build", "-o", "/usr/local/bin/go-includes", "."])
+      .withDirectory("/ws", scanDir)
+      .withWorkdir("/ws")
+  }
+
+  let allIncludesDir(lint: Boolean!, test: Boolean!, generate: Boolean!): Directory! {
+    localIncludesHelper(includeScanDir)
+      .withExec(["go-includes", "--all", "--output-dir", "/output"] + includeFlags(lint, test, generate))
+      .directory("/output")
+  }
+
+  let allTestDirsDir: Directory! {
+    localIncludesHelper(testScanDir)
+      .withExec(["go-includes", "--all", "--test-dirs", "--output-dir", "/output"])
+      .directory("/output")
+  }
+
+  """
+  Whether this module falls outside the configured lint selection.
   """
   pub skipLint(ws: Workspace!): Boolean! {
-    hasSkipPath(skipLintPaths)
+    outOfScope(lintPatterns)
   }
 
   """
-  Whether this module or an ancestor subtree is configured to skip tests.
+  Whether this module falls outside the configured test selection.
   """
   pub skipTest(ws: Workspace!): Boolean! {
-    hasSkipPath(skipTestPaths)
+    outOfScope(testPatterns)
   }
 
   """
-  Whether this module or an ancestor subtree is configured to skip go generate.
+  Whether this module falls outside the configured go generate selection.
   """
   pub skipGenerate(ws: Workspace!): Boolean! {
-    hasSkipPath(skipGeneratePaths)
+    outOfScope(generatePatterns)
   }
 
   """
@@ -431,12 +626,33 @@ type GoModule {
   }
 
   """
-  Whether this module root is at or below a configured skip path.
+  Whether this module root falls outside the selection `patterns`.
+
+  Matching is on the module root path only: no workspace files are read. A
+  bare pattern includes; a "!"-prefixed pattern excludes. With no include
+  pattern, every module is included. A module is in scope when it matches an
+  include and no exclude; an exclude always wins within that operation.
   """
-  let hasSkipPath(skipPaths: [String!]!): Boolean! {
-    skipPaths.any { skipPath =>
-      let clean = skipPath.trimPrefix("/").trimSuffix("/")
-      clean == "." or clean == "" or path == clean or path.hasPrefix(clean + "/")
+  let outOfScope(patterns: [String!]!): Boolean! {
+    let included = patterns.filter { p => p.hasPrefix("!") == false }
+    let excluded = patterns.filter { p => p.hasPrefix("!") }.map { p => p.trimPrefix("!") }
+    let isIncluded = included.length == 0 or included.any { p => matchesModulePath(p) }
+    let isExcluded = excluded.any { p => matchesModulePath(p) }
+    isIncluded == false or isExcluded
+  }
+
+  """
+  Whether this module root matches a single glob: "**"/"*" match everything,
+  "." matches only the root module, and "X/**" or bare "X" match X and any
+  module below it.
+  """
+  let matchesModulePath(pattern: String!): Boolean! {
+    let p = pattern.trimPrefix("/").trimSuffix("/")
+    if (p == "**" or p == "*") {
+      true
+    } else {
+      let prefix = p.trimSuffix("/**")
+      path == prefix or path.hasPrefix(prefix + "/")
     }
   }
 
@@ -451,12 +667,8 @@ type GoModule {
     test: Boolean! = false,
     generate: Boolean! = false,
   ): [String!]! {
-    goIncludesHelper(ws)
-      .withExec(
-        ["go-includes", "--output", "/output"] + includeFlags(lint, test, generate) + [workspacePath],
-        experimentalPrivilegedNesting: true,
-      )
-      .file("/output")
+    allIncludesDir(lint: lint, test: test, generate: generate)
+      .file(moduleOutputFile)
       .contents
       .split("\n")
       .filter { pattern => pattern != "" }
@@ -473,22 +685,24 @@ type GoModule {
         modulePath: path,
         baseImage: baseImage,
         includeExtraFiles: includeExtraFiles,
-        skipTestPaths: skipTestPaths,
+        testPatterns: testPatterns,
+        includeScanDir: includeScanDir,
+        testScanDir: testScanDir,
         testFilesDir: testFilesDir,
       )
     }
   }
 
   let testDirectoryPaths(ws: Workspace!): [String!]! {
-    goIncludesHelper(ws)
-      .withExec(
-        ["go-includes", "--output", "/output", "--test-dirs", workspacePath],
-        experimentalPrivilegedNesting: true,
-      )
-      .file("/output")
-      .contents
-      .split("\n")
-      .filter { testPath => testPath != "" }
+    if (skipTest(ws)) {
+      []
+    } else {
+      allTestDirsDir
+        .file(moduleOutputFile)
+        .contents
+        .split("\n")
+        .filter { testPath => testPath != "" }
+    }
   }
 
   """
@@ -501,7 +715,9 @@ type GoModule {
       modulePath: path,
       baseImage: baseImage,
       includeExtraFiles: includeExtraFiles,
-      skipTestPaths: skipTestPaths,
+      testPatterns: testPatterns,
+      includeScanDir: includeScanDir,
+      testScanDir: testScanDir,
       testFilesDir: testFilesDir,
     )
   }
@@ -720,7 +936,9 @@ type GoTestDirs {
   let modulePath: String!
   let baseImage: Container!
   let includeExtraFiles: [String!]!
-  let skipTestPaths: [String!]!
+  let testPatterns: [String!]!
+  let includeScanDir: Directory!
+  let testScanDir: Directory!
   let testFilesDir: Directory!
 
   """
@@ -733,7 +951,9 @@ type GoTestDirs {
       modulePath: modulePath,
       baseImage: baseImage,
       includeExtraFiles: includeExtraFiles,
-      skipTestPaths: skipTestPaths,
+      testPatterns: testPatterns,
+      includeScanDir: includeScanDir,
+      testScanDir: testScanDir,
       testFilesDir: testFilesDir,
     )
   }
@@ -766,9 +986,19 @@ type GoDirectory {
   let baseImage: Container!
 
   """
-  Workspace-relative module roots or ancestor subtrees to skip for tests.
+  Gitignore-style globs selecting which module roots to test.
   """
-  let skipTestPaths: [String!]!
+  let testPatterns: [String!]!
+
+  """
+  Workspace snapshot used by the local include helper.
+  """
+  let includeScanDir: Directory!
+
+  """
+  Workspace snapshot used by the local test-directory helper.
+  """
+  let testScanDir: Directory!
 
   """
   Workspace-wide snapshot of every *_test.go file, threaded down from the
@@ -811,13 +1041,58 @@ type GoDirectory {
       .withEnvVariable("DAGGER_GO_WORKSPACE_ID", toJSON(ws.id))
   }
 
+  let moduleOutputFile: String! {
+    (if (modulePath == ".") { "_root_" } else { modulePath }) + ".inc"
+  }
+
   """
-  Whether this directory's module is at or below a configured test skip path.
+  Base container for local helper passes over a scoped workspace snapshot.
+  """
+  let localIncludesHelper(scanDir: Directory!): Container! {
+    baseImage
+      .withoutEntrypoint
+      .withWorkdir("/helpers/go-includes")
+      .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
+      .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+      .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
+      .withExec(["go", "build", "-o", "/usr/local/bin/go-includes", "."])
+      .withDirectory("/ws", scanDir)
+      .withWorkdir("/ws")
+  }
+
+  let allIncludesDir: Directory! {
+    localIncludesHelper(includeScanDir)
+      .withExec(["go-includes", "--all", "--test", "--output-dir", "/output"])
+      .directory("/output")
+  }
+
+  """
+  Whether this directory's module falls outside the configured test selection.
+
+  Matching is on the module root path only: no workspace files are read. A
+  bare pattern includes; a "!"-prefixed pattern excludes; an exclude always
+  wins. With no include pattern, every module is included.
   """
   let skipTest: Boolean! {
-    skipTestPaths.any { skipPath =>
-      let clean = skipPath.trimPrefix("/").trimSuffix("/")
-      clean == "." or clean == "" or modulePath == clean or modulePath.hasPrefix(clean + "/")
+    let included = testPatterns.filter { p => p.hasPrefix("!") == false }
+    let excluded = testPatterns.filter { p => p.hasPrefix("!") }.map { p => p.trimPrefix("!") }
+    let isIncluded = included.length == 0 or included.any { p => matchesModulePath(p) }
+    let isExcluded = excluded.any { p => matchesModulePath(p) }
+    isIncluded == false or isExcluded
+  }
+
+  """
+  Whether this directory's module root matches a single glob: "**"/"*" match
+  everything, "." matches only the root module, and "X/**" or bare "X" match X
+  and any module below it.
+  """
+  let matchesModulePath(pattern: String!): Boolean! {
+    let p = pattern.trimPrefix("/").trimSuffix("/")
+    if (p == "**" or p == "*") {
+      true
+    } else {
+      let prefix = p.trimSuffix("/**")
+      modulePath == prefix or modulePath.hasPrefix(prefix + "/")
     }
   }
 
@@ -825,12 +1100,8 @@ type GoDirectory {
   Additional workspace include patterns discovered for this directory's Go tests.
   """
   let includeDiscovered: [String!]! {
-    goIncludesHelper
-      .withExec(
-        ["go-includes", "--output", "/output", "--test", workspacePath],
-        experimentalPrivilegedNesting: true,
-      )
-      .file("/output")
+    allIncludesDir
+      .file(moduleOutputFile)
       .contents
       .split("\n")
       .filter { pattern => pattern != "" }
