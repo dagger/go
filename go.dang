@@ -86,8 +86,11 @@ type Go {
   pub generate: [String!]! = ["**"]
 
   """
-  Return every Go module discovered from workspace go.mod files.
-  Optional include/exclude patterns filter discovered module root directories.
+  Return every Go module discovered from the client's current workspace
+  location: the module containing the current directory (found by walking up
+  for a go.mod), plus every module below it (found by scanning down for go.mod
+  files). Discovered module roots are workspace-root-relative. Optional
+  include/exclude patterns further filter them.
   """
   pub modules(
     ws: Workspace!,
@@ -97,12 +100,38 @@ type Go {
     includeSkipTest: Boolean! = true,
     includeSkipGenerate: Boolean! = true,
   ): [GoModule!]! {
-    ws
-      .directory("/", include: ["**/go.mod"])
+    # Sub-modules: scan down from the current directory for child go.mod files.
+    # glob paths are relative to the current directory; findUp rebases each onto
+    # a workspace-root-relative module root (its result is an absolute path).
+    let subPaths = ws
+      .directory(".", include: ["**/go.mod"])
       .glob("**/go.mod")
       .map { modPath =>
-        if (modPath == "go.mod") { "." } else { modPath.trimSuffix("/go.mod") }
+        let relDir = if (modPath == "go.mod") { "." } else { modPath.trimSuffix("/go.mod") }
+        let absGoMod = ws.findUp("go.mod", relDir)
+        if (absGoMod == null) { relDir } else { moduleRootFromGoMod(absGoMod) }
       }
+
+    # Current module: walk up from the current directory for a containing
+    # go.mod. findUp returns an absolute workspace path (or null when none).
+    let foundGoModPath = ws.findUp("go.mod", ".")
+    let currentPath = if (foundGoModPath == null) {
+      null
+    } else {
+      moduleRootFromGoMod(foundGoModPath)
+    }
+
+    # Combine, listing the current module first, and drop it from the sub-module
+    # list when the current directory is itself a module root.
+    let allPaths = if (currentPath == null) {
+      subPaths
+    } else if (subPaths.contains(currentPath)) {
+      subPaths
+    } else {
+      [currentPath] + subPaths
+    }
+
+    allPaths
       .filter { modPath =>
         modulePathIncluded(ws, modPath, include, exclude)
       }
@@ -122,6 +151,15 @@ type Go {
         (includeSkipTest or mod.skipTest(ws) == false) and
         (includeSkipGenerate or mod.skipGenerate(ws) == false)
       }
+  }
+
+  """
+  Workspace-root-relative module root for an absolute workspace go.mod path.
+  The workspace root module is "."; any other is the go.mod's parent directory.
+  """
+  let moduleRootFromGoMod(absGoModPath: String!): String! {
+    let goModPath = absGoModPath.trimPrefix("/")
+    if (goModPath == "go.mod") { "." } else { goModPath.trimSuffix("/go.mod") }
   }
 
   let modulePathIncluded(
@@ -155,10 +193,7 @@ type Go {
         if (foundGoModPath == null) {
           raise "no Go module found containing path: " + path
         } else {
-          let goModPath = foundGoModPath.trimPrefix("/")
-          if (goModPath == "go.mod") { "." } else {
-            goModPath.trimSuffix("/go.mod")
-          }
+          moduleRootFromGoMod(foundGoModPath)
         }
       } else {
         path.trimPrefix("/")
