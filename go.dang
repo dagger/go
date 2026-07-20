@@ -86,8 +86,9 @@ type Go {
   pub generate: [String!]! = ["**"]
 
   """
-  Return every Go module discovered from workspace go.mod files.
-  Optional include/exclude patterns filter discovered module root directories.
+  Go modules discovered from go.mod files at or below the working directory,
+  plus the enclosing module when the cwd is inside one. Optional include/exclude
+  patterns filter the discovered module roots.
   """
   pub modules(
     ws: Workspace!,
@@ -97,12 +98,12 @@ type Go {
     includeSkipTest: Boolean! = true,
     includeSkipGenerate: Boolean! = true,
   ): [GoModule!]! {
-    ws
-      .directory("/", include: ["**/go.mod"])
-      .glob("**/go.mod")
-      .map { modPath =>
-        if (modPath == "go.mod") { "." } else { modPath.trimSuffix("/go.mod") }
-      }
+    # Discovery is delegated to the polyfill Workspace.findConfigDirs (honoring
+    # dagger/dagger#13688). Its results are cwd-relative, so resolve each back
+    # to a workspace-root path before it becomes a module root.
+    polyfill()
+      .workspace(ws)
+      .findConfigDirs(["go.mod"])
       .filter { modPath =>
         modulePathIncluded(ws, modPath, include, exclude)
       }
