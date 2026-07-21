@@ -64,6 +64,33 @@ type E2e {
   }
 
   """
+  Module discovery (findConfigDirs) returns exactly the directories holding a
+  go.mod, at any depth, and nothing else.
+  """
+  pub discoveryCheck(ws: Workspace!): Void @check {
+    let paths = go(version: "1.26.1").modules(ws).{path}
+
+    # A go.mod is discovered at any depth: top level, nested inside another
+    # module, and several directories deep.
+    let missing = [
+      "fixtures/go-module-with-nested-module",
+      "fixtures/go-module-with-nested-module/nested",
+      "fixtures/go-module-with-included-gomod-replace/engine/distconsts",
+    ].filter { p => containsModulePath(paths, p) == false }
+    assert(missing.length == 0, "discovery missed modules: " + missing.join(", "))
+
+    # Directories without a go.mod are never modules: the workspace root, an
+    # intermediate parent, and a data-only subdirectory.
+    let invented = [
+      ".",
+      "fixtures",
+      "fixtures/go-module-cross-include-a/testdata",
+    ].filter { p => containsModulePath(paths, p) }
+    assert(invented.length == 0, "discovery invented modules: " + invented.join(", "))
+    null
+  }
+
+  """
   Run testAll while respecting per-module skip configuration.
   """
   pub singleModuleCheck(ws: Workspace!): Void @check {
