@@ -229,7 +229,7 @@ func (index *localIndex) replaceModules(moduleRoot string) ([]string, error) {
 
 	var roots []string
 	for _, replace := range goMod.Replace {
-		if replace.New.Version != "" || (!strings.HasPrefix(replace.New.Path, "./") && !strings.HasPrefix(replace.New.Path, "../")) {
+		if !isLocalReplace(replace) {
 			continue
 		}
 		target := strings.TrimSuffix(replace.New.Path, "/")

@@ -5,6 +5,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"golang.org/x/mod/modfile"
+	"golang.org/x/mod/module"
 )
 
 func TestGoDirectiveIncludesByMode(t *testing.T) {
@@ -99,6 +102,36 @@ func TestIncludeHelpers(t *testing.T) {
 		t.Fatalf("workspace.containingModuleDir got %q, %v", got, ok)
 	}
 
+}
+
+func TestIsLocalReplace(t *testing.T) {
+	tests := []struct {
+		name    string
+		path    string
+		version string
+		want    bool
+	}{
+		{name: "current directory", path: ".", want: true},
+		{name: "parent directory", path: "..", want: true},
+		{name: "current subdirectory", path: "./local", want: true},
+		{name: "parent subdirectory", path: "../local", want: true},
+		{name: "absolute directory", path: "/local", want: true},
+		{name: "module path", path: "example.com/local", want: false},
+		{name: "versioned module path", path: "example.com/local", version: "v1.0.0", want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			replace := &modfile.Replace{
+				New: module.Version{
+					Path:    test.path,
+					Version: test.version,
+				},
+			}
+			if got := isLocalReplace(replace); got != test.want {
+				t.Fatalf("isLocalReplace() = %v, want %v", got, test.want)
+			}
+		})
+	}
 }
 
 func TestIncludeBasePreservesNestedModuleBoundaries(t *testing.T) {

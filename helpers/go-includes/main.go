@@ -440,7 +440,7 @@ func (t targetModule) modulesFromGoModLocalReplace(ctx context.Context) ([]*targ
 
 	var moduleRoots []string
 	for _, replace := range goMod.Replace {
-		if replace.New.Version != "" || (!strings.HasPrefix(replace.New.Path, "./") && !strings.HasPrefix(replace.New.Path, "../")) {
+		if !isLocalReplace(replace) {
 			continue
 		}
 		target := strings.TrimSuffix(replace.New.Path, "/")
@@ -451,6 +451,10 @@ func (t targetModule) modulesFromGoModLocalReplace(ctx context.Context) ([]*targ
 		moduleRoots = append(moduleRoots, moduleRoot)
 	}
 	return t.targetModules(moduleRoots)
+}
+
+func isLocalReplace(replace *modfile.Replace) bool {
+	return replace.New.Version == "" && modfile.IsDirectoryPath(replace.New.Path)
 }
 
 // targetModules resolves module roots using this module's workspace and modes.
