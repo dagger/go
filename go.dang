@@ -307,7 +307,9 @@ type GoModule {
       .withoutEntrypoint
       .withWorkdir("/helpers/go-includes")
       .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
+      .withEnvVariable("GOMODCACHE", "/go/pkg/mod")
       .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+      .withEnvVariable("GOCACHE", "/root/.cache/go-build")
       .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
       .withExec(["go", "build", "-o", "/usr/local/bin/go-includes", "."])
       .withDirectory("/ws", directory)
@@ -404,7 +406,9 @@ type GoModule {
       .withoutEntrypoint
       .withWorkdir("/helpers/go-includes")
       .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
+      .withEnvVariable("GOMODCACHE", "/go/pkg/mod")
       .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+      .withEnvVariable("GOCACHE", "/root/.cache/go-build")
       .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
       .withExec(["go", "build", "-o", "/usr/local/bin/go-includes", "."])
       .withDirectory("/ws", ws.directory("/", include: ["**/*.go", "**/go.mod"]))
@@ -560,7 +564,9 @@ type GoModule {
       .withoutEntrypoint
       .withWorkdir("/ws")
       .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
+      .withEnvVariable("GOMODCACHE", "/go/pkg/mod")
       .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+      .withEnvVariable("GOCACHE", "/root/.cache/go-build")
   }
 
   """
@@ -622,7 +628,9 @@ type GoModule {
       container
         .from(lintImage)
         .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
+        .withEnvVariable("GOMODCACHE", "/go/pkg/mod")
         .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+        .withEnvVariable("GOCACHE", "/root/.cache/go-build")
         .withMountedCache("/root/.cache/golangci-lint", cacheVolume("golangci-lint"))
         .withWorkdir("/src")
         .withDirectory(".", source(ws, lint: true))
@@ -722,7 +730,9 @@ type GoDirectory {
       .withoutEntrypoint
       .withWorkdir("/helpers/go-includes")
       .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
+      .withEnvVariable("GOMODCACHE", "/go/pkg/mod")
       .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+      .withEnvVariable("GOCACHE", "/root/.cache/go-build")
       .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
       .withExec(["go", "build", "-o", "/usr/local/bin/go-includes", "."])
       .withDirectory("/ws", directory)
@@ -809,7 +819,9 @@ type GoDirectory {
       .withoutEntrypoint
       .withWorkdir("/ws")
       .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
+      .withEnvVariable("GOMODCACHE", "/go/pkg/mod")
       .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+      .withEnvVariable("GOCACHE", "/root/.cache/go-build")
   }
 
   """
