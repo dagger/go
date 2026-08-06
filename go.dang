@@ -352,7 +352,7 @@ type GoModule {
           literal: true,
           filesOnly: true,
           limit: 1,
-        ).{id}
+        ).{{filePath}}
         .length > 0
     }
   }
