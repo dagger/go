@@ -111,12 +111,8 @@ type Go {
     includeSkipTest: Boolean! = true,
     includeSkipGenerate: Boolean! = true,
   ): [GoModule!]! {
-    # Discovery is delegated to the polyfill Workspace.findConfigDirs (honoring
-    # dagger/dagger#13688). Its results are cwd-relative, so resolve each back
-    # to a workspace-root path before it becomes a module root.
-    polyfill()
-      .workspace(ws)
-      .findConfigDirs(["go.mod"])
+    ws
+      .findRoots(markers: ["go.mod"])
       .filter { modPath =>
         modulePathIncluded(ws, modPath, include, exclude)
       }

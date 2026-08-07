@@ -1,14 +1,7 @@
 {
   "name": "go",
-  "engineVersion": "v1.0.0-beta.9",
+  "engineVersion": "v1.0.0-beta.10",
   "sdk": {
     "source": "dang"
-  },
-  "dependencies": [
-    {
-      "name": "polyfill",
-      "source": "github.com/dagger/polyfill@main",
-      "pin": "b30eb839000fe179e5d0544a9b667b21817b8120"
-    }
-  ]
+  }
 }

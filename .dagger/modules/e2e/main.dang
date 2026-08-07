@@ -84,7 +84,7 @@ type E2e {
   }
 
   """
-  Module discovery (findConfigDirs) returns exactly the directories holding a
+  Module discovery (findRoots) returns exactly the directories holding a
   go.mod, at any depth, and nothing else.
   """
   pub discoveryCheck(ws: Workspace!): Void @check {
