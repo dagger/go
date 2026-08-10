@@ -1,6 +1,6 @@
 {
   "name": "e2e",
-  "engineVersion": "v1.0.0-beta.7",
+  "engineVersion": "v1.0.0-beta.9",
   "sdk": {
     "source": "dang"
   },

@@ -139,7 +139,13 @@ func TestIncludeBasePreservesNestedModuleBoundaries(t *testing.T) {
 	want := []string{
 		"pkg/**/*.go",
 		"pkg/**/*.c",
+		"pkg/**/*.cc",
+		"pkg/**/*.cpp",
+		"pkg/**/*.cxx",
 		"pkg/**/*.h",
+		"pkg/**/*.hh",
+		"pkg/**/*.hpp",
+		"pkg/**/*.hxx",
 		"pkg/**/*.s",
 		"pkg/**/*.S",
 		"pkg/**/*.syso",
