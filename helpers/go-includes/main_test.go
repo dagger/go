@@ -139,7 +139,13 @@ func TestIncludeBasePreservesNestedModuleBoundaries(t *testing.T) {
 	want := []string{
 		"pkg/**/*.go",
 		"pkg/**/*.c",
+		"pkg/**/*.cc",
+		"pkg/**/*.cpp",
+		"pkg/**/*.cxx",
 		"pkg/**/*.h",
+		"pkg/**/*.hh",
+		"pkg/**/*.hpp",
+		"pkg/**/*.hxx",
 		"pkg/**/*.s",
 		"pkg/**/*.S",
 		"pkg/**/*.syso",
@@ -169,6 +175,21 @@ func TestTestDirectoriesFromFiles(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("testDirectoriesFromFiles mismatch:\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
+func TestLocalIndexTestDirectories(t *testing.T) {
+	index := &localIndex{goFilesByModule: map[string][]string{
+		"api": {
+			"api/auth/auth.go",
+			"api/auth/auth_test.go",
+			"api/auth/more_test.go",
+			"api/db/db_test.go",
+		},
+	}}
+	want := []string{"api/auth", "api/db"}
+	if got := index.testDirectoriesFor("api"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("testDirectoriesFor mismatch:\n got: %#v\nwant: %#v", got, want)
 	}
 }
 

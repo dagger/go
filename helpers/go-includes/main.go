@@ -378,7 +378,13 @@ func includeBasePatterns(moduleRoot string) []string {
 	patterns := []string{
 		"**/*.go",
 		"**/*.c",
+		"**/*.cc",
+		"**/*.cpp",
+		"**/*.cxx",
 		"**/*.h",
+		"**/*.hh",
+		"**/*.hpp",
+		"**/*.hxx",
 		"**/*.s",
 		"**/*.S",
 		"**/*.syso",

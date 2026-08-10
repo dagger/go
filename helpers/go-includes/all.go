@@ -46,11 +46,20 @@ func runAll(cliArgs []string) error {
 // The ".inc" suffix keeps a module's file distinct from a nested module's
 // subdirectory (e.g. "sdk/go.inc" never collides with the "sdk/go/" tree).
 func moduleIncludeFile(moduleRoot string) string {
+	return moduleOutputFile(moduleRoot, ".inc")
+}
+
+// moduleTestDirectoriesFile returns the per-module test-directory output file.
+func moduleTestDirectoriesFile(moduleRoot string) string {
+	return moduleOutputFile(moduleRoot, ".testdirs")
+}
+
+func moduleOutputFile(moduleRoot, suffix string) string {
 	name := moduleRoot
 	if moduleRoot == "." {
 		name = "_root_"
 	}
-	return filepath.FromSlash(name) + ".inc"
+	return filepath.FromSlash(name) + suffix
 }
 
 // writeAllDir writes one file of include patterns per module, so each consumer
@@ -67,6 +76,16 @@ func (index *localIndex) writeAllDir(dir string, lint, test, generate bool) erro
 		}
 		data := strings.Join(includes, "\n") + "\n"
 		if err := os.WriteFile(outPath, []byte(data), 0o644); err != nil {
+			return err
+		}
+
+		testDirs := index.testDirectoriesFor(moduleRoot)
+		testDirsData := strings.Join(testDirs, "\n")
+		if len(testDirs) > 0 {
+			testDirsData += "\n"
+		}
+		testDirsPath := filepath.Join(dir, moduleTestDirectoriesFile(moduleRoot))
+		if err := os.WriteFile(testDirsPath, []byte(testDirsData), 0o644); err != nil {
 			return err
 		}
 	}
@@ -213,6 +232,16 @@ func (index *localIndex) directives(moduleRoot string) ([]goDirective, error) {
 		directives = append(directives, fileDirectives...)
 	}
 	return directives, nil
+}
+
+func (index *localIndex) testDirectoriesFor(moduleRoot string) []string {
+	var testFiles []string
+	for _, filePath := range index.goFilesByModule[moduleRoot] {
+		if strings.HasSuffix(filePath, "_test.go") {
+			testFiles = append(testFiles, filePath)
+		}
+	}
+	return testDirectoriesFromFiles(testFiles)
 }
 
 // replaceModules resolves local go.mod replace targets to module roots.

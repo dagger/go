@@ -56,10 +56,23 @@ type Go {
       self.version = if (base == null) { version ?? "1.26" } else { null }
       self.base = base ?? container.from("golang:" + (version ?? "1.26") + "-alpine")
       self.includeExtraFiles = includeExtraFiles
-      self.lint = lint
-      self.test = test
-      self.generate = generate
+      self.lint = normalizePatterns(lint)
+      self.test = normalizePatterns(test)
+      self.generate = normalizePatterns(generate)
       self
+    }
+  }
+
+  """
+  Normalize selector strings from workspace module settings.
+
+  Dagger v1.0.0-beta.4 may pass TOML string arrays as JSON-fragment strings
+  like ["[\"!infra\"", "\"!docs\"]"]; trim those wrappers so selection still
+  sees the intended patterns.
+  """
+  let normalizePatterns(patterns: [String!]!): [String!]! {
+    patterns.map { p =>
+      p.trimPrefix("[").trimSuffix("]").trimPrefix("\"").trimSuffix("\"")
     }
   }
 
@@ -293,31 +306,6 @@ type GoModule {
   }
 
   """
-  Absolute workspace path for this module root.
-  """
-  let workspacePath: String! {
-    if (path == ".") { "/" } else { "/" + path.trimSuffix("/") }
-  }
-
-  """
-  Base container for the Go include helper.
-  """
-  let goIncludesHelper(ws: Workspace!): Container! {
-    baseImage
-      .withoutEntrypoint
-      .withWorkdir("/helpers/go-includes")
-      .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
-      .withEnvVariable("GOMODCACHE", "/go/pkg/mod")
-      .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
-      .withEnvVariable("GOCACHE", "/root/.cache/go-build")
-      .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
-      .withExec(["go", "build", "-o", "/usr/local/bin/go-includes", "."])
-      .withDirectory("/ws", directory)
-      .withWorkdir("/ws")
-      .withEnvVariable("DAGGER_GO_WORKSPACE_ID", toJSON(ws.id))
-  }
-
-  """
   Whether this module falls outside the configured lint selection.
   """
   pub skipLint(ws: Workspace!): Boolean! {
@@ -416,10 +404,9 @@ type GoModule {
   }
 
   """
-  Discovery output directory: one file of include patterns per module, named
-  "<moduleRoot>.inc" (the root module is "_root_.inc"). For a given mode every
-  module produces the same container and exec, so discovery runs once per
-  workspace rather than once per module, and each module reads only its own file.
+  Discovery output directory: include patterns and test directories for every
+  module. For a given mode every module produces the same container and exec,
+  so discovery runs once per workspace and each module reads only its own files.
   """
   let allIncludesDir(
     ws: Workspace!,
@@ -455,12 +442,15 @@ type GoModule {
   Directories in this module containing Go test files.
   """
   pub testDirectories(ws: Workspace!): [GoDirectory!]! {
-    goIncludesHelper(ws)
-      .withExec(
-        ["go-includes", "--output", "/output", "--test-dirs", workspacePath],
-        experimentalPrivilegedNesting: true,
-      )
-      .file("/output")
+    let outputStem = if (path == ".") { "_root_" } else { path }
+    let index = allIncludesDir(ws, lint: false, test: true, generate: false)
+    let discoveredIncludes = index
+      .file(outputStem + ".inc")
+      .contents
+      .split("\n")
+      .filter { pattern => pattern != "" }
+    index
+      .file(outputStem + ".testdirs")
       .contents
       .split("\n")
       .filter { testPath => testPath != "" }
@@ -471,6 +461,7 @@ type GoModule {
           modulePath: path,
           baseImage: baseImage,
           includeExtraFiles: includeExtraFiles,
+          includeDiscovered: discoveredIncludes,
           testPatterns: testPatterns,
         )
       }
@@ -493,7 +484,13 @@ type GoModule {
     [
       subpath("**/*.go"),
       subpath("**/*.c"),
+      subpath("**/*.cc"),
+      subpath("**/*.cpp"),
+      subpath("**/*.cxx"),
       subpath("**/*.h"),
+      subpath("**/*.hh"),
+      subpath("**/*.hpp"),
+      subpath("**/*.hxx"),
       subpath("**/*.s"),
       subpath("**/*.S"),
       subpath("**/*.syso"),
@@ -627,6 +624,8 @@ type GoModule {
       let lintImage = "docker.io/golangci/golangci-lint:v2.11.4-alpine@sha256:" + "72bcd68512b4e27540dd3a778a1b7afd45759d8145cfb3c089f1d7af53e718e9"
       container
         .from(lintImage)
+        # cgo dependencies may need a C/C++ toolchain during typecheck.
+        .withExec(["apk", "add", "--no-cache", "build-base"])
         .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
         .withEnvVariable("GOMODCACHE", "/go/pkg/mod")
         .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
@@ -695,6 +694,11 @@ type GoDirectory {
   let includeExtraFiles: [String!]!
 
   """
+  Additional workspace inputs discovered for this directory's Go module.
+  """
+  let includeDiscovered: [String!]!
+
+  """
   Base image used by this directory's Go containers.
   """
   let baseImage: Container!
@@ -713,31 +717,6 @@ type GoDirectory {
     } else {
       modulePath.trimSuffix("/") + "/" + relativePath
     }
-  }
-
-  """
-  Absolute workspace path for this directory's Go module root.
-  """
-  let workspacePath: String! {
-    if (modulePath == ".") { "/" } else { "/" + modulePath.trimSuffix("/") }
-  }
-
-  """
-  Base container for the Go include helper.
-  """
-  let goIncludesHelper: Container! {
-    baseImage
-      .withoutEntrypoint
-      .withWorkdir("/helpers/go-includes")
-      .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
-      .withEnvVariable("GOMODCACHE", "/go/pkg/mod")
-      .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
-      .withEnvVariable("GOCACHE", "/root/.cache/go-build")
-      .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
-      .withExec(["go", "build", "-o", "/usr/local/bin/go-includes", "."])
-      .withDirectory("/ws", directory)
-      .withWorkdir("/ws")
-      .withEnvVariable("DAGGER_GO_WORKSPACE_ID", toJSON(ws.id))
   }
 
   """
@@ -767,21 +746,6 @@ type GoDirectory {
       let prefix = p.trimSuffix("/**")
       modulePath == prefix or modulePath.hasPrefix(prefix + "/")
     }
-  }
-
-  """
-  Additional workspace include patterns discovered for this directory's Go tests.
-  """
-  let includeDiscovered: [String!]! {
-    goIncludesHelper
-      .withExec(
-        ["go-includes", "--output", "/output", "--test", workspacePath],
-        experimentalPrivilegedNesting: true,
-      )
-      .file("/output")
-      .contents
-      .split("\n")
-      .filter { pattern => pattern != "" }
   }
 
   """
