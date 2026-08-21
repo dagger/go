@@ -113,6 +113,7 @@ type Go {
   ): [GoModule!]! {
     ws
       .findRoots(markers: ["go.mod"])
+      .map { root => workspaceRootPath(ws, root) }
       .filter { modPath =>
         modulePathIncluded(ws, modPath, include, exclude)
       }
@@ -132,6 +133,22 @@ type Go {
         (includeSkipTest or mod.skipTest(ws) == false) and
         (includeSkipGenerate or mod.skipGenerate(ws) == false)
       }
+  }
+
+  """
+  Resolve a cwd-relative discovery result to a workspace-root-relative path.
+
+  findRoots answers relative to the workspace cwd — "." for the cwd itself and
+  ".." for an enclosing project — while every other path this module handles is
+  workspace-root-relative.
+  """
+  let workspaceRootPath(ws: Workspace!, cwdPath: String!): String! {
+    let segments = cwdPath.split("/").filter { segment => segment != "" and segment != "." }
+    let up = segments.filter { segment => segment == ".." }.length
+    let down = segments.filter { segment => segment != ".." }
+    let resolved = ws.cwd.split("/").filter { segment => segment != "" }.dropLast(up) + down
+
+    if (resolved.length == 0) { "." } else { resolved.join("/") }
   }
 
   let modulePathIncluded(

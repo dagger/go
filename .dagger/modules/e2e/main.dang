@@ -111,6 +111,42 @@ type E2e {
   }
 
   """
+  Discovery is anchored at the workspace cwd, but the module roots it reports
+  stay workspace-root-relative, so they remain usable with every other
+  workspace API.
+  """
+  pub discoveryFromSubdirCheck(ws: Workspace!): Void @check {
+    let tool = go(version: "1.26.1")
+
+    let below = tool
+      .modules(ws.withWorkdir("fixtures/go-module-with-nested-module"))
+      .{{path}}
+    assert(
+      containsModulePath(below, "fixtures/go-module-with-nested-module"),
+      "discovery from a module root missed that module",
+    )
+    assert(
+      containsModulePath(below, "fixtures/go-module-with-nested-module/nested"),
+      "discovery from a module root missed a module below it",
+    )
+    assert(
+      containsModulePath(below, "fixtures/go-module-cross-include-a") == false,
+      "discovery from a subdirectory reached a module outside it",
+    )
+
+    let inside = ws.withWorkdir("testdata/go-module-with-testdata/testdata")
+    assert(
+      containsModulePath(tool.modules(inside).{{path}}, "testdata/go-module-with-testdata"),
+      "discovery inside a module missed the enclosing module",
+    )
+
+    # A root reported as ".." has to survive being mounted, not just be spelled
+    # right: every source mount resolves it against the workspace root.
+    tool.testAll(inside)
+    null
+  }
+
+  """
   Run testAll while respecting per-module skip configuration.
   """
   pub singleModuleCheck(ws: Workspace!): Void @check {
