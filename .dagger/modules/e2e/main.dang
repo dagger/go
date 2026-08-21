@@ -88,7 +88,7 @@ type E2e {
   go.mod, at any depth, and nothing else.
   """
   pub discoveryCheck(ws: Workspace!): Void @check {
-    let paths = go(version: "1.26.1").modules(ws).{path}
+    let paths = go(version: "1.26.1").modules(ws).{{path}}
 
     # A go.mod is discovered at any depth: top level, nested inside another
     # module, and several directories deep.
@@ -179,7 +179,7 @@ type E2e {
 
     let testDirs = mod.testDirectories(ws)
     assert(
-      containsModulePath(testDirs.{path}, baseFixturePath),
+      containsModulePath(testDirs.{{path}}, baseFixturePath),
       "custom base test directory discovery did not include expected path",
     )
 
@@ -224,7 +224,7 @@ type E2e {
     )
 
     let tool = go(version: "1.26.1", lint: lint, test: test, generate: generate)
-    let allModulePaths = tool.modules(ws).{path}
+    let allModulePaths = tool.modules(ws).{{path}}
     assert(
       containsModulePath(allModulePaths, "fixtures/go-module-cross-include-a"),
       "unfiltered modules did not include expected fixture module",
@@ -240,7 +240,7 @@ type E2e {
 
     let includedModulePaths = tool
       .modules(ws, include: ["fixtures/go-module-cross-include-a"])
-      .{path}
+      .{{path}}
     assert(
       containsModulePath(includedModulePaths, "fixtures/go-module-cross-include-a"),
       "modules include filter did not include matching module root",
@@ -252,7 +252,7 @@ type E2e {
 
     let excludedModulePaths = tool
       .modules(ws, exclude: ["fixtures/go-module-cross-include-a"])
-      .{path}
+      .{{path}}
     assert(
       containsModulePath(excludedModulePaths, "fixtures/go-module-cross-include-a") == false,
       "modules exclude filter included excluded module root",
@@ -264,7 +264,7 @@ type E2e {
         include: ["fixtures/go-module-cross-include-*"],
         exclude: ["fixtures/go-module-cross-include-b"],
       )
-      .{path}
+      .{{path}}
     assert(
       containsModulePath(combinedModulePaths, "fixtures/go-module-cross-include-a"),
       "modules combined filters did not include matching module root",
@@ -276,7 +276,7 @@ type E2e {
 
     let contentMatchedModulePaths = tool
       .modules(ws, include: ["**/module-a-only.data"])
-      .{path}
+      .{{path}}
     assert(
       containsModulePath(contentMatchedModulePaths, "fixtures/go-module-cross-include-a"),
       "modules include filter did not match module directory contents",
@@ -288,7 +288,7 @@ type E2e {
 
     let lintSkippedModulePaths = tool
       .modules(ws, includeSkipLint: false)
-      .{path}
+      .{{path}}
     assert(
       containsModulePath(lintSkippedModulePaths, "testdata/go-module-excluded") == false,
       "modules includeSkipLint false included lint-skipped module",
@@ -308,7 +308,7 @@ type E2e {
 
     let testSkippedModulePaths = tool
       .modules(ws, includeSkipTest: false)
-      .{path}
+      .{{path}}
     assert(
       containsModulePath(testSkippedModulePaths, "testdata/go-module-excluded") == false,
       "modules includeSkipTest false included test-skipped module",
@@ -328,7 +328,7 @@ type E2e {
 
     let generateSkippedModulePaths = tool
       .modules(ws, includeSkipGenerate: false)
-      .{path}
+      .{{path}}
     assert(
       containsModulePath(generateSkippedModulePaths, "testdata/go-module-excluded") == false,
       "modules includeSkipGenerate false included generate-skipped module",
@@ -614,7 +614,7 @@ type E2e {
     let excludeOnlyLintModules = go(
       version: "1.26.1",
       lint: ["!" + emptyFixturePath],
-    ).modules(ws, includeSkipLint: false).{path}
+    ).modules(ws, includeSkipLint: false).{{path}}
     assert(
       containsModulePath(excludeOnlyLintModules, lintFailureFixturePath),
       "exclude-only lint settings excluded every non-matching module",
