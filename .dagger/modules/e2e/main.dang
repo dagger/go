@@ -7,6 +7,7 @@ type E2e {
   let baseFixturePath: String! = "testdata/go-module-custom-base"
   let baseGeneratedFilePath: String! = baseFixturePath + "/generated.go"
   let emptyFixturePath: String! = "testdata/go-module-empty"
+  let regenerateFixturePath: String! = "testdata/go-module-regenerate"
   let cgoCxxFixturePath: String! = "testdata/go-module-cgo-cxx"
   let lintFailureFixturePath: String! = "testdata/go-module-lint-fail"
   let lint: [String!]! = [
@@ -598,6 +599,32 @@ type E2e {
       "module without Go files generate produced removed paths",
     )
 
+    null
+  }
+
+  """
+  Regenerating a module whose generated output is already present and current
+  reports no changes at all.
+
+  The changeset baseline is the module's real source, so a second run has to
+  see the files the first one produced; a baseline that read as empty would
+  report every generated file as newly added.
+  """
+  pub regenerateCheck(ws: Workspace!): Void @check {
+    let changes = go(version: "1.26.1").module(ws, regenerateFixturePath).generate(ws)
+
+    assert(
+      changes.addedPaths.length == 0,
+      "regenerate re-added existing generated output: " + changes.addedPaths.join(", "),
+    )
+    assert(
+      changes.modifiedPaths.length == 0,
+      "regenerate rewrote up-to-date generated output: " + changes.modifiedPaths.join(", "),
+    )
+    assert(
+      changes.removedPaths.length == 0,
+      "regenerate removed existing files: " + changes.removedPaths.join(", "),
+    )
     null
   }
 
