@@ -7,6 +7,7 @@ type E2e {
   let baseFixturePath: String! = "testdata/go-module-custom-base"
   let baseGeneratedFilePath: String! = baseFixturePath + "/generated.go"
   let emptyFixturePath: String! = "testdata/go-module-empty"
+  let regenerateFixturePath: String! = "testdata/go-module-regenerate"
   let cgoCxxFixturePath: String! = "testdata/go-module-cgo-cxx"
   let lintFailureFixturePath: String! = "testdata/go-module-lint-fail"
   let lint: [String!]! = [
@@ -84,11 +85,11 @@ type E2e {
   }
 
   """
-  Module discovery (findConfigDirs) returns exactly the directories holding a
+  Module discovery (findRoots) returns exactly the directories holding a
   go.mod, at any depth, and nothing else.
   """
   pub discoveryCheck(ws: Workspace!): Void @check {
-    let paths = go(version: "1.26.1").modules(ws).{path}
+    let paths = go(version: "1.26.1").modules(ws).{{path}}
 
     # A go.mod is discovered at any depth: top level, nested inside another
     # module, and several directories deep.
@@ -107,6 +108,42 @@ type E2e {
       "fixtures/go-module-cross-include-a/testdata",
     ].filter { p => containsModulePath(paths, p) }
     assert(invented.length == 0, "discovery invented modules: " + invented.join(", "))
+    null
+  }
+
+  """
+  Discovery is anchored at the workspace cwd, but the module roots it reports
+  stay workspace-root-relative, so they remain usable with every other
+  workspace API.
+  """
+  pub discoveryFromSubdirCheck(ws: Workspace!): Void @check {
+    let tool = go(version: "1.26.1")
+
+    let below = tool
+      .modules(ws.withWorkdir("fixtures/go-module-with-nested-module"))
+      .{{path}}
+    assert(
+      containsModulePath(below, "fixtures/go-module-with-nested-module"),
+      "discovery from a module root missed that module",
+    )
+    assert(
+      containsModulePath(below, "fixtures/go-module-with-nested-module/nested"),
+      "discovery from a module root missed a module below it",
+    )
+    assert(
+      containsModulePath(below, "fixtures/go-module-cross-include-a") == false,
+      "discovery from a subdirectory reached a module outside it",
+    )
+
+    let inside = ws.withWorkdir("testdata/go-module-with-testdata/testdata")
+    assert(
+      containsModulePath(tool.modules(inside).{{path}}, "testdata/go-module-with-testdata"),
+      "discovery inside a module missed the enclosing module",
+    )
+
+    # A root reported as ".." has to survive being mounted, not just be spelled
+    # right: every source mount resolves it against the workspace root.
+    tool.testAll(inside)
     null
   }
 
@@ -179,7 +216,7 @@ type E2e {
 
     let testDirs = mod.testDirectories(ws)
     assert(
-      containsModulePath(testDirs.{path}, baseFixturePath),
+      containsModulePath(testDirs.{{path}}, baseFixturePath),
       "custom base test directory discovery did not include expected path",
     )
 
@@ -224,7 +261,7 @@ type E2e {
     )
 
     let tool = go(version: "1.26.1", lint: lint, test: test, generate: generate)
-    let allModulePaths = tool.modules(ws).{path}
+    let allModulePaths = tool.modules(ws).{{path}}
     assert(
       containsModulePath(allModulePaths, "fixtures/go-module-cross-include-a"),
       "unfiltered modules did not include expected fixture module",
@@ -240,7 +277,7 @@ type E2e {
 
     let includedModulePaths = tool
       .modules(ws, include: ["fixtures/go-module-cross-include-a"])
-      .{path}
+      .{{path}}
     assert(
       containsModulePath(includedModulePaths, "fixtures/go-module-cross-include-a"),
       "modules include filter did not include matching module root",
@@ -252,7 +289,7 @@ type E2e {
 
     let excludedModulePaths = tool
       .modules(ws, exclude: ["fixtures/go-module-cross-include-a"])
-      .{path}
+      .{{path}}
     assert(
       containsModulePath(excludedModulePaths, "fixtures/go-module-cross-include-a") == false,
       "modules exclude filter included excluded module root",
@@ -264,7 +301,7 @@ type E2e {
         include: ["fixtures/go-module-cross-include-*"],
         exclude: ["fixtures/go-module-cross-include-b"],
       )
-      .{path}
+      .{{path}}
     assert(
       containsModulePath(combinedModulePaths, "fixtures/go-module-cross-include-a"),
       "modules combined filters did not include matching module root",
@@ -276,7 +313,7 @@ type E2e {
 
     let contentMatchedModulePaths = tool
       .modules(ws, include: ["**/module-a-only.data"])
-      .{path}
+      .{{path}}
     assert(
       containsModulePath(contentMatchedModulePaths, "fixtures/go-module-cross-include-a"),
       "modules include filter did not match module directory contents",
@@ -288,7 +325,7 @@ type E2e {
 
     let lintSkippedModulePaths = tool
       .modules(ws, includeSkipLint: false)
-      .{path}
+      .{{path}}
     assert(
       containsModulePath(lintSkippedModulePaths, "testdata/go-module-excluded") == false,
       "modules includeSkipLint false included lint-skipped module",
@@ -308,7 +345,7 @@ type E2e {
 
     let testSkippedModulePaths = tool
       .modules(ws, includeSkipTest: false)
-      .{path}
+      .{{path}}
     assert(
       containsModulePath(testSkippedModulePaths, "testdata/go-module-excluded") == false,
       "modules includeSkipTest false included test-skipped module",
@@ -328,7 +365,7 @@ type E2e {
 
     let generateSkippedModulePaths = tool
       .modules(ws, includeSkipGenerate: false)
-      .{path}
+      .{{path}}
     assert(
       containsModulePath(generateSkippedModulePaths, "testdata/go-module-excluded") == false,
       "modules includeSkipGenerate false included generate-skipped module",
@@ -566,6 +603,32 @@ type E2e {
   }
 
   """
+  Regenerating a module whose generated output is already present and current
+  reports no changes at all.
+
+  The changeset baseline is the module's real source, so a second run has to
+  see the files the first one produced; a baseline that read as empty would
+  report every generated file as newly added.
+  """
+  pub regenerateCheck(ws: Workspace!): Void @check {
+    let changes = go(version: "1.26.1").module(ws, regenerateFixturePath).generate(ws)
+
+    assert(
+      changes.addedPaths.length == 0,
+      "regenerate re-added existing generated output: " + changes.addedPaths.join(", "),
+    )
+    assert(
+      changes.modifiedPaths.length == 0,
+      "regenerate rewrote up-to-date generated output: " + changes.modifiedPaths.join(", "),
+    )
+    assert(
+      changes.removedPaths.length == 0,
+      "regenerate removed existing files: " + changes.removedPaths.join(", "),
+    )
+    null
+  }
+
+  """
   Gitignore-style selection: "!" excludes, an include-only list scopes down.
   """
   pub selectionCheck(ws: Workspace!): Void @check {
@@ -614,7 +677,7 @@ type E2e {
     let excludeOnlyLintModules = go(
       version: "1.26.1",
       lint: ["!" + emptyFixturePath],
-    ).modules(ws, includeSkipLint: false).{path}
+    ).modules(ws, includeSkipLint: false).{{path}}
     assert(
       containsModulePath(excludeOnlyLintModules, lintFailureFixturePath),
       "exclude-only lint settings excluded every non-matching module",
