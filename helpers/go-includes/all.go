@@ -20,7 +20,6 @@ import (
 func runAll(cliArgs []string) error {
 	flags := flag.NewFlagSet("go-includes --all", flag.ExitOnError)
 	flags.Bool("all", false, "compute includes for every module")
-	lint := flags.Bool("lint", false, "include lint inputs")
 	test := flags.Bool("test", false, "include test inputs")
 	generate := flags.Bool("generate", false, "include generate inputs")
 	root := flags.String("root", ".", "workspace root to scan")
@@ -31,7 +30,7 @@ func runAll(cliArgs []string) error {
 	if *outputDir == "" {
 		return fmt.Errorf("--output-dir is required")
 	}
-	if !*lint && !*test && !*generate {
+	if !*test && !*generate {
 		*test = true
 	}
 
@@ -39,7 +38,7 @@ func runAll(cliArgs []string) error {
 	if err != nil {
 		return err
 	}
-	return index.writeAllDir(*outputDir, *lint, *test, *generate)
+	return index.writeAllDir(*outputDir, *test, *generate)
 }
 
 // moduleIncludeFile returns the per-module output filename for a module root.
@@ -64,9 +63,9 @@ func moduleOutputFile(moduleRoot, suffix string) string {
 
 // writeAllDir writes one file of include patterns per module, so each consumer
 // reads only its own slice instead of re-scanning a combined blob.
-func (index *localIndex) writeAllDir(dir string, lint, test, generate bool) error {
+func (index *localIndex) writeAllDir(dir string, test, generate bool) error {
 	for _, moduleRoot := range index.moduleRoots {
-		includes, err := index.includesFor(moduleRoot, lint, test, generate)
+		includes, err := index.includesFor(moduleRoot, test, generate)
 		if err != nil {
 			return err
 		}
@@ -153,7 +152,7 @@ func indexLocal(root string) (*localIndex, error) {
 }
 
 // includesFor mirrors targetModule.includes using local file reads.
-func (index *localIndex) includesFor(moduleRoot string, lint, test, generate bool) ([]string, error) {
+func (index *localIndex) includesFor(moduleRoot string, test, generate bool) ([]string, error) {
 	queued := map[string]bool{moduleRoot: true}
 	queue := []string{moduleRoot}
 	var includes []string
