@@ -9,22 +9,11 @@ type E2e {
   let emptyFixturePath: String! = "testdata/go-module-empty"
   let regenerateFixturePath: String! = "testdata/go-module-regenerate"
   let cgoCxxFixturePath: String! = "testdata/go-module-cgo-cxx"
-  let lintFailureFixturePath: String! = "testdata/go-module-lint-fail"
-  let lint: [String!]! = [
-    "**",
-    "!" + baseFixturePath,
-    "!" + cgoCxxFixturePath,
-    "!" + emptyFixturePath,
-    "!" + lintFailureFixturePath,
-    "!testdata/go-module-excluded",
-    "!testdata/go-module-skip-tree",
-  ]
   let test: [String!]! = [
     "**",
     "!" + baseFixturePath,
     "!" + cgoCxxFixturePath,
     "!" + emptyFixturePath,
-    "!" + lintFailureFixturePath,
     "!testdata/go-module-excluded",
     "!testdata/go-module-skip-tree",
   ]
@@ -74,14 +63,6 @@ type E2e {
   """
   let selectsOut(ws: Workspace!, patterns: [String!]!, modPath: String!): Boolean! {
     go(version: "1.26.1", generate: patterns).module(ws, modPath, findUp: false).skipGenerate(ws)
-  }
-
-  """
-  Whether a module at modPath is excluded from lint selection `patterns`.
-  Uses findUp: false so modPath need not be a real module on disk.
-  """
-  let lintSelectsOut(ws: Workspace!, patterns: [String!]!, modPath: String!): Boolean! {
-    go(version: "1.26.1", lint: patterns).module(ws, modPath, findUp: false).skipLint(ws)
   }
 
   """
@@ -151,10 +132,8 @@ type E2e {
   Run testAll while respecting per-module skip configuration.
   """
   pub singleModuleCheck(ws: Workspace!): Void @check {
-    let tool = go(version: "1.26.1", lint: lint, test: test, generate: generate)
-    tool.lintAll(ws)
+    let tool = go(version: "1.26.1", test: test, generate: generate)
     tool.testAll(ws)
-    tool.module(ws, "testdata/go-module-excluded").lint(ws)
     tool.module(ws, "testdata/go-module-excluded").test(ws)
   }
 
@@ -182,11 +161,10 @@ type E2e {
   }
 
   """
-  Cgo C++ source is mounted and linked, not merely typechecked by lint.
+  Cgo C++ source is mounted and linked when running Go tests.
   """
-  pub cgoCxxLintCheck(ws: Workspace!): Void @check {
+  pub cgoCxxCheck(ws: Workspace!): Void @check {
     let mod = go(base: cgoCxxBase).module(ws, cgoCxxFixturePath)
-    mod.lint(ws)
     mod.test(ws)
   }
 
@@ -260,7 +238,7 @@ type E2e {
       "module lookup unexpectedly snapped with findUp false: " + direct.path,
     )
 
-    let tool = go(version: "1.26.1", lint: lint, test: test, generate: generate)
+    let tool = go(version: "1.26.1", test: test, generate: generate)
     let allModulePaths = tool.modules(ws).{{path}}
     assert(
       containsModulePath(allModulePaths, "fixtures/go-module-cross-include-a"),
@@ -323,26 +301,6 @@ type E2e {
       "modules include filter matched content outside the module directory",
     )
 
-    let lintSkippedModulePaths = tool
-      .modules(ws, includeSkipLint: false)
-      .{{path}}
-    assert(
-      containsModulePath(lintSkippedModulePaths, "testdata/go-module-excluded") == false,
-      "modules includeSkipLint false included lint-skipped module",
-    )
-    assert(
-      containsModulePath(lintSkippedModulePaths, "testdata/go-module-empty") == false,
-      "modules includeSkipLint false included module with lint skip config",
-    )
-    assert(
-      containsModulePath(lintSkippedModulePaths, "testdata/go-module-skip-tree/nested") == false,
-      "modules includeSkipLint false included module with ancestor lint skip config",
-    )
-    assert(
-      containsModulePath(lintSkippedModulePaths, "testdata/go-module-with-testdata"),
-      "modules includeSkipLint false excluded non-lint-skipped module",
-    )
-
     let testSkippedModulePaths = tool
       .modules(ws, includeSkipTest: false)
       .{{path}}
@@ -398,10 +356,6 @@ type E2e {
 
     let skipped = tool.module(ws, "testdata/go-module-excluded")
     assert(
-      skipped.skipLint(ws),
-      "module did not detect lint skip config",
-    )
-    assert(
       skipped.skipTest(ws),
       "module did not detect test skip config",
     )
@@ -411,10 +365,6 @@ type E2e {
     )
 
     let treeSkipped = tool.module(ws, "testdata/go-module-skip-tree/nested")
-    assert(
-      treeSkipped.skipLint(ws),
-      "nested module did not inherit lint skip config from ancestor",
-    )
     assert(
       treeSkipped.skipTest(ws),
       "nested module did not inherit test skip config from ancestor",
@@ -450,7 +400,6 @@ type E2e {
     )
 
     let discovered = mod.includeDiscovered(ws, test: true)
-    let lintDiscovered = mod.includeDiscovered(ws, lint: true)
     assert(
       containsPath(discovered, "LICENSE"),
       "test source includes did not include workspace-root directive include",
@@ -458,14 +407,6 @@ type E2e {
     assert(
       containsPath(discovered, "testdata/go-module-with-testdata/embedded-assets/message.txt"),
       "test source includes did not include go:embed file",
-    )
-    assert(
-      containsPath(lintDiscovered, "LICENSE") == false,
-      "lint source included test-only directive include",
-    )
-    assert(
-      containsPath(lintDiscovered, "testdata/go-module-with-testdata/embedded-assets/message.txt"),
-      "lint source did not include go:embed file",
     )
     assert(
       mod.source(ws, test: true).file("LICENSE").contents.contains("Apache License"),
@@ -663,44 +604,6 @@ type E2e {
     # No includes means "everything", minus excludes.
     assert(selectsOut(ws, ["!docs"], "docs"), "exclude-only list did not exclude")
     assert(selectsOut(ws, ["!docs"], "core") == false, "exclude-only list did not include the rest")
-    assert(lintSelectsOut(ws, ["!docs"], "docs"), "lint exclude-only list did not exclude")
-    assert(lintSelectsOut(ws, ["!docs"], "core") == false, "lint exclude-only list did not include the rest")
-    assert(
-      lintSelectsOut(ws, ["[\"!docs\"", "\"!tmp\"]"], "docs"),
-      "lint did not normalize beta workspace-settings array fragments before excluding",
-    )
-    assert(
-      lintSelectsOut(ws, ["[\"!docs\"", "\"!tmp\"]"], "core") == false,
-      "lint did not normalize beta workspace-settings array fragments before including the rest",
-    )
-
-    let excludeOnlyLintModules = go(
-      version: "1.26.1",
-      lint: ["!" + emptyFixturePath],
-    ).modules(ws, includeSkipLint: false).{{path}}
-    assert(
-      containsModulePath(excludeOnlyLintModules, lintFailureFixturePath),
-      "exclude-only lint settings excluded every non-matching module",
-    )
-    assert(
-      containsModulePath(excludeOnlyLintModules, emptyFixturePath) == false,
-      "exclude-only lint settings included the excluded module",
-    )
-
-    let lintFailure = try {
-      go(
-        version: "1.26.1",
-        lint: ["!" + emptyFixturePath],
-      ).module(ws, lintFailureFixturePath).lint(ws)
-      "lint unexpectedly succeeded"
-    } catch {
-      err => err.message
-    }
-    assert(
-      lintFailure.contains("exit code"),
-      "exclude-only lint settings did not run lint on a non-excluded module: " + lintFailure,
-    )
-
     # "." selects only the root module.
     assert(selectsOut(ws, ["."], "core"), "\".\" leaked to a non-root module")
     assert(selectsOut(ws, ["."], ".") == false, "\".\" did not select the root module")

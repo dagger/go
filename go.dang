@@ -1,6 +1,8 @@
 """
 A Dagger module for Go - a programming language for building simple, secure, scalable systems.
 
+For Go lint checks, use github.com/dagger/golangci-lint.
+
 https://dagger.io
 https://golang.org
 """
@@ -32,21 +34,17 @@ type Go {
     """
     includeExtraFiles: [String!]! = [],
     """
-    Module roots to lint. A bare pattern selects, a "!"-prefixed pattern
+    Module roots to test. A bare pattern selects, a "!"-prefixed pattern
     excludes, and an exclude always wins (order does not matter). With no
-    selecting pattern, every module is linted. Supported patterns: "**" or "*"
+    selecting pattern, every module is tested. Supported patterns: "**" or "*"
     (all modules), and "X" or "X/**" (module X and any module below it); other
-    glob forms (mid-path "**", single-segment "*") are not interpreted. For
-    example ["**", "!docs"] lints all but docs; ["e2e/**"] lints only e2e;
-    ["!**"] lints nothing.
-    """
-    lint: [String!]! = ["**"],
-    """
-    Module roots to test. Same selection rules as `lint`.
+    glob forms (mid-path "**", single-segment "*") are not interpreted.
+    Examples: ["**", "!docs"] tests all but docs; ["e2e/**"] tests only e2e;
+    ["!**"] tests nothing.
     """
     test: [String!]! = ["**"],
     """
-    Module roots to run go generate in. Same selection rules as `lint`.
+    Module roots to run go generate in. Same selection rules as `test`.
     """
     generate: [String!]! = ["**"],
   ) {
@@ -56,7 +54,6 @@ type Go {
       self.version = if (base == null) { version ?? "1.26" } else { null }
       self.base = base ?? container.from("golang:" + (version ?? "1.26") + "-alpine")
       self.includeExtraFiles = includeExtraFiles
-      self.lint = normalizePatterns(lint)
       self.test = normalizePatterns(test)
       self.generate = normalizePatterns(generate)
       self
@@ -84,17 +81,12 @@ type Go {
   pub includeExtraFiles: [String!]! = []
 
   """
-  Module roots to lint ("!" excludes; see the `lint` constructor argument).
-  """
-  pub lint: [String!]! = ["**"]
-
-  """
-  Module roots to test ("!" excludes; see the `lint` constructor argument).
+  Module roots to test ("!" excludes; see the `test` constructor argument).
   """
   pub test: [String!]! = ["**"]
 
   """
-  Module roots to run go generate in ("!" excludes; see `lint`).
+  Module roots to run go generate in ("!" excludes; see `test`).
   """
   pub generate: [String!]! = ["**"]
 
@@ -107,7 +99,6 @@ type Go {
     ws: Workspace!,
     include: [String!]! = [],
     exclude: [String!]! = [],
-    includeSkipLint: Boolean! = true,
     includeSkipTest: Boolean! = true,
     includeSkipGenerate: Boolean! = true,
   ): [GoModule!]! {
@@ -123,13 +114,11 @@ type Go {
           version: version,
           baseImage: base,
           includeExtraFiles: includeExtraFiles,
-          lintPatterns: lint,
           testPatterns: test,
           generatePatterns: generate,
         )
       }
       .filter { mod =>
-        (includeSkipLint or mod.skipLint(ws) == false) and
         (includeSkipTest or mod.skipTest(ws) == false) and
         (includeSkipGenerate or mod.skipGenerate(ws) == false)
       }
@@ -193,29 +182,9 @@ type Go {
       version: version,
       baseImage: base,
       includeExtraFiles: includeExtraFiles,
-      lintPatterns: lint,
       testPatterns: test,
       generatePatterns: generate,
     )
-  }
-
-  """
-  Run golangci-lint in every discovered Go module.
-  Modules configured to skip lint are skipped.
-  """
-  pub lintAll(ws: Workspace!): Void @check {
-    let layers = modules(ws, includeSkipLint: false).reduce(directory) { layers, mod =>
-      layers.withDirectory(
-        mod.path,
-        directory.withFile("go.mod", mod.lintExec(ws).file("go.mod")),
-      )
-    }
-    # FIXME: replace this when Dagger can directly run multiple containers in
-    # parallel. For now, merge one file from each module's lint container into
-    # a directory and sync it to force every module lint command to run.
-
-    layers.sync
-    null
   }
 
   """
@@ -293,11 +262,6 @@ type GoModule {
   pub includeExtraFiles: [String!]!
 
   """
-  Gitignore-style globs selecting which module roots to lint.
-  """
-  let lintPatterns: [String!]!
-
-  """
   Gitignore-style globs selecting which module roots to test.
   """
   let testPatterns: [String!]!
@@ -316,13 +280,6 @@ type GoModule {
     } else {
       path.trimSuffix("/") + "/" + relativePath
     }
-  }
-
-  """
-  Whether this module falls outside the configured lint selection.
-  """
-  pub skipLint(ws: Workspace!): Boolean! {
-    outOfScope(lintPatterns)
   }
 
   """
@@ -423,12 +380,11 @@ type GoModule {
   """
   let allIncludesDir(
     ws: Workspace!,
-    lint: Boolean!,
     test: Boolean!,
     generate: Boolean!,
   ): Directory! {
     allIncludesHelper(ws)
-      .withExec(["go-includes", "--all", "--output-dir", "/output"] + includeFlags(lint, test, generate))
+      .withExec(["go-includes", "--all", "--output-dir", "/output"] + includeFlags(test, generate))
       .directory("/output")
   }
 
@@ -439,12 +395,11 @@ type GoModule {
   """
   pub includeDiscovered(
     ws: Workspace!,
-    lint: Boolean! = false,
     test: Boolean! = false,
     generate: Boolean! = false,
   ): [String!]! {
     let includeFile = (if (path == ".") { "_root_" } else { path }) + ".inc"
-    allIncludesDir(ws, lint: lint, test: test, generate: generate)
+    allIncludesDir(ws, test: test, generate: generate)
       .file(includeFile)
       .contents
       .split("\n")
@@ -456,7 +411,7 @@ type GoModule {
   """
   pub testDirectories(ws: Workspace!): [GoDirectory!]! {
     let outputStem = if (path == ".") { "_root_" } else { path }
-    let index = allIncludesDir(ws, lint: false, test: true, generate: false)
+    let index = allIncludesDir(ws, test: true, generate: false)
     let discoveredIncludes = index
       .file(outputStem + ".inc")
       .contents
@@ -483,11 +438,10 @@ type GoModule {
   """
   CLI flags for selecting include sources.
   """
-  let includeFlags(lint: Boolean!, test: Boolean!, generate: Boolean!): [String!]! {
-    let lintFlags = if (lint) { ["--lint"] } else { [] }
+  let includeFlags(test: Boolean!, generate: Boolean!): [String!]! {
     let testFlags = if (test) { ["--test"] } else { [] }
     let generateFlags = if (generate) { ["--generate"] } else { [] }
-    lintFlags + testFlags + generateFlags
+    testFlags + generateFlags
   }
 
   """
@@ -520,21 +474,14 @@ type GoModule {
   """
   pub include(
     ws: Workspace!,
-    lint: Boolean! = false,
     test: Boolean! = false,
     generate: Boolean! = false,
   ): [String!]! {
-    let commonIncludes = includeExtraFiles + includeDiscovered(
+    includeExtraFiles + includeDiscovered(
       ws,
-      lint: lint,
       test: test,
       generate: generate,
     )
-    if (lint) {
-      commonIncludes + ["**/*.golangci.yml", "**/*.golangci.yaml", "**/.golangci.toml", "**/.golangci.json"]
-    } else {
-      commonIncludes
-    }
   }
 
   """
@@ -543,13 +490,12 @@ type GoModule {
   """
   pub source(
     ws: Workspace!,
-    lint: Boolean! = false,
     test: Boolean! = false,
     generate: Boolean! = false,
   ): Directory! {
-    let src = ws.directory(
+    ws.directory(
       "/",
-      include: include(ws, lint: lint, test: test, generate: generate),
+      include: include(ws, test: test, generate: generate),
     )
   }
 
@@ -577,15 +523,6 @@ type GoModule {
       .withEnvVariable("GOMODCACHE", "/go/pkg/mod")
       .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
       .withEnvVariable("GOCACHE", "/root/.cache/go-build")
-  }
-
-  """
-  Run golangci-lint in this module.
-  If this module is configured to skip lint, no lint check is run.
-  """
-  pub lint(ws: Workspace!): Void @check {
-    lintExec(ws).sync
-    null
   }
 
   """
@@ -623,41 +560,6 @@ type GoModule {
       .withDirectory(".", source(ws, generate: true))
       .withWorkdir(path)
       .withExec(["go", "generate", "./..."], experimentalPrivilegedNesting: true)
-  }
-
-  """
-  Container synced by this module's lint check.
-  """
-  let lintExec(ws: Workspace!): Container! {
-    if (skipLint(ws)) {
-      base
-        .withDirectory(".", ws.directory("/", include: [subpath("go.mod")]))
-        .withWorkdir(path)
-    } else {
-      let lintImage = "docker.io/golangci/golangci-lint:v2.11.4-alpine@sha256:" + "72bcd68512b4e27540dd3a778a1b7afd45759d8145cfb3c089f1d7af53e718e9"
-      container
-        .from(lintImage)
-        # cgo dependencies may need a C/C++ toolchain during typecheck.
-        .withExec(["apk", "add", "--no-cache", "build-base"])
-        .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
-        .withEnvVariable("GOMODCACHE", "/go/pkg/mod")
-        .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
-        .withEnvVariable("GOCACHE", "/root/.cache/go-build")
-        .withMountedCache("/root/.cache/golangci-lint", cacheVolume("golangci-lint"))
-        .withWorkdir("/src")
-        .withDirectory(".", source(ws, lint: true))
-        .withWorkdir(path)
-        .withExec([
-          "golangci-lint", "run",
-          "--path-prefix", path + "/",
-          "--output.tab.path=stderr",
-          "--output.tab.print-linter-name=true",
-          "--output.tab.colors=false",
-          "--show-stats=false",
-          "--max-issues-per-linter=0",
-          "--max-same-issues=0",
-        ])
-    }
   }
 
   """

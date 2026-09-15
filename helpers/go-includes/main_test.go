@@ -22,21 +22,6 @@ import "embed"
 var embedded embed.FS
 `)
 
-	gotLintIncludes, gotLintModules, err := scanGoFileDirectives("pkg/includes_test.go", data, false, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantLintIncludes := []string{
-		"pkg/assets/*.tmpl",
-		"pkg/hidden",
-	}
-	if !reflect.DeepEqual(gotLintIncludes, wantLintIncludes) {
-		t.Fatalf("lint includes mismatch:\n got: %#v\nwant: %#v", gotLintIncludes, wantLintIncludes)
-	}
-	if len(gotLintModules) != 0 {
-		t.Fatalf("lint modules got %#v, want none", gotLintModules)
-	}
-
 	gotTestIncludes, gotTestModules, err := scanGoFileDirectives("pkg/includes_test.go", data, true, false)
 	if err != nil {
 		t.Fatal(err)

@@ -71,10 +71,9 @@ func main() {
 func newTargetModuleFromArgs(ctx context.Context, cliArgs []string) (*targetModule, bool, string, error) {
 	flags := flag.NewFlagSet("go-includes", flag.ExitOnError)
 	flags.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: go-includes --output PATH [--lint] [--test] [--generate] [--test-dirs] [/DIR]")
+		fmt.Fprintln(os.Stderr, "usage: go-includes --output PATH [--test] [--generate] [--test-dirs] [/DIR]")
 		flags.PrintDefaults()
 	}
-	lint := flags.Bool("lint", false, "include lint inputs")
 	test := flags.Bool("test", false, "include test inputs")
 	generate := flags.Bool("generate", false, "include generate inputs")
 	testDirs := flags.Bool("test-dirs", false, "print directories containing Go tests")
@@ -88,7 +87,7 @@ func newTargetModuleFromArgs(ctx context.Context, cliArgs []string) (*targetModu
 	if flags.NArg() > 1 {
 		return nil, false, "", fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
 	}
-	if !*lint && !*test && !*generate && !*testDirs {
+	if !*test && !*generate && !*testDirs {
 		*test = true
 	}
 	modulePath := "/"
@@ -106,7 +105,7 @@ func newTargetModuleFromArgs(ctx context.Context, cliArgs []string) (*targetModu
 	if !ok {
 		return nil, false, "", fmt.Errorf("no go.mod found containing path: %s", modulePath)
 	}
-	module, err := newTargetModule(ws, moduleRoot, *lint, *test, *generate)
+	module, err := newTargetModule(ws, moduleRoot, *test, *generate)
 	if err != nil {
 		return nil, false, "", err
 	}
@@ -114,14 +113,13 @@ func newTargetModuleFromArgs(ctx context.Context, cliArgs []string) (*targetModu
 }
 
 // newTargetModule builds one target module with shared workspace and modes.
-func newTargetModule(ws *workspace, moduleRoot string, lint, test, generate bool) (*targetModule, error) {
+func newTargetModule(ws *workspace, moduleRoot string, test, generate bool) (*targetModule, error) {
 	if !ws.moduleSet[moduleRoot] {
 		return nil, fmt.Errorf("no go.mod found for module root: %s", moduleRoot)
 	}
 	return &targetModule{
 		workspace:  ws,
 		moduleRoot: moduleRoot,
-		lint:       lint,
 		test:       test,
 		generate:   generate,
 	}, nil
@@ -217,7 +215,6 @@ func (w *workspace) nestedModuleExcludes(moduleRoot string) []string {
 type targetModule struct {
 	workspace  *workspace
 	moduleRoot string
-	lint       bool
 	test       bool
 	generate   bool
 }
@@ -467,7 +464,7 @@ func isLocalReplace(replace *modfile.Replace) bool {
 func (t targetModule) targetModules(moduleRoots []string) ([]*targetModule, error) {
 	modules := make([]*targetModule, 0, len(moduleRoots))
 	for _, moduleRoot := range moduleRoots {
-		module, err := newTargetModule(t.workspace, moduleRoot, t.lint, t.test, t.generate)
+		module, err := newTargetModule(t.workspace, moduleRoot, t.test, t.generate)
 		if err != nil {
 			return nil, err
 		}
