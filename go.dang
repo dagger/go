@@ -44,13 +44,20 @@ type Go {
     """
     test: [String!]! = ["**"],
     """
-    Directories to run go generate in, relative to the workspace root (the
-    directory containing dagger.toml), independent of the invocation directory.
-    A literal path selects only that directory. Globs support *, ?, character
-    classes, and ** for zero or more path segments. A ! prefix excludes;
-    exclusions always win. With no positive patterns, all directories match.
-    Only directories with go:generate commands run. "." selects the root only;
-    "**" selects all directories, including those in nested Go modules.
+    Directories to run go generate in. Paths are relative to the workspace root
+    (the directory containing dagger.toml), independent of the invocation directory.
+
+    A literal path selects only that directory, even if it is a Go module root.
+    "." selects the workspace root only. Patterns use Dagger glob syntax:
+    *, ?, and character classes match within a path segment; ** matches zero
+    or more segments. "internal/**" includes internal itself and its descendants.
+    A ! prefix excludes. Exclusions always win, regardless of pattern order.
+    An empty list or a list containing only exclusions starts with all directories.
+    The default ["**"] includes directories in nested Go modules.
+
+    Example: ["sdk/go/engineconn", "internal/**", "!internal/fixtures/**"].
+    This replaces module-level selection; literal paths no longer select children.
+    See generateAll for execution behavior.
     """
     generate: [String!]! = ["**"],
   ) {
@@ -215,8 +222,13 @@ type Go {
 
   """
   Run go generate . in selected directories across the workspace.
-  Within each module, directories run in lexical order and share container
-  state. Modules run independently; cross-module dependencies are not inferred.
+  Directories without generator commands are skipped; go:generate:include alone
+  is not a command. Go controls build tags and file and command order in a package.
+
+  Within each Go module, directories run in lexical path order and share a
+  container using the configured base. Later commands can use earlier output.
+  Modules run independently; cross-module dependencies are not inferred.
+  Use an explicit coordinating command when generators need a different order.
   """
   pub generateAll(ws: Workspace!): Changeset! @generate {
     let mods = modules(ws.withWorkdir(".")).filter { mod =>
@@ -560,9 +572,9 @@ type GoModule {
   }
 
   """
-  Changes made by running go generate in this module.
-  If this module is configured to skip generate or no go:generate directives are
-  found, the changeset is empty.
+  Changes made by running go generate . in this module's selected directories.
+  Returns an empty changeset if no directories are selected. Execution follows
+  the ordering and container rules described by Go.generateAll.
   """
   pub generate(ws: Workspace!): Changeset! {
     if (skipGenerate(ws)) {
