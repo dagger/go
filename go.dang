@@ -303,10 +303,10 @@ type GoModule {
   }
 
   """
-  Whether this module has selected directories with go:generate commands.
+  Whether this module has go:generate commands, regardless of selection.
   """
   pub hasGenerateDirectives(ws: Workspace!): Boolean! {
-    generateDirectories(ws).length > 0
+    discoveredGenerateDirectories(ws).length > 0
   }
 
   """
@@ -314,6 +314,31 @@ type GoModule {
   Paths are workspace-root-relative. Nested modules have their own directory lists.
   """
   pub generateDirectories(ws: Workspace!): [String!]! {
+    let included = generatePatterns.filter { p => p.hasPrefix("!") == false }
+    let excluded = generatePatterns.filter { p => p.hasPrefix("!") }.map { p => p.trimPrefix("!") }
+    let includeDirs = matchingGenerateDirectories(ws, included)
+    let excludeDirs = matchingGenerateDirectories(ws, excluded)
+    discoveredGenerateDirectories(ws).filter { dir =>
+      (included.length == 0 or includeDirs.any { match => match == dir }) and
+        excludeDirs.any { match => match == dir } == false
+    }
+  }
+
+  # Match direct Go files to include the workspace root and avoid treating a
+  # literal directory as recursive. Glob syntax is entirely Dagger's.
+  let matchingGenerateDirectories(ws: Workspace!, patterns: [String!]!): [String!]! {
+    let empty: [String!]! = []
+    patterns.reduce(empty) { dirs, pattern =>
+      dirs + ws.glob(pattern.trimSuffix("/") + "/*.go")
+        .filter { file => file.hasSuffix("/") == false }
+        .map { file =>
+          let dir = file.split("/").dropLast(1).join("/")
+          if (dir == "") { "." } else { dir }
+        }
+    }
+  }
+
+  let discoveredGenerateDirectories(ws: Workspace!): [String!]! {
     let dirsFile = (if (path == ".") { "_root_" } else { path }) + ".generatedirs"
     allIncludesDir(ws, test: false, generate: true)
       .file(dirsFile)
@@ -384,11 +409,7 @@ type GoModule {
     generate: Boolean!,
   ): Directory! {
     allIncludesHelper(ws)
-      .withExec(
-        ["go-includes", "--all", "--output-dir", "/output"] +
-          includeFlags(test, generate) +
-          (if (generate) { ["--generate-patterns", toJSON(generatePatterns)] } else { [] }),
-      )
+      .withExec(["go-includes", "--all", "--output-dir", "/output"] + includeFlags(test, generate))
       .directory("/output")
   }
 

@@ -563,6 +563,30 @@ type E2e {
   }
 
   """
+  Generation uses Dagger globs, including root paths and exclusions.
+  """
+  pub generationGlobsCheck(ws: Workspace!): Void @check {
+    let root = "fixtures/go-module-generate-directories"
+    let dirs = [root, root + "/later", root + "/version"]
+    assert(go(generate: []).module(ws, root).generateDirectories(ws) == dirs, "empty selection did not include all directories")
+    assert(go(generate: ["!" + root]).module(ws, root).generateDirectories(ws) == [root + "/later", root + "/version"], "literal exclusion recursed into children")
+    assert(go(generate: [root + "/**", "!" + root + "/**", root + "/version"]).module(ws, root).generateDirectories(ws).length == 0, "include overrode an exclusion")
+    assert(go(generate: [root + "/[lv]*"]).module(ws, root).generateDirectories(ws) == [root + "/later", root + "/version"], "character class glob did not match")
+    assert(go(generate: ["fixtures/**/version"]).module(ws, root).generateDirectories(ws) == [root + "/version"], "mid-path recursive glob did not match")
+    assert(go(generate: ["./" + root + "/"]).module(ws, root).generateDirectories(ws) == [root], "relative directory spelling did not match")
+    assert(go(generate: ["!**"]).module(ws, root).hasGenerateDirectives(ws), "selection hid existing directives")
+
+    let rooted = ws.withDirectory("/", directory
+      .withNewFile("go.mod", "module example.com/root\n\ngo 1.26.1\n")
+      .withNewFile("generate.go", "package root\n\n//go:generate go version\n"))
+    assert(go(generate: ["."]).module(rooted, ".", findUp: false).generateDirectories(rooted) == ["."], "literal root did not match")
+    assert(go(generate: ["**"]).module(rooted, ".", findUp: false).generateDirectories(rooted) == ["."], "recursive glob missed root")
+    assert(go(generate: ["*"]).module(rooted, ".", findUp: false).generateDirectories(rooted).length == 0, "single-segment glob included root")
+    assert(go(generate: ["!."]).module(rooted, ".", findUp: false).generateDirectories(rooted).length == 0, "root exclusion failed")
+    null
+  }
+
+  """
   Directory selection runs only the selected package, regardless of invocation cwd.
   """
   pub selectionCheck(ws: Workspace!): Void @check {
