@@ -8,3 +8,10 @@ source = "github.com/dagger/dang-sdk"
 
 [modules.e2e]
 source = ".dagger/modules/e2e"
+
+[sdks.dang]
+module = "dang-sdk"
+
+[sdks.dang.scopes."."]
+is-module = true
+name = "go"
