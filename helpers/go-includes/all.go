@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -22,6 +23,7 @@ func runAll(cliArgs []string) error {
 	flags.Bool("all", false, "compute includes for every module")
 	test := flags.Bool("test", false, "include test inputs")
 	generate := flags.Bool("generate", false, "include generate inputs")
+	patternsJSON := flags.String("generate-patterns", "[]", "JSON array of workspace-relative generation directory globs")
 	root := flags.String("root", ".", "workspace root to scan")
 	outputDir := flags.String("output-dir", "", "directory to write one file of include patterns per module to")
 	if err := flags.Parse(cliArgs); err != nil {
@@ -34,11 +36,20 @@ func runAll(cliArgs []string) error {
 		*test = true
 	}
 
+	var patterns []string
+	if err := json.Unmarshal([]byte(*patternsJSON), &patterns); err != nil {
+		return fmt.Errorf("generate patterns: %w", err)
+	}
+	for _, pattern := range patterns {
+		if _, err := matchDirectory(strings.TrimPrefix(pattern, "!"), "."); err != nil {
+			return err
+		}
+	}
 	index, err := indexLocal(*root)
 	if err != nil {
 		return err
 	}
-	return index.writeAllDir(*outputDir, *test, *generate)
+	return index.writeAllDir(*outputDir, *test, *generate, patterns)
 }
 
 // moduleIncludeFile returns the per-module output filename for a module root.
@@ -63,7 +74,7 @@ func moduleOutputFile(moduleRoot, suffix string) string {
 
 // writeAllDir writes one file of include patterns per module, so each consumer
 // reads only its own slice instead of re-scanning a combined blob.
-func (index *localIndex) writeAllDir(dir string, test, generate bool) error {
+func (index *localIndex) writeAllDir(dir string, test, generate bool, patterns []string) error {
 	for _, moduleRoot := range index.moduleRoots {
 		includes, err := index.includesFor(moduleRoot, test, generate)
 		if err != nil {
@@ -76,6 +87,16 @@ func (index *localIndex) writeAllDir(dir string, test, generate bool) error {
 		data := strings.Join(includes, "\n") + "\n"
 		if err := os.WriteFile(outPath, []byte(data), 0o644); err != nil {
 			return err
+		}
+
+		if generate {
+			dirs, err := index.generateDirectoriesFor(moduleRoot, patterns)
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(dir, moduleOutputFile(moduleRoot, ".generatedirs")), []byte(strings.Join(dirs, "\n")), 0o644); err != nil {
+				return err
+			}
 		}
 
 		testDirs := index.testDirectoriesFor(moduleRoot)

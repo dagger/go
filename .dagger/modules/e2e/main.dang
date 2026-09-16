@@ -19,10 +19,11 @@ type E2e {
   ]
   let generate: [String!]! = [
     "**",
-    "!helpers/go-includes",
+    "!helpers/go-includes/**",
+    "!fixtures/go-module-generate-directories/**",
     "!" + baseFixturePath,
     "!testdata/go-module-excluded",
-    "!testdata/go-module-skip-tree",
+    "!testdata/go-module-skip-tree/**",
   ]
 
   let base: Container! {
@@ -55,14 +56,6 @@ type E2e {
     mods
       .filter { mod => mod.path == want }
       .length > 0
-  }
-
-  """
-  Whether a module at modPath is excluded from generate selection `patterns`.
-  Uses findUp: false so modPath need not be a real module on disk.
-  """
-  let selectsOut(ws: Workspace!, patterns: [String!]!, modPath: String!): Boolean! {
-    go(version: "1.26.1", generate: patterns).module(ws, modPath, findUp: false).skipGenerate(ws)
   }
 
   """
@@ -379,8 +372,8 @@ type E2e {
       "module without skip config reported skipped tests",
     )
     assert(
-      mod.skipGenerate(ws) == false,
-      "module without skip config reported skipped generate",
+      mod.skipGenerate(ws),
+      "module without generator commands did not skip generation",
     )
     assert(
       mod.hasGenerateDirectives(ws) == false,
@@ -570,55 +563,29 @@ type E2e {
   }
 
   """
-  Gitignore-style selection: "!" excludes, an include-only list scopes down.
+  Directory selection runs only the selected package, regardless of invocation cwd.
   """
   pub selectionCheck(ws: Workspace!): Void @check {
-    # Real fixture modules: exclude and include-only.
-    let excluded = go(version: "1.26.1", generate: ["**", "!" + generatedFixturePath])
-    assert(
-      excluded.module(ws, generatedFixturePath).skipGenerate(ws),
-      "'!' pattern did not exclude its module",
-    )
-    let includeOnly = go(version: "1.26.1", generate: ["fixtures/**"])
-    assert(
-      includeOnly.module(ws, generatedFixturePath).skipGenerate(ws),
-      "include-only selection did not exclude an out-of-scope module",
-    )
-    assert(
-      includeOnly.module(ws, "fixtures/go-module-cross-include-a").skipGenerate(ws) == false,
-      "include-only selection excluded an in-scope module",
-    )
+    let root = "fixtures/go-module-generate-directories"
+    let child = root + "/version"
+    let tool = go(version: "1.26.1", generate: [child])
+    let mod = tool.module(ws, root)
+    assert(mod.generateDirectories(ws) == [child], "exact directory selection included other packages")
+    let changes = tool.generateAll(ws.withWorkdir("testdata"))
+    assert(changes.addedPaths == [child + "/generated.go"], "generation ran outside the selected directory")
+    assert(changes.modifiedPaths.length == 0, "generation modified unrelated files")
+    assert(changes.removedPaths.length == 0, "generation removed unrelated files")
 
-    # Default "**" selects every module.
-    assert(selectsOut(ws, ["**"], "a/b") == false, "\"**\" did not select a module")
-    assert(selectsOut(ws, ["*"], "a/b") == false, "\"*\" did not select a module")
+    let rootOnly = go(version: "1.26.1", generate: [root]).generateAll(ws)
+    assert(rootOnly.addedPaths == [root + "/generated.go"], "literal module root recursed into child directories")
 
-    # A bare path and "X/**" both mean "X and everything below it".
-    assert(selectsOut(ws, ["**", "!docs"], "docs"), "exclude missed the module itself")
-    assert(selectsOut(ws, ["**", "!docs"], "docs/snippets"), "exclude missed a nested module")
-    assert(selectsOut(ws, ["**", "!docs/**"], "docs/snippets"), "\"X/**\" exclude missed a nested module")
+    let globbed = go(version: "1.26.1", generate: [root + "/**", "!" + root, "!" + root + "/nested/**"])
+    assert(globbed.module(ws, root).generateDirectories(ws) == [root + "/later", child], "recursive glob or exclusion failed")
+    let ordered = globbed.generateAll(ws)
+    assert(ordered.layer.file(child + "/generated.go").contents.contains("Earlier"), "directories did not share generated output in lexical order")
 
-    # The subtree boundary: "docs" must not match a sibling sharing the prefix.
-    assert(selectsOut(ws, ["**", "!docs"], "docs-tools") == false, "exclude leaked across a name-prefix boundary")
-
-    # No includes means "everything", minus excludes.
-    assert(selectsOut(ws, ["!docs"], "docs"), "exclude-only list did not exclude")
-    assert(selectsOut(ws, ["!docs"], "core") == false, "exclude-only list did not include the rest")
-    # "." selects only the root module.
-    assert(selectsOut(ws, ["."], "core"), "\".\" leaked to a non-root module")
-    assert(selectsOut(ws, ["."], ".") == false, "\".\" did not select the root module")
-    assert(selectsOut(ws, ["!."], "."), "\"!.\" did not exclude the root module")
-
-    # An exclude always wins; a later bare pattern does not re-include.
-    assert(selectsOut(ws, ["**", "!docs", "docs/keep"], "docs/keep"), "a later include overrode an exclude")
-
-    # Edge lists: [] selects all, ["!**"] selects nothing.
-    assert(selectsOut(ws, [], "anything") == false, "empty selection did not select all")
-    assert(selectsOut(ws, ["!**"], "anything"), "\"!**\" selected a module")
-
-    # Unsupported glob shapes are not interpreted, so they select nothing.
-    assert(selectsOut(ws, ["a/**/b"], "a/x/b"), "mid-path \"**\" was unexpectedly interpreted")
-
+    let nested = go(version: "1.26.1", generate: [root + "/nested"]).generateAll(ws)
+    assert(nested.addedPaths == [root + "/nested/generated.go"], "nested module generator was not isolated")
     null
   }
 }
