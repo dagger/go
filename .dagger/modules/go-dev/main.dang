@@ -1,7 +1,7 @@
 """
-End-to-end checks for the Go module.
+Development checks for dagger.io/go.
 """
-type E2e {
+type GoDev {
   let generatedFixturePath: String! = "testdata/go-module-generate"
   let generatedFilePath: String! = generatedFixturePath + "/generated.go"
   let baseFixturePath: String! = "testdata/go-module-custom-base"
