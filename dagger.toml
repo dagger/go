@@ -16,3 +16,27 @@ module = "dang-sdk"
 [sdks.dang.scopes."."]
 is-module = true
 name = "go"
+
+[sdks.dang.scopes."gomod"]
+is-module = true
+name = "gomod"
+
+[sdks.dang.scopes."gomod/.dagger/modules/e2e"]
+is-module = true
+name = "e2e"
+
+[sdks.dang.scopes."golangci-lint"]
+is-module = true
+name = "golangci-lint"
+
+[sdks.dang.scopes."golangci-lint/.dagger/modules/e2e"]
+is-module = true
+name = "e2e"
+
+[sdks.dang.scopes."staticcheck"]
+is-module = true
+name = "staticcheck"
+
+[sdks.dang.scopes."staticcheck/.dagger/modules/e2e"]
+is-module = true
+name = "e2e"

@@ -1,0 +1,247 @@
+"""
+End-to-end checks for the Staticcheck module.
+
+Staticcheck's fixtures stay under `staticcheck/testdata/`: several of them fail
+on purpose -- a lint diagnostic, a failing test -- and the repository's shared
+fixture trees are the ones `go`'s testAll runs.
+"""
+type E2e {
+  let assert(condition: Boolean!, message: String!): Void {
+    if (condition == false) { raise message }
+    null
+  }
+
+  """
+  Discovery finds every module root, snaps a lookup to its enclosing
+  module, and keeps its paths workspace-root-relative from any cwd.
+  """
+  discoveryCheck(ws: Workspace!): Void @check {
+    let tool = staticcheck
+    let paths = tool.modules(ws).{{path}}
+    assert(paths.any { m => m.path == "staticcheck/testdata/clean" }, "missing clean module")
+    assert(paths.any { m => m.path == "staticcheck/testdata/clean/nested" }, "missing nested module")
+    assert(paths.any { m => m.path == "." } == false, "invented a root module")
+    let below = tool.modules(ws.withWorkdir("staticcheck/testdata/clean")).{{path}}
+    assert(below.length == 2, "discovery from a module root escaped its subtree")
+    let inside = ws.withWorkdir("staticcheck/testdata/clean/assets")
+    assert(
+      tool.modules(inside).{{path}}.any { m => m.path == "staticcheck/testdata/clean" },
+      "discovery inside a module missed its enclosing root",
+    )
+    tool.lintAll(inside)
+    assert(
+      tool.module(ws, "staticcheck/testdata/clean/assets").path == "staticcheck/testdata/clean",
+      "lookup did not resolve the enclosing module",
+    )
+    let missing = {
+      tool.module(ws, ".").path
+    } rescue {
+      err: Error => err.message
+    }
+    assert(missing.contains("no Go module found"), "missing module did not fail clearly")
+    null
+  }
+
+  """
+  A batch check over the clean fixture modules passes.
+  """
+  lintAllCheck(ws: Workspace!): Void @check {
+    staticcheck(lint: [
+      "staticcheck/testdata/clean",
+      "staticcheck/testdata/configured",
+      "staticcheck/testdata/replaced",
+      "staticcheck/testdata/cgo",
+    ]).lintAll(ws)
+  }
+
+  """
+  A diagnostic fails the module's own check and the batch alike, including
+  one found in a test file.
+  """
+  lintFailureCheck(ws: Workspace!): Void @check {
+    let failure = {
+      staticcheck.module(ws, "staticcheck/testdata/lint-fail").lint(ws)
+      "unexpected success"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(failure.contains("exit code"), "Staticcheck did not reject the broken source: " + failure)
+    let testFailure = {
+      staticcheck.module(ws, "staticcheck/testdata/test-fail").lint(ws)
+      "unexpected success"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(testFailure.contains("exit code"), "Staticcheck did not analyze test files: " + testFailure)
+    let batchFailure = {
+      staticcheck(lint: ["staticcheck/testdata/clean", "staticcheck/testdata/lint-fail"]).lintAll(ws)
+      "unexpected success"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(batchFailure.contains("exit code"), "lintAll did not propagate a module failure: " + batchFailure)
+    null
+  }
+
+  """
+  The lint setting reaches selection, including the JSON-fragment spelling
+  older beta engines deliver, and an exclude always wins.
+  """
+  selectionCheck(ws: Workspace!): Void @check {
+    let excluded = staticcheck(lint: ["!staticcheck/testdata/lint-fail", "staticcheck/testdata/**"])
+    assert(excluded.module(ws, "staticcheck/testdata/lint-fail").skipLint, "exclusion did not win")
+    assert(
+      excluded.module(ws, "staticcheck/testdata/clean/nested").skipLint == false,
+      "subtree selector missed nested module",
+    )
+    let excludeOnly = staticcheck(lint: ["!staticcheck/testdata/lint-fail", "!staticcheck/testdata/test-fail"])
+    assert(
+      excludeOnly.module(ws, "staticcheck/testdata/clean").skipLint == false,
+      "exclude-only selection excluded clean module",
+    )
+    assert(
+      excludeOnly.modules(ws, includeSkipped: false).{{path}}.any { m => m.path == "staticcheck/testdata/lint-fail" } == false,
+      "filtered discovery included excluded module",
+    )
+    excluded.module(ws, "staticcheck/testdata/lint-fail").lint(ws)
+    staticcheck(lint: ["!**"]).lintAll(ws)
+    staticcheck(lint: ["[\"!staticcheck/testdata/lint-fail\"", "\"!staticcheck/testdata/test-fail\"]"])
+      .module(ws, "staticcheck/testdata/lint-fail")
+      .lint(ws)
+    assert(
+      staticcheck(lint: []).module(ws, "staticcheck/testdata/clean").skipLint == false,
+      "empty selectors did not select all",
+    )
+    assert(
+      staticcheck(lint: ["staticcheck/testdata/clean"]).module(
+        ws,
+        "staticcheck/testdata/cleaner",
+        findUp: false,
+      ).skipLint,
+      "path prefix crossed module boundary",
+    )
+    null
+  }
+
+  """
+  The source mount carries replace targets, extra includes and inherited
+  staticcheck.conf, and keeps a nested module's embeds out.
+  """
+  sourceCheck(ws: Workspace!): Void @check {
+    let mod = staticcheck(includeExtraFiles: ["staticcheck/testdata/extra.txt"])
+      .module(ws, "staticcheck/testdata/replaced")
+    let src = mod.source(ws)
+    assert(
+      src.file("staticcheck/testdata/clean/assets/message.txt").contents.contains("Hello"),
+      "replace target lost its embedded file",
+    )
+    assert(
+      src.file("staticcheck/testdata/extra.txt").contents.contains("extra"),
+      "extra include was not mounted",
+    )
+    assert(
+      src.file("staticcheck/testdata/configured/staticcheck.conf").contents.contains("SA1000"),
+      "inherited Staticcheck config was not mounted",
+    )
+    assert(
+      src.glob("staticcheck/testdata/clean/nested/assets/**").length == 0,
+      "nested module embed leaked into parent source",
+    )
+    mod.lint(ws)
+    null
+  }
+
+  """
+  Each module is checked with the Go toolchain its own go.mod asks for, unless
+  goVersion overrides it.
+  """
+  goVersionCheck(ws: Workspace!): Void @check {
+    # The staticcheck fixtures say "go 1.26.0"; the shared ones say "go 1.25".
+    let own = staticcheck.module(ws, "staticcheck/testdata/clean")
+    let older = staticcheck.module(ws, "fixtures/go-module-with-nested-module")
+    assert(own.goVersion(ws) == "1.26", "go 1.26.0 did not resolve to its minor series: " + (own.goVersion(ws) ?? "<null>"))
+    assert(older.goVersion(ws) == "1.25", "go 1.25 was not taken from the module: " + (older.goVersion(ws) ?? "<null>"))
+    assert(staticcheck.goVersion == null, "the root claimed a version that varies per module")
+
+    # The toolchain in the container is the one the module asked for, not the
+    # one Staticcheck was built with.
+    assert(
+      older.base(ws).withExec(["go", "version"]).stdout.contains("go1.25"),
+      "the module's container did not carry its own toolchain",
+    )
+    assert(
+      own.base(ws).withExec(["staticcheck", "--version"]).stdout.contains("staticcheck"),
+      "the pinned binary was not copied in",
+    )
+
+    let pinned = staticcheck(goVersion: "1.26").module(ws, "fixtures/go-module-with-nested-module")
+    assert(pinned.goVersion(ws) == "1.26", "goVersion did not override the module's own")
+    assert(
+      pinned.base(ws).withExec(["go", "version"]).stdout.contains("go1.26"),
+      "goVersion did not reach the container",
+    )
+    pinned.lint(ws)
+    null
+  }
+
+  """
+  A custom base supplies the toolchain; Staticcheck is installed into it only
+  when it does not already carry one.
+  """
+  customBaseCheck(ws: Workspace!): Void @check {
+    let plain = container
+      .from("golang:1.26-alpine")
+      .withExec(["apk", "add", "--no-cache", "build-base"])
+      .withNewFile("/custom-base", "custom base\n")
+      .withEntrypoint(["false"])
+    let tool = staticcheck(base: plain)
+    assert(tool.goVersion == null, "custom base incorrectly exposed a Go version")
+    assert(tool.version == "v0.8.1", "custom base hid the release it would install")
+
+    let mod = tool.module(ws, "staticcheck/testdata/clean")
+    assert(mod.goVersion(ws) == null, "custom base incorrectly resolved a Go version")
+    assert(mod.base(ws).file("/custom-base").contents.contains("custom base"), "custom base was discarded")
+    assert(
+      mod.base(ws).withExec(["sh", "-c", "command -v staticcheck"]).stdout.contains("/usr/local/bin/staticcheck"),
+      "a base without Staticcheck did not get the configured release",
+    )
+    mod.lint(ws)
+
+    # A base that brings its own build keeps it: a future instrumented build
+    # is installed this way, and installing over it would throw it away.
+    let own = plain.withNewFile(
+      "/usr/local/bin/staticcheck",
+      "#!/bin/sh\necho custom-staticcheck-used >&2\nexit 42\n",
+      permissions: 493,
+    )
+    let failure = {
+      staticcheck(base: own).module(ws, "staticcheck/testdata/clean").lint(ws)
+      "unexpected success"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(failure.contains("exit code: 42"), "the base's own Staticcheck was overwritten: " + failure)
+
+    # version says what to install, so it composes with base.
+    staticcheck(version: "v0.8.1", base: plain).module(ws, "staticcheck/testdata/clean").lint(ws)
+
+    # goVersion is ignored rather than refused: the base already carries a
+    # toolchain, and refusing the combination would only make the caller edit
+    # settings to say what the base already says.
+    let ignored = staticcheck(goVersion: "1.25", base: plain)
+    assert(ignored.goVersion == null, "goVersion was not ignored alongside base")
+    assert(ignored.warnings.length == 1, "ignoring goVersion went unannounced")
+    let said = ignored.warnings.join("; ")
+    assert(said.contains("goVersion"), "the warning did not name the dropped setting: " + said)
+    assert(said.contains("base was set"), "the warning did not say why it was dropped: " + said)
+    assert(staticcheck.warnings.length == 0, "a plain constructor warned about nothing")
+    let ignoredMod = ignored.module(ws, "staticcheck/testdata/clean")
+    assert(ignoredMod.goVersion(ws) == null, "a module resolved a goVersion the base overrides")
+    assert(
+      ignoredMod.base(ws).withExec(["go", "version"]).stdout.contains("go1.26"),
+      "the ignored goVersion reached the container anyway",
+    )
+    ignoredMod.lint(ws)
+    null
+  }
+}

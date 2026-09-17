@@ -113,9 +113,22 @@ func TestGenerationContainers(t *testing.T) {
 				if !strings.Contains(err.Error(), ".go:") {
 					t.Fatalf("error has no source position: %v", err)
 				}
-				err = runAll([]string{"--all", "--generate", "--root", root, "--output-dir", t.TempDir()})
-				if err == nil || !strings.Contains(err.Error(), tc.err) {
-					t.Fatalf("discovery got %v, want error containing %q", err, tc.err)
+				// A bad directive is one module's problem: the scan records
+				// it against that module and carries on, so every other
+				// module in the workspace is still scanned.
+				output := t.TempDir()
+				if err := runAll([]string{"--all", "--generate", "--root", root, "--output-dir", output}); err != nil {
+					t.Fatalf("one module's bad directive failed the whole scan: %v", err)
+				}
+				recorded, err := os.ReadFile(filepath.Join(output, "_root_.err"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(string(recorded), tc.err) {
+					t.Fatalf("recorded %q, want it to contain %q", recorded, tc.err)
+				}
+				if !strings.Contains(string(recorded), ".go:") {
+					t.Fatalf("recorded reason has no source position: %q", recorded)
 				}
 				return
 			}

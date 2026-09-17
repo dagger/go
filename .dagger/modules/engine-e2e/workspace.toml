@@ -5,3 +5,15 @@ entrypoint = true
 [modules.engine-e2e]
 source = ".dagger/modules/engine-e2e"
 check.skip = ["*"]
+
+# Each tool's suite is installed under a <tool>-checks key, so one `dagger
+# check` runs all four and prefixes each check with the tool it belongs to.
+# The key is what prefixes; "e2e" would kebab-case into "e-2-e".
+[modules.gomod-checks]
+source = "gomod/.dagger/modules/e2e"
+
+[modules.golangci-lint-checks]
+source = "golangci-lint/.dagger/modules/e2e"
+
+[modules.staticcheck-checks]
+source = "staticcheck/.dagger/modules/e2e"

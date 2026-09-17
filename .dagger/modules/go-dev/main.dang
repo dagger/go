@@ -12,25 +12,33 @@ type GoDev {
   let buildTagsFixturePath: String! = "testdata/go-module-build-tags"
   let mountPathFixturePath: String! = "testdata/go-module-mount-path"
   let noPackagesFixturePath: String! = "testdata/go-module-no-packages"
+  let unreadableFixturePath: String! = "fixtures/go-module-unreadable"
+  # The other modules in this repository keep their own fixtures, and several
+  # of theirs fail on purpose: golangci-lint's does not even compile.
+  let siblingFixtures: [String!]! = ["!golangci-lint", "!staticcheck"]
+  # emptyFixturePath and unreadableFixturePath are deliberately absent: neither
+  # directory is a Go module, so discovery never offers them and an exclusion
+  # here would hide a regression in that filtering rather than prevent one.
   let test: [String!]! = [
     "**",
     "!" + baseFixturePath,
     "!" + cgoCxxFixturePath,
-    "!" + emptyFixturePath,
     "!" + buildTagsFixturePath,
     "!" + mountPathFixturePath,
     "!" + noPackagesFixturePath,
     "!testdata/go-module-excluded",
     "!testdata/go-module-skip-tree",
-  ]
+  ] + siblingFixtures
   let generate: [String!]! = [
     "**",
-    "!helpers/go-includes/**",
+    "!gomod/helpers/go-includes/**",
     "!fixtures/go-module-generate-directories/**",
     "!testdata/go-module-generate-dev-engine/**",
     "!" + baseFixturePath,
     "!testdata/go-module-excluded",
     "!testdata/go-module-skip-tree/**",
+    "!golangci-lint/**",
+    "!staticcheck/**",
   ]
 
   let base: Container! {
@@ -66,8 +74,9 @@ type GoDev {
   }
 
   """
-  Module discovery (findRoots) returns exactly the directories holding a
-  go.mod, at any depth, and nothing else.
+  Module discovery returns exactly the directories holding a go.mod that is a
+  Go module a tool can work on, at any depth, and nothing else. The go.mod
+  files that are not modules are skipsNonModulesCheck's business.
   """
   discoveryCheck(ws: Workspace!): Void @check {
     let paths = go(version: "1.26.1").modules(ws).{{path}}
@@ -179,11 +188,11 @@ type GoDev {
     )
     let mod = tool.module(ws, buildTagsFixturePath)
     assert(
-      mod.base.envVariable("GOFLAGS") == "-tags=extended",
+      mod.base(ws).envVariable("GOFLAGS") == "-tags=extended",
       "base container did not set GOFLAGS",
     )
     assert(
-      go(version: "1.26.1").module(ws, buildTagsFixturePath).base.envVariable("GOFLAGS") == null,
+      go(version: "1.26.1").module(ws, buildTagsFixturePath).base(ws).envVariable("GOFLAGS") == null,
       "base container set GOFLAGS without a goflags setting",
     )
     # The fixture test fails unless the extended tag was applied at build time.
@@ -262,7 +271,77 @@ type GoDev {
   }
 
   """
-  A custom base container must be used for Go helpers, tests, and generate.
+  A module with no version setting runs under the Go toolchain its own go.mod
+  asks for, and the version setting still overrides it.
+  """
+  goVersionCheck(ws: Workspace!): Void @check {
+    # The shared fixtures say "go 1.25"; the scanner's helper says "go 1.26.1".
+    let older = go.module(ws, "fixtures/go-module-with-nested-module")
+    let newer = go.module(ws, "gomod/helpers/go-includes")
+    assert(older.version(ws) == "1.25", "go 1.25 was not taken from the module: " + (older.version(ws) ?? "<null>"))
+    assert(newer.version(ws) == "1.26", "go 1.26.1 did not resolve to its minor series: " + (newer.version(ws) ?? "<null>"))
+    assert(
+      older.base(ws).withExec(["go", "version"]).stdout.contains("go1.25"),
+      "the module's own toolchain did not reach its container",
+    )
+    assert(
+      newer.base(ws).withExec(["go", "version"]).stdout.contains("go1.26"),
+      "a second module did not get its own toolchain",
+    )
+
+    # An explicit version is used as written, so a patch release stays exact.
+    let pinned = go(version: "1.26.1").module(ws, "fixtures/go-module-with-nested-module")
+    assert(pinned.version(ws) == "1.26.1", "version did not override the module's own")
+    assert(
+      pinned.base(ws).withExec(["go", "version"]).stdout.contains("go1.26.1"),
+      "an explicit version was not used as written",
+    )
+
+    # The tests run under the module's toolchain, and the runner is built
+    # elsewhere, so an older module still gets it.
+    older.test(ws)
+    null
+  }
+
+  """
+  A directory that is not a Go module never reaches a Go command.
+
+  testAll and generateAll both run over every module in the workspace, and the
+  workspace holds one go.mod that will not parse and one module with no Go
+  files. Neither is discovered, so neither is tested or generated in; naming
+  one directly still says what is wrong with it.
+  """
+  skipsNonModulesCheck(ws: Workspace!): Void @check {
+    let tool = go(version: "1.26.1", test: test, generate: generate)
+    let discovered = tool.modules(ws).{{path}}
+    assert(
+      containsModulePath(discovered, unreadableFixturePath) == false,
+      "a go.mod that will not parse was offered as a module",
+    )
+    assert(
+      containsModulePath(discovered, emptyFixturePath) == false,
+      "a module with no Go files was offered as a module",
+    )
+
+    # Both are in the selection patterns by way of "**", so only the filtering
+    # keeps them out of these two.
+    tool.testAll(ws)
+    tool.generateAll(ws).layer.sync
+
+    let named = go(version: "1.26.1").module(ws, unreadableFixturePath)
+    assert(
+      (named.scanFailure(ws) ?? "").contains(unreadableFixturePath + "/go.mod"),
+      "naming the directory did not say what was wrong with it",
+    )
+    assert(named.skipGenerate(ws), "an unreadable module was offered for generation")
+    assert(named.hasGenerateDirectives(ws) == false, "an unreadable module claimed generate directives")
+    null
+  }
+
+  """
+  A custom base container must be used for this module's test and generate
+  containers. The source scanner is not one of them: it runs in a pinned
+  container of the library's own, by design.
   """
   baseCheck(ws: Workspace!): Void @check {
     let tool = go(
@@ -275,12 +354,18 @@ type GoDev {
       "base-only constructor exposed a Go version for a black-box base image",
     )
 
-    let conflict = { go(version: "1.26.1", base: base).version ?? "missing conflict" } rescue {
-      err: Error => err.message
-    }
+    # version is ignored rather than refused: the base already carries a
+    # toolchain, and refusing the combination would only make the caller edit
+    # settings to say what the base already says.
+    let ignored = go(version: "1.26.1", base: base)
+    assert(ignored.version == null, "version was not ignored alongside base")
+    let said = ignored.warnings.join("; ")
+    assert(said.contains("version"), "the warning did not name the dropped setting: " + said)
+    assert(said.contains("base was set"), "the warning did not say why it was dropped: " + said)
+    assert(go.warnings.length == 0, "a plain constructor warned about nothing")
     assert(
-      conflict.contains("version and base are mutually exclusive"),
-      "constructor did not reject version and base together: " + conflict,
+      ignored.module(ws, baseFixturePath).base(ws).file("/custom-go-base").contents.contains("yes"),
+      "the base was discarded in favour of the ignored version",
     )
 
     let testDirs = mod.testDirectories(ws)
@@ -337,16 +422,16 @@ type GoDev {
     let mod = go(version: "1.26.1").module(ws, "testdata/go-module-with-testdata/testdata")
 
     assert(
-      go.version == "1.26",
-      "default constructor did not expose default Go version",
+      go.version == null,
+      "default constructor pinned a Go version that varies per module",
     )
     assert(
       mod.path == "testdata/go-module-with-testdata",
       "module lookup did not snap to containing module: " + mod.path,
     )
     assert(
-      mod.version == "1.26.1",
-      "module did not expose inherited Go version: " + (mod.version ?? "<null>"),
+      mod.version(ws) == "1.26.1",
+      "module did not expose inherited Go version: " + (mod.version(ws) ?? "<null>"),
     )
 
     let direct = go(version: "1.26.1").module(
