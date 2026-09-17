@@ -44,7 +44,20 @@ type Go {
     """
     test: [String!]! = ["**"],
     """
-    Module roots to run go generate in. Same selection rules as `test`.
+    Directories to run go generate in. Paths are relative to the workspace root
+    (the directory containing dagger.toml), independent of the invocation directory.
+
+    A literal path selects only that directory, even if it is a Go module root.
+    "." selects the workspace root only. Patterns use Dagger glob syntax:
+    *, ?, and character classes match within a path segment; ** matches zero
+    or more segments. "internal/**" includes internal itself and its descendants.
+    A ! prefix excludes. Exclusions always win, regardless of pattern order.
+    An empty list or a list containing only exclusions starts with all directories.
+    The default ["**"] includes directories in nested Go modules.
+
+    Example: ["sdk/go/engineconn", "internal/**", "!internal/fixtures/**"].
+    This replaces module-level selection; literal paths no longer select children.
+    See generateAll for execution behavior.
     """
     generate: [String!]! = ["**"],
   ) {
@@ -55,7 +68,7 @@ type Go {
       self.base = base ?? container.from("golang:" + (version ?? "1.26") + "-alpine")
       self.includeExtraFiles = includeExtraFiles
       self.test = normalizePatterns(test)
-      self.generate = normalizePatterns(generate)
+      self.generate = generate
       self
     }
   }
@@ -86,7 +99,7 @@ type Go {
   pub test: [String!]! = ["**"]
 
   """
-  Module roots to run go generate in ("!" excludes; see `test`).
+  Directories to run go generate in ("!" excludes; see the constructor).
   """
   pub generate: [String!]! = ["**"]
 
@@ -208,13 +221,18 @@ type Go {
   }
 
   """
-  Run go generate in every discovered Go module.
-  Modules configured to skip generate, or without go:generate directives,
-  are skipped.
+  Run go generate . in selected directories across the workspace.
+  Directories without generator commands are skipped; go:generate:include alone
+  is not a command. Go controls build tags and file and command order in a package.
+
+  Within each Go module, directories run in lexical path order and share a
+  container using the configured base. Later commands can use earlier output.
+  Modules run independently; cross-module dependencies are not inferred.
+  Use an explicit coordinating command when generators need a different order.
   """
   pub generateAll(ws: Workspace!): Changeset! @generate {
-    let mods = modules(ws).filter { mod =>
-      mod.skipGenerate(ws) == false and mod.hasGenerateDirectives(ws)
+    let mods = modules(ws.withWorkdir(".")).filter { mod =>
+      mod.skipGenerate(ws) == false
     }
 
     # Snapshot each selected module before generation, using the same source
@@ -267,7 +285,7 @@ type GoModule {
   let testPatterns: [String!]!
 
   """
-  Gitignore-style globs selecting which module roots to run go generate in.
+  Workspace-root-relative globs selecting directories to run go generate in.
   """
   let generatePatterns: [String!]!
 
@@ -290,36 +308,55 @@ type GoModule {
   }
 
   """
-  Whether this module falls outside the configured go generate selection.
+  Whether this module has no selected directories with go:generate commands.
   """
   pub skipGenerate(ws: Workspace!): Boolean! {
-    outOfScope(generatePatterns)
+    generateDirectories(ws).length == 0
   }
 
   """
-  Whether this module's Go files contain a go:generate directive.
+  Whether this module has go:generate commands, regardless of selection.
   """
   pub hasGenerateDirectives(ws: Workspace!): Boolean! {
-    let source = ws.directory("/", include: [subpath("**/*.go")])
-    if (source.glob("**/*.go").length == 0) {
-      false
-    } else {
-      source
-        .search(
-          pattern: "//go:generate",
-          literal: true,
-          filesOnly: true,
-          limit: 1,
-        ).{{filePath}}
-        .length > 0
+    discoveredGenerateDirectories(ws).length > 0
+  }
+
+  """
+  Selected generation directories in this module, in lexical order.
+  Paths are workspace-root-relative. Nested modules have their own directory lists.
+  """
+  pub generateDirectories(ws: Workspace!): [String!]! {
+    let included = generatePatterns.filter { p => p.hasPrefix("!") == false }
+    let excluded = generatePatterns.filter { p => p.hasPrefix("!") }.map { p => p.trimPrefix("!") }
+    let includeDirs = matchingGenerateDirectories(ws, included)
+    let excludeDirs = matchingGenerateDirectories(ws, excluded)
+    discoveredGenerateDirectories(ws).filter { dir =>
+      (included.length == 0 or includeDirs.any { match => match == dir }) and
+        excludeDirs.any { match => match == dir } == false
     }
   }
 
-  """
-  Whether go generate should run for this module.
-  """
-  let shouldGenerate(ws: Workspace!): Boolean! {
-    skipGenerate(ws) == false and hasGenerateDirectives(ws)
+  # Match direct Go files to include the workspace root and avoid treating a
+  # literal directory as recursive. Glob syntax is entirely Dagger's.
+  let matchingGenerateDirectories(ws: Workspace!, patterns: [String!]!): [String!]! {
+    let empty: [String!]! = []
+    patterns.reduce(empty) { dirs, pattern =>
+      dirs + ws.glob(pattern.trimSuffix("/") + "/*.go")
+        .filter { file => file.hasSuffix("/") == false }
+        .map { file =>
+          let dir = file.split("/").dropLast(1).join("/")
+          if (dir == "") { "." } else { dir }
+        }
+    }
+  }
+
+  let discoveredGenerateDirectories(ws: Workspace!): [String!]! {
+    let dirsFile = (if (path == ".") { "_root_" } else { path }) + ".generatedirs"
+    allIncludesDir(ws, test: false, generate: true)
+      .file(dirsFile)
+      .contents
+      .split("\n")
+      .filter { dir => dir != "" }
   }
 
   """
@@ -535,12 +572,12 @@ type GoModule {
   }
 
   """
-  Changes made by running go generate in this module.
-  If this module is configured to skip generate or no go:generate directives are
-  found, the changeset is empty.
+  Changes made by running go generate . in this module's selected directories.
+  Returns an empty changeset if no directories are selected. Execution follows
+  the ordering and container rules described by Go.generateAll.
   """
   pub generate(ws: Workspace!): Changeset! {
-    if (shouldGenerate(ws) == false) {
+    if (skipGenerate(ws)) {
       directory.changes(directory)
     } else {
       let before = directory.withDirectory(
@@ -556,10 +593,11 @@ type GoModule {
   Container state after running go generate in this module.
   """
   let generateExec(ws: Workspace!): Container! {
-    base
-      .withDirectory(".", source(ws, generate: true))
-      .withWorkdir(path)
-      .withExec(["go", "generate", "./..."], experimentalPrivilegedNesting: true)
+    let initial = base.withDirectory(".", source(ws, generate: true))
+    generateDirectories(ws).reduce(initial) { ctr, dir =>
+      ctr.withWorkdir("/ws/" + dir)
+        .withExec(["go", "generate", "."], experimentalPrivilegedNesting: true)
+    }.withWorkdir("/ws/" + path)
   }
 
   """
