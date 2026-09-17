@@ -9,6 +9,36 @@ type EngineE2e {
     git("https://github.com/dagger/dagger").ref(engineCommit).asWorkspace
   }
 
+  let client: Container! {
+    engineDev(ws: engineSource)
+      .installClient(container.from("alpine:3.23").withExec(["apk", "add", "--no-cache", "git"]))
+  }
+
+  """
+  Open with `dagger api call playground terminal`.
+  Includes the dev engine, its CLI, and an example Git repository at /example.
+  Run `dagger generate` there to try the container directive.
+  """
+  pub playground(ws: Workspace!): Container! {
+    let source = ws.directory("/", exclude: [".git"])
+    let fixture = source.directory("testdata/go-module-generate-dev-engine")
+    let example = source.directory(".dagger/examples/generate-container")
+      .withFile("generate.go", source.file(".dagger/examples/generate-container/generate.go.txt"))
+      .withoutFile("generate.go.txt")
+      .withFile("go.mod", fixture.file("go.mod"))
+      .withDirectory("internal/generate", fixture.directory("internal/generate"))
+      .withDirectory(".dagger/go", source)
+      .withDirectory(".dagger/engine-e2e", source.directory(".dagger/modules/engine-e2e"))
+    client
+      .withExec(["apk", "add", "--no-cache", "nano"])
+      .withDirectory("/example", example)
+      .withWorkdir("/example")
+      .withExec(["git", "init", "--quiet"])
+      .withExec(["git", "add", "."])
+      .withExec(["git", "-c", "user.name=Example", "-c", "user.email=example@example.com", "commit", "--quiet", "-m", "Initial example"])
+      .withDefaultTerminalCmd(["sh", "-c", "cat README.md; exec sh"], experimentalPrivilegedNesting: false)
+  }
+
   """
   Go container with the dev engine service and its CLI.
   """
@@ -24,13 +54,18 @@ type EngineE2e {
   pub devEngineCheck(ws: Workspace!): Void @check {
     let source = ws.directory("/", exclude: [".git"])
       .withFile("dagger.toml", ws.file("/.dagger/modules/engine-e2e/workspace.toml"))
-    engineDev(ws: engineSource)
-      .installClient(container.from("alpine:3.23").withExec(["apk", "add", "--no-cache", "git"]))
+    client
       .withMountedDirectory("/src", source)
       .withWorkdir("/src")
       .withExec(["git", "init", "--quiet"])
       .withExec(["dagger", "check"])
       .sync
+
+    let example = playground(ws)
+      .withExec(["dagger", "generate", "--require-load"])
+    assert("playground generator did not use the dev engine") {
+      example.file("generated.txt").contents.contains("dev-engine-connected")
+    }
     null
   }
 }
