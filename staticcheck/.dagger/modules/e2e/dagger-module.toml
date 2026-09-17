@@ -1,9 +1,9 @@
-name = "go"
+name = "e2e"
 engineVersion = "v1.0.0-beta.13"
 
 [runtime]
   source = "dang"
 
 [[dependencies]]
-  name = "gomod"
-  source = "./gomod"
+  name = "staticcheck"
+  source = "../../.."

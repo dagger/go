@@ -1,0 +1,320 @@
+"""
+Staticcheck linting for Go modules in a Dagger workspace.
+
+Discovery, selection and source policy come from the shared `gomod` library, so
+this module agrees with `go` and `golangci-lint` about what a module is, which
+ones a pattern list covers, and which files a command needs. What is left here
+is Staticcheck's own: the release to run, its configuration file, and its
+command line.
+
+Each module is checked with the Go toolchain its own go.mod asks for, unless
+goVersion or base says otherwise. Staticcheck itself is built once at the
+pinned release in a pinned Go container and copied in, so a module on an older
+toolchain still gets it.
+
+https://dagger.io
+https://staticcheck.dev
+"""
+type Staticcheck {
+  """
+  Staticcheck release each module is checked with. Installed only when the
+  container does not already carry Staticcheck.
+  """
+  version: String!
+
+  """
+  Go toolchain version every module is checked with. Null when each module
+  uses the one its own go.mod asks for, and when a custom base is set.
+  """
+  goVersion: String
+
+  """
+  Container to run Staticcheck in, as supplied by the caller. Null when each
+  module gets one built for its own Go toolchain.
+  """
+  base: Container
+
+  """
+  Settings that were given but are not in use, said once per container so they
+  show up in the progress output rather than being silently dropped.
+  """
+  warnings: [String!]! = []
+
+  """
+  Extra workspace-root include patterns mounted for each module.
+  """
+  includeExtraFiles: [String!]! = []
+
+  """
+  Module roots to lint ("!" excludes; see the constructor argument).
+  """
+  lint: [String!]! = ["**"]
+
+  new(
+    """
+    Staticcheck release each module is checked with, e.g. "v0.8.1". Installed
+    only when the container does not already carry Staticcheck, so a base that
+    brings its own build keeps it.
+    """
+    version: String = null,
+    """
+    Go toolchain version for every module, overriding what each module's own
+    go.mod asks for. Mutually exclusive with base.
+    """
+    goVersion: String = null,
+    """
+    Container to run Staticcheck in. It must carry a Go toolchain, along with
+    any C/C++ dependencies the modules need; Staticcheck is installed into it
+    unless it already has one. Mutually exclusive with goVersion.
+    """
+    base: Container = null,
+    """
+    Extra workspace-root include patterns mounted for each module. Use this
+    for files Staticcheck needs that are not covered by the built-in Go
+    patterns, such as generated inputs or non-Go embedded assets.
+    """
+    includeExtraFiles: [String!]! = [],
+    """
+    Module roots to lint. A bare pattern selects, a "!"-prefixed pattern
+    excludes, and an exclude always wins (order does not matter). With no
+    selecting pattern, every module is linted. Supported patterns: "**" or "*"
+    (all modules), and "X" or "X/**" (module X and any module below it); other
+    glob forms are not interpreted. Examples: ["**", "!docs"] lints all but
+    docs; ["services/**"] lints only services; ["!**"] lints nothing.
+    """
+    lint: [String!]! = ["**"],
+  ) {
+    self.warnings = if (goVersion != null and base != null) {
+      [
+        "goVersion \"" + goVersion
+          + "\" is ignored because base was set: the base container supplies its own Go toolchain",
+      ]
+    } else {
+      []
+    }
+    self.version = version ?? defaultVersion
+    self.goVersion = if (base == null) { goVersion } else { null }
+    self.base = base
+    self.includeExtraFiles = includeExtraFiles
+    self.lint = gomod.settingPatterns(lint)
+    self
+  }
+
+  """
+  Staticcheck release used when the caller names none.
+  """
+  let defaultVersion: String! = "v0.8.1"
+
+  """
+  The Staticcheck binary at the configured release.
+
+  Built in a pinned Go container rather than in each module's own, so that a
+  module pinned to an older toolchain still gets it, and so the build happens
+  once for the whole workspace instead of once per module.
+  """
+  binary: File! {
+    gomod
+      .toolBuilder
+      .withEnvVariable("GOBIN", "/usr/local/bin")
+      .withExec(["go", "install", "honnef.co/go/tools/cmd/staticcheck@" + (version ?? defaultVersion)])
+      .file("/usr/local/bin/staticcheck")
+  }
+
+  let lib: Gomod! { gomod(includeExtraFiles: includeExtraFiles) }
+
+  """
+  Discover go.mod files at or below the working directory, including the
+  enclosing module when the working directory is inside one.
+  Returned paths are relative to the workspace root.
+  """
+  modules(
+    ws: Workspace!,
+    include: [String!]! = [],
+    exclude: [String!]! = [],
+    includeSkipped: Boolean! = true,
+  ): [GoModule!]! {
+    lib
+      .modules(ws, include: include, exclude: exclude).{{path}}
+      .map { found => goModule(found.path) }
+      .filter { mod => includeSkipped or mod.skipLint == false }
+  }
+
+  """
+  Find the Go module containing a workspace-root-relative directory.
+  Set findUp to false when path is already a module root.
+  """
+  module(ws: Workspace!, path: String!, findUp: Boolean! = true): GoModule! {
+    goModule(lib.module(ws, path, findUp: findUp).path)
+  }
+
+  let goModule(modPath: String!): GoModule! {
+    GoModule(
+      path: modPath,
+      version: version,
+      configuredGoVersion: goVersion,
+      warnings: warnings,
+      includeExtraFiles: includeExtraFiles,
+      baseImage: base,
+      lintPatterns: lint,
+    )
+  }
+
+  """
+  Run Staticcheck in every selected Go module.
+  """
+  lintAll(ws: Workspace!): Void @check {
+    let layers = modules(ws, includeSkipped: false).reduce(directory) { layers, mod =>
+      layers.withDirectory(
+        mod.path,
+        directory.withFile("go.mod", mod.lintExec(ws).file("go.mod")),
+      )
+    }
+    # Merging one output from each container forces all lint commands to run
+    # in parallel until Dagger supports directly awaiting multiple containers.
+    layers.sync
+    null
+  }
+}
+
+# Keep all Dang types in one source file until Dagger can convert Workspace
+# arguments for installed multi-file Dang modules. See dagger/dagger#13476.
+
+"""
+A Go module checked with Staticcheck.
+"""
+type GoModule {
+  """
+  Module root relative to the workspace root.
+  """
+  path: String!
+
+  """
+  Staticcheck release this module is checked with, installed only when the
+  container does not already carry Staticcheck.
+  """
+  version: String!
+
+  """
+  Extra workspace-root include patterns mounted for this module.
+  """
+  includeExtraFiles: [String!]!
+
+  let configuredGoVersion: String
+  let warnings: [String!]!
+  let baseImage: Container
+  let lintPatterns: [String!]!
+
+  """
+  The Staticcheck binary this module is checked with, built once at the pinned
+  release in a pinned Go container rather than in this module's own, so a
+  module on an older toolchain still gets it.
+  """
+  let staticcheckBinary: File! {
+    gomod
+      .toolBuilder
+      .withEnvVariable("GOBIN", "/usr/local/bin")
+      .withExec(["go", "install", "honnef.co/go/tools/cmd/staticcheck@" + version])
+      .file("/usr/local/bin/staticcheck")
+  }
+
+  """
+  The shared library, which answers discovery, selection and source policy for
+  this module, so Staticcheck mounts what `go` and `golangci-lint` mount plus
+  its own configuration.
+
+  Its module object is re-derived at each call site rather than held as a
+  field: Dang cannot yet name a dependency's non-root type, which is also why
+  the GoModule type here is this module's own rather than the library's.
+  """
+  let lib: Gomod! { gomod(includeExtraFiles: includeExtraFiles) }
+
+  """
+  Whether this module is outside the configured lint selection.
+  """
+  skipLint: Boolean! {
+    lib.at(path).selected(lintPatterns) == false
+  }
+
+  """
+  Go toolchain version this module is checked with: the configured goVersion,
+  or the one its own go.mod asks for, or the fallback for a module that asks
+  for none. Null when a custom base container is set, because its toolchain is
+  whatever that container carries.
+  """
+  goVersion(ws: Workspace!): String {
+    if (baseImage == null) { toolchainVersion(ws) } else { null }
+  }
+
+  let toolchainVersion(ws: Workspace!): String! {
+    configuredGoVersion ?? lib.at(path).goVersion(ws) ?? gomod.defaultGoVersion
+  }
+
+  """
+  Container Staticcheck runs in: this module's own Go toolchain, or the
+  caller's base, with Staticcheck on PATH -- the container's own if it has
+  one, otherwise the pinned release.
+  """
+  base(ws: Workspace!): Container! {
+    let toolchain = if (baseImage == null) {
+      gomod.goContainer(toolchainVersion(ws), cgo: true)
+    } else {
+      gomod.withGoCaches(baseImage.withoutEntrypoint)
+    }
+    gomod
+      .withWarnings(
+        gomod.withTool(toolchain, "staticcheck", staticcheckBinary),
+        warnings,
+      )
+      .withWorkdir("/ws")
+  }
+
+  """
+  Workspace patterns Staticcheck reads its configuration from.
+
+  Mounted with their directory structure intact, so Staticcheck's normal
+  configuration inheritance applies.
+  """
+  includeConfig: [String!]! {
+    ["**/staticcheck.conf"]
+  }
+
+  """
+  Go sources, embedded assets, and local replace dependencies for this module.
+  """
+  includeDiscovered(ws: Workspace!): [String!]! {
+    lib.at(path).includeDiscovered(ws)
+  }
+
+  """
+  Final workspace include patterns, including inherited Staticcheck config.
+  """
+  include(ws: Workspace!): [String!]! {
+    lib.at(path).include(ws, extra: includeConfig)
+  }
+
+  """
+  Workspace-shaped source directory mounted for Staticcheck.
+  """
+  source(ws: Workspace!): Directory! {
+    lib.at(path).source(ws, extra: includeConfig)
+  }
+
+  """
+  Run Staticcheck on this module and its tests, unless excluded by lint.
+  """
+  lint(ws: Workspace!): Void @check {
+    if (skipLint == false) {
+      lintExec(ws).sync
+    }
+    null
+  }
+
+  let lintExec(ws: Workspace!): Container! {
+    base(ws)
+      .withMountedCache("/root/.cache/staticcheck", cacheVolume("staticcheck"))
+      .withEnvVariable("STATICCHECK_CACHE", "/root/.cache/staticcheck")
+      .withDirectory(".", source(ws))
+      .withWorkdir(path)
+      .withExec(["staticcheck", "./..."])
+  }
+}

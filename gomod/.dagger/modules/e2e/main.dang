@@ -1,0 +1,242 @@
+"""
+End-to-end checks for the shared gomod library.
+
+The library has no checks of its own, so these live here. What they cover is
+what the three tool modules stopped covering separately: one notion of a module
+root, one selection syntax, one source scan.
+"""
+type E2e {
+  let embedPath: String! = "testdata/go-module-with-testdata"
+  let parentPath: String! = "fixtures/go-module-with-nested-module"
+  let replacePath: String! = "fixtures/go-module-with-replace"
+  let generatePath: String! = "fixtures/go-module-generate-directories"
+  let helperPath: String! = "gomod/helpers/go-includes"
+  let unreadablePath: String! = "fixtures/go-module-unreadable"
+  let emptyPath: String! = "testdata/go-module-empty"
+
+  let assert(condition: Boolean!, message: String!): Void {
+    if (condition == false) { raise message }
+    null
+  }
+
+  let selects(patterns: [String!]!, path: String!): Boolean! {
+    gomod.at(path).selected(patterns)
+  }
+
+  """
+  Discovery reports every go.mod root and invents none, and its paths stay
+  workspace-root-relative wherever the workspace cwd happens to be.
+  """
+  discoveryCheck(ws: Workspace!): Void @check {
+    let paths = gomod.modules(ws).{{path}}.map { mod => mod.path }
+    assert(paths.contains(parentPath), "parent module was not discovered")
+    assert(paths.contains(parentPath + "/nested"), "nested module was not discovered")
+    assert(paths.contains(helperPath), "the library's own helper module was not discovered")
+    assert(paths.contains(".") == false, "invented a root Go module")
+    assert(paths.contains("fixtures") == false, "invented a module for a plain directory")
+
+    let below = gomod.modules(ws.withWorkdir(parentPath)).{{path}}.map { mod => mod.path }
+    assert(below.length == 2, "discovery from a module root escaped its subtree")
+    assert(below.contains(parentPath), "discovery from a subdirectory changed workspace-relative paths")
+
+    # A root reported as ".." has to survive being mounted, not just be spelled
+    # right: every source mount resolves it against the workspace root.
+    let inside = ws.withWorkdir(embedPath + "/testdata")
+    assert(
+      gomod.modules(inside).{{path}}.map { mod => mod.path }.contains(embedPath),
+      "discovery inside a module missed its enclosing root",
+    )
+    assert(
+      gomod.module(inside, ".").source(inside).file(embedPath + "/go.mod").contents != "",
+      "a module discovered from a subdirectory could not be mounted",
+    )
+
+    let included = gomod.modules(ws, include: [embedPath + "/**"]).{{path}}
+    assert(included.length == 1, "content include filter failed")
+    let excluded = gomod.modules(ws, exclude: [parentPath + "/**"]).{{path}}.map { mod => mod.path }
+    assert(excluded.contains(parentPath) == false, "content exclude filter failed")
+    null
+  }
+
+  """
+  Lookup snaps to the enclosing module root; `at` takes the path as given.
+  """
+  lookupCheck(ws: Workspace!): Void @check {
+    assert(gomod.module(ws, embedPath + "/testdata").path == embedPath, "lookup did not find the enclosing module")
+    assert(gomod.module(ws, embedPath).path == embedPath, "lookup moved a module root")
+    assert(
+      gomod.module(ws, embedPath + "/testdata", findUp: false).path == embedPath + "/testdata",
+      "lookup snapped with findUp false",
+    )
+    assert(gomod.at("/" + embedPath + "/").path == embedPath, "at did not normalize its path")
+    assert(gomod.at(".").path == ".", "at lost the workspace root")
+
+    let missing = { gomod.module(ws, ".").path } rescue {
+      err: Error => err.message
+    }
+    assert(missing.contains("no Go module found"), "missing module lookup succeeded")
+    null
+  }
+
+  """
+  One selection syntax for every tool. These are the cases each tool used to
+  assert separately.
+  """
+  selectionCheck: Void @check {
+    assert(selects(["**"], "a/b"), "default selection failed")
+    assert(selects(["*"], "a/b"), "star selection failed")
+    assert(selects([], "a/b"), "empty selection should select all")
+    assert(selects(["!**"], "a/b") == false, "skip-all selection failed")
+    assert(selects(["!docs"], "docs") == false, "exclude-only selection failed")
+    assert(selects(["!docs"], "docs/nested") == false, "subtree exclusion failed")
+    assert(selects(["!docs/**"], "docs/nested") == false, "subtree glob exclusion failed")
+    assert(selects(["!docs"], "docs-tools"), "exclusion crossed a path boundary")
+    assert(selects(["docs/**"], "core") == false, "include-only selection failed")
+    assert(selects(["docs/**"], "docs/nested"), "subtree inclusion failed")
+    assert(selects(["**", "!docs", "docs/keep"], "docs/keep") == false, "include overrode exclusion")
+    assert(selects(["."], "."), "root selection failed")
+    assert(selects(["."], "core") == false, "root selection leaked to another module")
+    assert(selects(["docs"], "docs-tools") == false, "path prefix crossed a module boundary")
+    null
+  }
+
+  """
+  A settings array that older beta engines deliver as JSON fragments reads back
+  as the patterns that were written.
+  """
+  settingPatternsCheck: Void @check {
+    let repaired = gomod.settingPatterns(["[\"!docs\"", "\"!tmp\"]"])
+    assert(repaired == ["!docs", "!tmp"], "settings normalization failed: " + repaired.join(", "))
+    assert(gomod.settingPatterns(["**", "!docs"]) == ["**", "!docs"], "normalization damaged plain patterns")
+    null
+  }
+
+  """
+  The scan follows go:embed and local replaces always, and the test and
+  generate directives only when asked. Every tool relies on that split: a lint
+  run mounts neither test nor generate inputs.
+  """
+  scanCheck(ws: Workspace!): Void @check {
+    let mod = gomod.at(embedPath)
+    let bare = mod.includeDiscovered(ws)
+    assert(bare.contains(embedPath + "/embedded-assets/message.txt"), "embed include was lost")
+    assert(bare.contains("LICENSE") == false, "test-only include leaked into a bare scan")
+
+    let tested = mod.includeDiscovered(ws, test: true)
+    assert(tested.contains("LICENSE"), "go:test:include was not followed with --test")
+    assert(tested.contains(embedPath + "/embedded-assets/message.txt"), "test scan lost the embed include")
+
+    let replaced = gomod.at(replacePath).includeDiscovered(ws)
+    assert(replaced.contains("fixtures/replaced-lib/**/*.go"), "local replace target was not followed")
+    assert(replaced.contains("fixtures/replaced-lib/asset.txt"), "local replace target lost its embedded file")
+
+    let files = mod.source(ws).glob("**/*")
+    assert(files.contains(embedPath + "/embedded-assets/hidden/_secret.txt"), "all: embed directory was not mounted")
+    assert(files.contains(parentPath + "/nested/include.go") == false, "another module leaked into the source mount")
+    assert(
+      gomod(includeExtraFiles: ["LICENSE"]).at(embedPath).source(ws).file("LICENSE").contents.contains("Apache License"),
+      "extra include was not mounted",
+    )
+    assert(
+      mod.source(ws, extra: ["LICENSE"]).file("LICENSE").contents.contains("Apache License"),
+      "caller-supplied extra pattern was not mounted",
+    )
+    assert(
+      mod.testData(ws).file(embedPath + "/testdata/fixture.txt").contents.contains("mounted from testdata"),
+      "testdata was not mounted",
+    )
+    assert(mod.includeBase.contains(embedPath + "/**/*.go"), "includeBase was not module-scoped")
+    assert(mod.includeBase.contains("**/*.go") == false, "includeBase exposed a workspace-wide pattern")
+    assert(mod.subpath("go.mod") == embedPath + "/go.mod", "subpath did not resolve against the module root")
+    assert(gomod.at(".").subpath("go.mod") == "go.mod", "subpath doubled up at the workspace root")
+    null
+  }
+
+  """
+  Test and generate directory listings come from the same scan.
+  """
+  directoriesCheck(ws: Workspace!): Void @check {
+    assert(gomod.at(embedPath).testDirectories(ws).contains(embedPath), "test directory discovery missed the module root")
+    assert(
+      gomod.at(embedPath).generateDirectories(ws).length == 0,
+      "a module without go:generate reported generate directories",
+    )
+    let dirs = gomod.at(generatePath).generateDirectories(ws)
+    assert(
+      dirs == [generatePath, generatePath + "/later", generatePath + "/version"],
+      "generate directory discovery changed: " + dirs.join(", "),
+    )
+    assert(
+      dirs.contains(generatePath + "/nested") == false,
+      "a nested module's generate directory leaked into its parent",
+    )
+    null
+  }
+
+  """
+  A directory holding a go.mod is not automatically a Go module.
+
+  One whose go.mod will not parse, and one holding no Go files, are both left
+  out of discovery: handed to a tool they produce a complaint about the tool
+  rather than about the directory. Naming one directly still reaches it, and
+  still says what is wrong with it.
+  """
+  skipsNonModulesCheck(ws: Workspace!): Void @check {
+    let discovered = gomod.modules(ws).{{path}}.map { mod => mod.path }
+    assert(
+      discovered.contains(unreadablePath) == false,
+      "a go.mod that will not parse was discovered as a module",
+    )
+    assert(
+      discovered.contains(emptyPath) == false,
+      "a module with no Go files was discovered as a module",
+    )
+    assert(
+      gomod.scannedModuleRoots(ws).contains(embedPath),
+      "a real module was dropped along with them",
+    )
+    assert(
+      discovered.contains(embedPath) and discovered.contains(helperPath),
+      "discovery lost a real module",
+    )
+
+    # Naming one directly still reaches it: a caller that spells out a path
+    # means that path.
+    assert(gomod.at(unreadablePath).path == unreadablePath, "a named path was not reachable")
+    assert(gomod.module(ws, emptyPath).path == emptyPath, "a named path was not reachable")
+
+    # An unparseable go.mod still says what is wrong, naming the file. A module
+    # with no Go files is a legal module with nothing in it, so it answers
+    # with nothing rather than failing.
+    let failure = { gomod.at(unreadablePath).includeDiscovered(ws); "unexpected success" } rescue {
+      err: Error => err.message
+    }
+    assert(
+      failure.contains(unreadablePath + "/go.mod: missing module declaration"),
+      "the failure did not name the file and the fault: " + failure,
+    )
+    assert(
+      (gomod.at(unreadablePath).scanError(ws) ?? "").contains(unreadablePath + "/go.mod"),
+      "the reason was not readable as state",
+    )
+    assert(
+      gomod.at(emptyPath).includeDiscovered(ws).length > 0,
+      "a module with no Go files failed instead of answering with its own tree",
+    )
+    assert(gomod.at(emptyPath).scanError(ws) == null, "an empty module was treated as a fault")
+    null
+  }
+
+  """
+  The source scanner's own unit tests.
+  """
+  helperCheck(ws: Workspace!): Void @check {
+    gomod
+      .withGoCaches(container.from("golang:" + gomod.scannerVersion + "-alpine"))
+      .withDirectory("/src", ws.directory("/" + helperPath))
+      .withWorkdir("/src")
+      .withExec(["go", "test", "./..."])
+      .sync
+    null
+  }
+}

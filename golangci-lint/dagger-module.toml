@@ -1,4 +1,4 @@
-name = "go"
+name = "golangci-lint"
 engineVersion = "v1.0.0-beta.13"
 
 [runtime]
@@ -6,4 +6,4 @@ engineVersion = "v1.0.0-beta.13"
 
 [[dependencies]]
   name = "gomod"
-  source = "./gomod"
+  source = "../gomod"

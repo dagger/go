@@ -1,0 +1,527 @@
+"""
+Shared Go module discovery and source policy for Dagger modules that work on
+Go code.
+
+Every Go tool in this repository repeats the same mechanics: find the go.mod
+files, resolve them against the workspace root, decide which ones a selection
+covers, work out which files a module's commands actually need, and mount them.
+This library owns those mechanics. What to do with a module once it is found --
+test it, lint it, generate into it -- stays with the tool.
+
+There are no checks here, on purpose: a library with a check for somebody
+else's tool would run that tool twice.
+
+https://dagger.io
+"""
+type Gomod {
+  """
+  Extra workspace-root include patterns mounted for every module's commands.
+  Use this for fixtures, generator inputs, or other files not covered by the
+  built-in Go patterns.
+  """
+  includeExtraFiles: [String!]! = []
+
+  new(
+    """
+    Extra workspace-root include patterns mounted for every module's commands.
+    """
+    includeExtraFiles: [String!]! = [],
+  ) {
+    self.includeExtraFiles = includeExtraFiles
+    self
+  }
+
+  """
+  Go modules discovered from go.mod files at or below the workspace cwd, plus
+  the enclosing module when the cwd is inside one. Paths are workspace-root-
+  relative.
+
+  A directory holding a go.mod that will not parse, or holding no Go files, is
+  not a module and is not reported; see `scannedModuleRoots`. `module` and `at`
+  still reach one, because a caller naming a path means that path.
+
+  Optional include/exclude patterns filter the discovered roots by matching
+  workspace content, which is Dagger's own glob syntax rather than the
+  selection syntax `selected` uses.
+  """
+  modules(
+    ws: Workspace!,
+    include: [String!]! = [],
+    exclude: [String!]! = [],
+  ): [GoMod!]! {
+    let goModules = scannedModuleRoots(ws)
+    ws
+      .findRoots(markers: ["go.mod"])
+      .map { root => workspaceRootPath(ws, root) }
+      .filter { modPath => goModules.any { goModule => goModule == modPath } }
+      .filter { modPath => pathIncluded(ws, modPath, include, exclude) }
+      .map { modPath => at(modPath) }
+  }
+
+  """
+  The Go module containing a workspace path.
+
+  With findUp the path may be any directory inside a module; without it the
+  path is taken as a module root and no lookup happens, which is what lets a
+  caller ask about a root that does not exist on disk.
+  """
+  module(ws: Workspace!, path: String!, findUp: Boolean! = true): GoMod! {
+    at(if (findUp) { findRootUp(ws, path) } else { path })
+  }
+
+  """
+  The module root at exactly this path, with nothing looked up and no
+  workspace consulted.
+
+  `module` is the accessor to reach for. This one exists because a caller
+  often already holds a root -- its own module type stores one -- and answering
+  "is this root selected?" or "what does this root mount?" should not oblige it
+  to carry a Workspace it has no other use for.
+  """
+  at(path: String!): GoMod! {
+    GoMod(path: normalize(path), includeExtraFiles: includeExtraFiles)
+  }
+
+  """
+  The nearest directory at or above `path` that holds a go.mod.
+  """
+  let findRootUp(ws: Workspace!, path: String!): String! {
+    let found = ws.findUp("go.mod", path)
+    if (found == null) {
+      raise "no Go module found containing path: " + path
+    } else {
+      let goModPath = found.trimPrefix("/")
+      if (goModPath == "go.mod") { "." } else { goModPath.trimSuffix("/go.mod") }
+    }
+  }
+
+  """
+  Resolve a cwd-relative discovery result to a workspace-root-relative path.
+
+  findRoots answers relative to the workspace cwd -- "." for the cwd itself and
+  ".." for an enclosing module -- while every other path this library handles
+  is workspace-root-relative.
+  """
+  workspaceRootPath(ws: Workspace!, cwdPath: String!): String! {
+    let segments = cwdPath.split("/").filter { segment => segment != "" and segment != "." }
+    let up = segments.filter { segment => segment == ".." }.length
+    let down = segments.filter { segment => segment != ".." }
+    let resolved = ws.cwd.split("/").filter { segment => segment != "" }.dropLast(up) + down
+
+    if (resolved.length == 0) { "." } else { resolved.join("/") }
+  }
+
+  let normalize(path: String!): String! {
+    let segments = path.split("/").filter { segment => segment != "" and segment != "." }
+    if (segments.length == 0) { "." } else { segments.join("/") }
+  }
+
+  """
+  Scanner container that computes includes for every module in one local pass
+  over a content-addressed Go-source snapshot of the workspace. It reads the
+  snapshot from the local filesystem, so the exec caches on source content and
+  makes no workspace gateway round-trips.
+
+  It is built from a pinned image rather than any caller's base, and depends on
+  nothing about any one module, so every module in every tool produces the same
+  container: the engine builds and runs it once for the whole workspace.
+  """
+  let scanner(ws: Workspace!): Container! {
+    withGoCaches(container.from("golang:" + scannerVersion + "-alpine"))
+      .withoutEntrypoint
+      .withWorkdir("/helpers/go-includes")
+      .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
+      .withExec(["go", "build", "-o", "/usr/local/bin/go-includes", "."])
+      .withDirectory("/ws", ws.directory("/", include: ["**/*.go", "**/go.mod"]))
+      .withWorkdir("/ws")
+  }
+
+  """
+  The raw scan of the workspace for a mode: one file of include patterns, test
+  directories, generate directories and recorded failures per module.
+
+  One scan serves the whole workspace and every tool in it, so for a given mode
+  every module produces the same exec and reads its own slice of the result.
+  This is the causal data behind every include list here; reach for the named
+  fields on a module before this.
+  """
+  scan(
+    ws: Workspace!,
+    test: Boolean! = false,
+    generate: Boolean! = false,
+  ): Directory! {
+    let testFlags = if (test) { ["--test"] } else { [] }
+    let generateFlags = if (generate) { ["--generate"] } else { [] }
+    scanner(ws)
+      .withExec(["go-includes", "--all", "--output-dir", "/output"] + testFlags + generateFlags)
+      .directory("/output")
+  }
+
+  """
+  Workspace-root paths of the directories the scan accepts as Go modules.
+
+  A directory holding a go.mod is not automatically one: the file may not
+  parse, or may carry no module line, and no Go command accepts either; or the
+  module may hold no Go files, and there is then nothing to test, lint or
+  generate. Handing one of those to a tool yields a complaint about the tool
+  rather than about the directory, so discovery leaves them out.
+
+  The list is the same whatever the scan mode, so this reads the bare one.
+  """
+  scannedModuleRoots(ws: Workspace!): [String!]! {
+    scan(ws)
+      .file("_modules_")
+      .contents
+      .split("\n")
+      .filter { line => line != "" }
+  }
+
+  let pathIncluded(
+    ws: Workspace!,
+    modPath: String!,
+    include: [String!]!,
+    exclude: [String!]!,
+  ): Boolean! {
+    if (include.length == 0 and exclude.length == 0) {
+      true
+    } else {
+      let includePatterns = if (include.length == 0) { ["**"] } else { include }
+      let glob = if (modPath == ".") { "**" } else { modPath.trimSuffix("/") + "/**" }
+      ws
+        .directory("/", include: includePatterns, exclude: exclude)
+        .glob(glob)
+        .length > 0
+    }
+  }
+
+  """
+  Selection patterns as written, with the beta engines' JSON-fragment spelling
+  removed.
+
+  A `settings.lint = ["**", "!docs"]` array reaches a module as the two strings
+  `["**"` and `"!docs"]` on older beta engines. Every tool here takes selection
+  patterns from settings, so every tool needs the same repair.
+  """
+  settingPatterns(patterns: [String!]!): [String!]! {
+    patterns.map { p =>
+      p.trimPrefix("[").trimSuffix("]").trimPrefix("\"").trimSuffix("\"")
+    }
+  }
+
+  """
+  A container with the shared Go module and build caches mounted, so every tool
+  in the workspace warms one download cache and one build cache rather than
+  one each.
+  """
+  withGoCaches(ctr: Container!): Container! {
+    ctr
+      .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
+      .withEnvVariable("GOMODCACHE", "/go/pkg/mod")
+      .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+      .withEnvVariable("GOCACHE", "/root/.cache/go-build")
+  }
+
+  """
+  Go version used for a module whose go.mod declares no go directive.
+
+  A module that states no minimum gets the same toolchain the tools here are
+  built with, rather than a guess at what it might have meant.
+  """
+  defaultGoVersion: String! { scannerVersion }
+
+  """
+  A Go toolchain container at `version`, with the shared Go caches mounted.
+
+  Every tool in the workspace builds its module containers from this, so two
+  tools checking the same module at the same Go version share one image and one
+  set of caches rather than one each.
+  """
+  goContainer(
+    version: String!,
+    """
+    Install a C/C++ toolchain. cgo needs one to typecheck or build, and a
+    module that uses it fails without one.
+    """
+    cgo: Boolean! = false,
+  ): Container! {
+    let ctr = withGoCaches(container.from("golang:" + version + "-alpine").withoutEntrypoint)
+    if (cgo) { ctr.withExec(["apk", "add", "--no-cache", "build-base"]) } else { ctr }
+  }
+
+  """
+  Whether `ctr` already has `name` on its PATH.
+
+  Probing needs a shell, which every image these modules build on has.
+  """
+  hasCommand(ctr: Container!, name: String!): Boolean! {
+    ctr
+      .withExec(["sh", "-c", "command -v " + name + " >/dev/null 2>&1"], expect: ANY)
+      .exitCode == 0
+  }
+
+  """
+  `ctr` with `binary` installed as `name`, unless it already carries one.
+
+  A caller's base container may bring its own build of a tool -- an
+  instrumented one, say -- and installing over it would throw that away. A
+  container that has no such build gets the pinned one.
+  """
+  withTool(ctr: Container!, name: String!, binary: File!): Container! {
+    if (hasCommand(ctr, name)) {
+      ctr
+    } else {
+      ctr.withFile("/usr/local/bin/" + name, binary, permissions: 493)
+    }
+  }
+
+  """
+  `ctr` with each of `warnings` announced as a step before any real work.
+
+  Dang has no diagnostics channel: its `print` never reaches the caller from
+  module code, so the only way to say something is to run it. A container with
+  nothing to warn about gains no step.
+  """
+  withWarnings(ctr: Container!, warnings: [String!]!): Container! {
+    warnings.reduce(ctr) { warned, warning =>
+      warned.withExec(["echo", "warning: " + warning])
+    }
+  }
+
+  """
+  A pinned Go container for building tool binaries in.
+
+  A tool is built here rather than in the module's own container, so a module
+  pinned to an older Go still gets the tool, and so the build happens once for
+  the whole workspace instead of once per module.
+  """
+  toolBuilder: Container! { goContainer(scannerVersion) }
+
+  """
+  Go version of the image the source scanner is built and run in.
+
+  The scanner only parses Go files, so this is not the toolchain a caller's
+  code is built with and a caller never chooses it. Pinning it here is what
+  makes the scan shared: three tools with three different base images still
+  produce one identical container, so the engine builds and runs it once.
+  """
+  scannerVersion: String! = "1.26"
+}
+
+# Keep both types in one source file until Dagger can convert Workspace
+# arguments for installed multi-file Dang modules. See dagger/dagger#13476.
+
+"""
+One Go module rooted at a workspace-relative path.
+
+A tool module keeps its own module type, because the type is what its callers
+see and each tool has its own fields and verbs to put on it. That type holds
+one of these and forwards the mechanics to it.
+"""
+type GoMod {
+  """
+  Workspace-relative path of this module root.
+  """
+  path: String!
+
+  """
+  Extra workspace-root include patterns mounted for this module's commands.
+  """
+  includeExtraFiles: [String!]!
+
+  """
+  A workspace-root path for a module-relative subpath.
+  """
+  subpath(relativePath: String!): String! {
+    if (path == ".") { relativePath } else { path.trimSuffix("/") + "/" + relativePath }
+  }
+
+  """
+  Whether this module root is selected by `patterns`.
+
+  A bare pattern selects, a "!"-prefixed pattern excludes, and an exclude
+  always wins whatever the order. A list with no selecting pattern selects
+  everything left over, so ["!docs"] means "all but docs". "**" and "*" match
+  every module; "X" and "X/**" both mean X and any module below it. Other glob
+  shapes are not interpreted and so select nothing.
+  """
+  selected(patterns: [String!]!): Boolean! {
+    let selecting = patterns.filter { pattern => pattern.hasPrefix("!") == false }
+    let excluding = patterns
+      .filter { pattern => pattern.hasPrefix("!") }
+      .map { pattern => pattern.trimPrefix("!") }
+
+    (selecting.length == 0 or selecting.any { pattern => matches(pattern) })
+      and excluding.any { pattern => matches(pattern) } == false
+  }
+
+  """
+  Whether this module root matches a single selection glob.
+  """
+  let matches(pattern: String!): Boolean! {
+    let trimmed = pattern.trimPrefix("/").trimSuffix("/")
+    if (trimmed == "**" or trimmed == "*") {
+      true
+    } else {
+      let prefix = trimmed.trimSuffix("/**")
+      path == prefix or path.hasPrefix(prefix + "/")
+    }
+  }
+
+  """
+  File name stem of this module's entries in the scan output directory.
+  """
+  let outputStem: String! {
+    if (path == ".") { "_root_" } else { path }
+  }
+
+  """
+  Why this module's inputs could not be worked out, or null when they could.
+
+  The scan covers every module in the workspace at once, so a module it cannot
+  read -- an unreadable go.mod, a Go file that will not parse -- records the
+  reason rather than failing the pass: one bad module must not stop every other
+  module's checks. The reason names the file, and anything that asks this
+  module for sources raises it.
+
+  Read it directly when a caller would otherwise have to ask a question about a
+  module it is never going to run, such as whether it holds generators.
+  """
+  scanError(
+    ws: Workspace!,
+    test: Boolean! = false,
+    generate: Boolean! = false,
+  ): String {
+    let failure = gomod.scan(ws, test: test, generate: generate).file(outputStem + ".err").contents.trimSpace
+    if (failure == "") { null } else { failure }
+  }
+
+  let scanFile(
+    ws: Workspace!,
+    test: Boolean!,
+    generate: Boolean!,
+    suffix: String!,
+  ): [String!]! {
+    let output = gomod.scan(ws, test: test, generate: generate)
+    let failure = output.file(outputStem + ".err").contents.trimSpace
+    if (failure != "") {
+      raise failure
+    } else {
+      output
+        .file(outputStem + suffix)
+        .contents
+        .split("\n")
+        .filter { line => line != "" }
+    }
+  }
+
+  """
+  Additional workspace include patterns discovered by scanning Go directives
+  and local go.mod replaces reachable from this module's include graph.
+
+  With neither flag, only go:embed directives and local replaces are followed.
+  `test` also follows go:test:include, `generate` also follows
+  go:generate:include and the modules that go:generate `go -C` reaches.
+  """
+  includeDiscovered(
+    ws: Workspace!,
+    test: Boolean! = false,
+    generate: Boolean! = false,
+  ): [String!]! {
+    scanFile(ws, test, generate, ".inc")
+  }
+
+  """
+  Go version this module's go.mod asks for, as a major.minor series, or null
+  when it declares no go directive.
+
+  The series rather than the exact version: a go directive states a minimum,
+  the series tag is always its newest published patch, and a go.mod bumped to a
+  patch that has no image yet would otherwise stop the module being checked.
+  """
+  goVersion(ws: Workspace!): String {
+    let declared = gomod.scan(ws).file(outputStem + ".goversion").contents.trimSpace
+    if (declared == "") { null } else { declared }
+  }
+
+  """
+  Directories in this module containing Go test files, in lexical order.
+  Paths are workspace-root-relative.
+  """
+  testDirectories(ws: Workspace!): [String!]! {
+    scanFile(ws, true, false, ".testdirs")
+  }
+
+  """
+  Directories in this module holding a go:generate command, in lexical order.
+  Paths are workspace-root-relative, and a go:generate:include annotation
+  alone is not a command. Nested modules have their own lists.
+  """
+  generateDirectories(ws: Workspace!): [String!]! {
+    scanFile(ws, false, true, ".generatedirs")
+  }
+
+  """
+  Built-in workspace include patterns for this module's own source files.
+
+  The scanner already emits these; they are named here so a caller can show
+  what a module mounts before running anything.
+  """
+  includeBase: [String!]! {
+    [
+      subpath("**/*.go"),
+      subpath("**/*.c"),
+      subpath("**/*.cc"),
+      subpath("**/*.cpp"),
+      subpath("**/*.cxx"),
+      subpath("**/*.h"),
+      subpath("**/*.hh"),
+      subpath("**/*.hpp"),
+      subpath("**/*.hxx"),
+      subpath("**/*.s"),
+      subpath("**/*.S"),
+      subpath("**/*.syso"),
+      subpath("go.mod"),
+      subpath("go.sum"),
+      subpath("go.work"),
+      subpath("go.work.sum"),
+    ]
+  }
+
+  """
+  Final workspace include patterns used to build this module's source.
+
+  `extra` is where a tool adds the files only it needs -- its own
+  configuration, most often -- without every other tool mounting them.
+  """
+  include(
+    ws: Workspace!,
+    test: Boolean! = false,
+    generate: Boolean! = false,
+    extra: [String!]! = [],
+  ): [String!]! {
+    let discovered = includeDiscovered(ws, test: test, generate: generate)
+    includeExtraFiles + discovered + extra
+  }
+
+  """
+  Workspace source mounted for this module's commands.
+  """
+  source(
+    ws: Workspace!,
+    test: Boolean! = false,
+    generate: Boolean! = false,
+    extra: [String!]! = [],
+  ): Directory! {
+    ws.directory("/", include: include(ws, test: test, generate: generate, extra: extra))
+  }
+
+  """
+  Workspace testdata directories at or below this module root.
+
+  Go loads these at run time, where no import analysis would see them, so they
+  are mounted on their own rather than discovered.
+  """
+  testData(ws: Workspace!): Directory! {
+    ws.directory("/", include: [subpath("testdata/**"), subpath("**/testdata/**")])
+  }
+}

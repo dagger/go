@@ -1,0 +1,331 @@
+"""
+Lint Go modules in a Dagger workspace with golangci-lint.
+
+Discovery, selection and source policy come from the shared `gomod` library, so
+this module agrees with `go` and `staticcheck` about what a module is, which
+ones a pattern list covers, and which files a command needs. What is left here
+is golangci-lint's own: its release, its configuration files, and its command
+line.
+
+Each module is linted with the Go toolchain its own go.mod asks for, unless
+goVersion or base says otherwise. The golangci-lint binary is taken from its
+pinned image and copied in, so the linter's release and the module's toolchain
+are chosen independently.
+
+https://dagger.io
+https://golangci-lint.run
+"""
+type GolangciLint {
+  """
+  golangci-lint release every module is linted with. Installed only when the
+  container does not already carry golangci-lint.
+  """
+  version: String!
+
+  """
+  Go toolchain version every module is linted with. Null when each module uses
+  the one its own go.mod asks for, and when a custom base is set.
+  """
+  goVersion: String
+
+  """
+  Container to run golangci-lint in, as supplied by the caller. Null when each
+  module gets one built for its own Go toolchain.
+  """
+  base: Container
+
+  """
+  Settings that were given but are not in use, said once per container so they
+  show up in the progress output rather than being silently dropped.
+  """
+  warnings: [String!]! = []
+
+  """
+  Extra workspace-root include patterns mounted for every module.
+  """
+  includeExtraFiles: [String!]! = []
+
+  """
+  Module roots to lint ("!" excludes; see the constructor argument).
+  """
+  lint: [String!]! = ["**"]
+
+  new(
+    """
+    golangci-lint release every module is linted with, without the v prefix.
+    Installed only when the container does not already carry golangci-lint, so
+    a base that brings its own build keeps it.
+    """
+    version: String = null,
+    """
+    Go toolchain version for every module, overriding what each module's own
+    go.mod asks for. Ignored when base is set, which supplies its own.
+    """
+    goVersion: String = null,
+    """
+    Container to run golangci-lint in. It must carry a Go toolchain, along with
+    any C/C++ dependencies the modules need; golangci-lint is installed into it
+    unless it already has one. It supplies its own toolchain, so goVersion is
+    ignored alongside it.
+    """
+    base: Container = null,
+    includeExtraFiles: [String!]! = [],
+    """
+    Module roots to lint. Bare patterns select, "!"-prefixed patterns exclude,
+    and exclusions always win. With no selecting pattern, all modules are
+    selected. "**" or "*" matches all modules; "X" or "X/**" matches X and
+    modules below it. Other glob forms are not interpreted.
+    Examples: ["!docs"] selects everything except docs; ["!**"] skips all.
+    """
+    lint: [String!]! = ["**"],
+  ) {
+    self.warnings = if (goVersion != null and base != null) {
+      [
+        "goVersion \"" + goVersion
+          + "\" is ignored because base was set: the base container supplies its own Go toolchain",
+      ]
+    } else {
+      []
+    }
+    self.version = version ?? defaultVersion
+    self.goVersion = if (base == null) { goVersion } else { null }
+    self.base = base
+    self.includeExtraFiles = includeExtraFiles
+    self.lint = gomod.settingPatterns(lint)
+    self
+  }
+
+  """
+  golangci-lint release used when the caller names none.
+  """
+  let defaultVersion: String! = "2.11.4"
+
+  """
+  The image the golangci-lint binary is taken from.
+
+  The default is pinned by digest so Dependabot can track it; a named release
+  resolves to that release's Alpine tag.
+  """
+  let releaseImage(release: String!): Container! {
+    container.from(
+      if (release == defaultVersion) {
+        "docker.io/golangci/golangci-lint:v2.11.4-alpine@sha256:72bcd68512b4e27540dd3a778a1b7afd45759d8145cfb3c089f1d7af53e718e9"
+      } else {
+        "docker.io/golangci/golangci-lint:v" + version.trimPrefix("v") + "-alpine"
+      },
+    )
+  }
+
+  let lib: Gomod! { gomod(includeExtraFiles: includeExtraFiles) }
+
+  """
+  Discover Go modules at or below the workspace cwd, including its enclosing
+  module. Paths and include/exclude globs are workspace-root-relative.
+  """
+  modules(
+    ws: Workspace!,
+    include: [String!]! = [],
+    exclude: [String!]! = [],
+    includeSkipLint: Boolean! = true,
+  ): [GoModule!]! {
+    lib
+      .modules(ws, include: include, exclude: exclude).{{path}}
+      .map { found => goModule(found.path) }
+      .filter { mod => includeSkipLint or mod.skipLint == false }
+  }
+
+  """
+  Return the Go module containing a workspace directory. Set findUp to false
+  when path is already a workspace-root-relative module root.
+  """
+  module(ws: Workspace!, path: String!, findUp: Boolean! = true): GoModule! {
+    goModule(lib.module(ws, path, findUp: findUp).path)
+  }
+
+  let goModule(modPath: String!): GoModule! {
+    GoModule(
+      path: modPath,
+      version: version,
+      configuredGoVersion: goVersion,
+      warnings: warnings,
+      includeExtraFiles: includeExtraFiles,
+      baseImage: base,
+      lintPatterns: lint,
+    )
+  }
+
+  """
+  Run golangci-lint in every selected Go module.
+  """
+  lintAll(ws: Workspace!): Void @check {
+    let layers = modules(ws, includeSkipLint: false).reduce(directory) { layers, mod =>
+      layers.withDirectory(
+        mod.path,
+        directory.withFile("go.mod", mod.lintExec(ws).file("go.mod")),
+      )
+    }
+    # Merge a file from each lint container to force all commands to run in
+    # parallel until Dagger supports parallel sub-checks directly.
+    layers.sync
+    null
+  }
+}
+
+# Keep all Dang types in one source file until Dagger can convert Workspace
+# arguments for installed multi-file Dang modules. See dagger/dagger#13476.
+
+"""
+A Go module rooted at a workspace-relative path, ready for golangci-lint.
+"""
+type GoModule {
+  path: String!
+
+  """
+  golangci-lint release this module is linted with, installed only when the
+  container does not already carry golangci-lint.
+  """
+  version: String!
+
+  let includeExtraFiles: [String!]!
+  let configuredGoVersion: String
+  let warnings: [String!]!
+  let baseImage: Container
+  let lintPatterns: [String!]!
+
+  """
+  The golangci-lint binary this module is linted with, taken from its pinned
+  image rather than run there, so the linter's release and the module's Go
+  toolchain are chosen independently.
+
+  The linter still typechecks with the Go it was itself built against; this
+  chooses the toolchain on PATH, which is what resolves modules, build tags
+  and cgo.
+  """
+  let lintBinary: File! {
+    # The digest is pinned so Dependabot can track the release.
+    container
+      .from(
+        # "2.11.4" is the release the digest below pins; any other resolves
+        # to its own Alpine tag.
+        if (version == "2.11.4") {
+          "docker.io/golangci/golangci-lint:v2.11.4-alpine@sha256:72bcd68512b4e27540dd3a778a1b7afd45759d8145cfb3c089f1d7af53e718e9"
+        } else {
+          "docker.io/golangci/golangci-lint:v" + version.trimPrefix("v") + "-alpine"
+        },
+      )
+      .file("/usr/bin/golangci-lint")
+  }
+
+  """
+  The shared library, which answers discovery, selection and source policy for
+  this module, so golangci-lint mounts what `go` and `staticcheck` mount plus
+  its own configuration.
+
+  Its module object is re-derived at each call site rather than held as a
+  field: Dang cannot yet name a dependency's non-root type, which is also why
+  the GoModule type here is this module's own rather than the library's.
+  """
+  let lib: Gomod! { gomod(includeExtraFiles: includeExtraFiles) }
+
+  """
+  Whether this module falls outside the configured lint selection.
+  """
+  skipLint: Boolean! {
+    lib.at(path).selected(lintPatterns) == false
+  }
+
+  """
+  Go toolchain version this module is linted with: the configured goVersion,
+  or the one its own go.mod asks for, or the fallback for a module that asks
+  for none. Null when a custom base container is set, because its toolchain is
+  whatever that container carries.
+  """
+  goVersion(ws: Workspace!): String {
+    if (baseImage == null) { toolchainVersion(ws) } else { null }
+  }
+
+  let toolchainVersion(ws: Workspace!): String! {
+    configuredGoVersion ?? lib.at(path).goVersion(ws) ?? gomod.defaultGoVersion
+  }
+
+  """
+  Container golangci-lint runs in: this module's own Go toolchain, or the
+  caller's base, with golangci-lint on PATH -- the container's own if it has
+  one, otherwise the pinned release.
+  """
+  base(ws: Workspace!): Container! {
+    let toolchain = if (baseImage == null) {
+      gomod.goContainer(toolchainVersion(ws), cgo: true)
+    } else {
+      gomod.withGoCaches(baseImage.withoutEntrypoint)
+    }
+    gomod
+      .withWarnings(gomod.withTool(toolchain, "golangci-lint", lintBinary), warnings)
+      .withMountedCache("/root/.cache/golangci-lint", cacheVolume("golangci-lint"))
+      .withWorkdir("/src")
+  }
+
+  """
+  Workspace patterns golangci-lint reads its configuration from.
+
+  Mounted with their directory structure intact, so golangci-lint's normal
+  configuration lookup applies.
+  """
+  includeConfig: [String!]! {
+    [
+      "**/.golangci.yml",
+      "**/.golangci.yaml",
+      "**/.golangci.toml",
+      "**/.golangci.json",
+    ]
+  }
+
+  """
+  Source patterns discovered from Go files, go:embed directives, and transitive
+  local go.mod replacements. Test- and generate-only include directives are
+  ignored: golangci-lint type checks the code, and does not run it.
+  """
+  includeDiscovered(ws: Workspace!): [String!]! {
+    lib.at(path).includeDiscovered(ws)
+  }
+
+  """
+  Final workspace-root include patterns, including golangci-lint configuration.
+  """
+  include(ws: Workspace!): [String!]! {
+    lib.at(path).include(ws, extra: includeConfig)
+  }
+
+  """
+  Workspace-shaped source directory mounted for linting this module.
+  """
+  source(ws: Workspace!): Directory! {
+    lib.at(path).source(ws, extra: includeConfig)
+  }
+
+  """
+  Run golangci-lint in this module, respecting the configured selection.
+  """
+  lint(ws: Workspace!): Void @check {
+    if (skipLint == false) {
+      lintExec(ws).sync
+    }
+    null
+  }
+
+  let lintExec(ws: Workspace!): Container! {
+    base(ws)
+      .withDirectory(".", source(ws))
+      .withWorkdir(path)
+      .withExec([
+        "golangci-lint", "run",
+        "--path-prefix", path + "/",
+        "--output.tab.path=stderr",
+        "--output.tab.print-linter-name=true",
+        "--output.tab.colors=false",
+        "--show-stats=false",
+        "--max-issues-per-linter=0",
+        "--max-same-issues=0",
+      ])
+  }
+}

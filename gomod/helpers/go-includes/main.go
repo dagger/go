@@ -1,6 +1,6 @@
-// go.dang runs this helper to discover workspace include patterns.
-// Results are written to the path given by --output, one entry per line, so
-// they don't pollute the user's terminal as exec "logs".
+// The gomod module runs this helper to discover workspace include patterns.
+// Results are written to a file, one entry per line, so they don't pollute the
+// user's terminal as exec "logs".
 package main
 
 import (
@@ -74,8 +74,8 @@ func newTargetModuleFromArgs(ctx context.Context, cliArgs []string) (*targetModu
 		fmt.Fprintln(os.Stderr, "usage: go-includes --output PATH [--test] [--generate] [--test-dirs] [/DIR]")
 		flags.PrintDefaults()
 	}
-	test := flags.Bool("test", false, "include test inputs")
-	generate := flags.Bool("generate", false, "include generate inputs")
+	test := flags.Bool("test", false, "also follow //go:test:include directives")
+	generate := flags.Bool("generate", false, "also follow //go:generate:include directives and go:generate go -C modules")
 	testDirs := flags.Bool("test-dirs", false, "print directories containing Go tests")
 	output := flags.String("output", "", "file to write results to (one entry per line)")
 	if err := flags.Parse(cliArgs); err != nil {
@@ -86,9 +86,6 @@ func newTargetModuleFromArgs(ctx context.Context, cliArgs []string) (*targetModu
 	}
 	if flags.NArg() > 1 {
 		return nil, false, "", fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
-	}
-	if !*test && !*generate && !*testDirs {
-		*test = true
 	}
 	modulePath := "/"
 	if flags.NArg() == 1 {
@@ -436,7 +433,7 @@ func (t targetModule) modulesFromGoModLocalReplace(ctx context.Context) ([]*targ
 	if err != nil {
 		return nil, err
 	}
-	goMod, err := modfile.Parse(goModPath, data, nil)
+	goMod, err := parseGoMod(goModPath, data)
 	if err != nil {
 		return nil, err
 	}
@@ -449,7 +446,7 @@ func (t targetModule) modulesFromGoModLocalReplace(ctx context.Context) ([]*targ
 		target := strings.TrimSuffix(replace.New.Path, "/")
 		moduleRoot, ok := t.workspace.containingModuleDir(path.Join(path.Dir(goModPath), target))
 		if !ok {
-			return nil, fmt.Errorf("no Go module found for local replace target: %s", replace.New.Path)
+			return nil, fmt.Errorf("%s: no Go module found for local replace target: %s", replacePosition(goModPath, replace), replace.New.Path)
 		}
 		moduleRoots = append(moduleRoots, moduleRoot)
 	}
@@ -458,6 +455,36 @@ func (t targetModule) modulesFromGoModLocalReplace(ctx context.Context) ([]*targ
 
 func isLocalReplace(replace *modfile.Replace) bool {
 	return replace.New.Version == "" && modfile.IsDirectoryPath(replace.New.Path)
+}
+
+// parseGoMod parses go.mod contents already read from goModPath.
+//
+// Every error names goModPath. A scan covers every module in the workspace at
+// once, so an unattributed complaint about "go.mod" leaves the reader to guess
+// which of them is at fault.
+func parseGoMod(goModPath string, data []byte) (*modfile.File, error) {
+	goMod, err := modfile.Parse(goModPath, data, nil)
+	if err != nil {
+		return nil, err
+	}
+	if goMod.Module == nil {
+		// modfile tolerates a file with no module line; no Go command does.
+		// Caught here it names the file, and the module is never mounted or
+		// run. Left to the toolchain it surfaces later, from whichever
+		// container happened to run first, as a bare "go: error reading
+		// go.mod: missing module declaration".
+		return nil, fmt.Errorf("%s: missing module declaration", goModPath)
+	}
+	return goMod, nil
+}
+
+// replacePosition is the file:line a replace directive is written at, so a
+// target that resolves to nothing points at the line that declares it.
+func replacePosition(goModPath string, replace *modfile.Replace) string {
+	if replace.Syntax == nil || replace.Syntax.Start.Line == 0 {
+		return goModPath
+	}
+	return fmt.Sprintf("%s:%d", goModPath, replace.Syntax.Start.Line)
 }
 
 // targetModules resolves module roots using this module's workspace and modes.
