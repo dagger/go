@@ -1,0 +1,36 @@
+"""
+Run the module checks in a dev engine from dagger/dagger#14178.
+"""
+type EngineE2e {
+  # Keep this commit equal to the engine-dev dependency in dagger-module.toml.
+  let engineCommit: String! = "c624e1f8648e3f1c5940c01ca82a55c17d51908e"
+
+  let engineSource: Workspace! {
+    git("https://github.com/dagger/dagger").ref(engineCommit).asWorkspace
+  }
+
+  """
+  Go container with the dev engine service and its CLI.
+  """
+  pub generateEnv: Container! {
+    # The checks run in subnet 90. The generator's engine must use subnet 91.
+    engineDev(ws: engineSource, subnetNumber: 90)
+      .installClient(container.from("golang:1.26.1-alpine"))
+  }
+
+  """
+  Build the pinned engine and CLI, then run all module checks.
+  """
+  pub devEngineCheck(ws: Workspace!): Void @check {
+    let source = ws.directory("/", exclude: [".git"])
+      .withFile("dagger.toml", ws.file("/.dagger/modules/engine-e2e/workspace.toml"))
+    engineDev(ws: engineSource)
+      .installClient(container.from("alpine:3.23").withExec(["apk", "add", "--no-cache", "git"]))
+      .withMountedDirectory("/src", source)
+      .withWorkdir("/src")
+      .withExec(["git", "init", "--quiet"])
+      .withExec(["dagger", "check"])
+      .sync
+    null
+  }
+}

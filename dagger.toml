@@ -6,8 +6,8 @@
 [modules.dang-sdk]
 source = "github.com/dagger/dang-sdk"
 
-[modules.go-dev]
-source = ".dagger/modules/go-dev"
+[modules.engine-e2e]
+source = ".dagger/modules/engine-e2e"
 entrypoint = true
 
 [sdks.dang]

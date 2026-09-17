@@ -27,6 +27,7 @@ type GoDev {
     "**",
     "!helpers/go-includes/**",
     "!fixtures/go-module-generate-directories/**",
+    "!testdata/go-module-generate-dev-engine/**",
     "!" + baseFixturePath,
     "!testdata/go-module-excluded",
     "!testdata/go-module-skip-tree/**",
@@ -788,6 +789,19 @@ type GoDev {
   }
 
   pub containerLabel: String! = "not a container"
+
+  """
+  A Go generator can use a dev engine bound by another workspace module.
+  """
+  pub generationDevEngineCheck(ws: Workspace!): Void @check {
+    let root = "testdata/go-module-generate-dev-engine"
+    let changes = go().module(ws, root).generate(ws)
+    let output = changes.layer.file(root + "/generated.txt").contents
+    assert(output.contains("dev-engine-connected"), "generator could not use the selected dev engine")
+    assert(changes.addedPaths == [root + "/generated.txt"], "generator produced unexpected files")
+    assert(changes.modifiedPaths.length == 0 and changes.removedPaths.length == 0, "generator changed existing files")
+    null
+  }
 
   """
   Container directives use workspace resolution and apply only to their directory.
