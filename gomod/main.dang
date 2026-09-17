@@ -297,12 +297,13 @@ type Gomod {
   toolBuilder: Container! { goContainer(scannerVersion) }
 
   """
-  Go version of the image the source scanner is built and run in.
+  Go version of the image the source scanner is built and run in, and the
+  fallback `defaultGoVersion` hands a module that declares no go directive.
 
-  The scanner only parses Go files, so this is not the toolchain a caller's
-  code is built with and a caller never chooses it. Pinning it here is what
-  makes the scan shared: three tools with three different base images still
-  produce one identical container, so the engine builds and runs it once.
+  A caller never chooses it. Pinning it here is what makes the scan shared:
+  three tools with three different base images still produce one identical
+  container, so the engine builds and runs it once. Changing it also moves
+  every module that declares no go directive to that toolchain.
   """
   scannerVersion: String! = "1.26"
 }

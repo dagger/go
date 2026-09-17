@@ -255,7 +255,9 @@ type Go {
   caller's Workspace.resolve. For example, //go:generate:container generate-env
   selects the workspace container named generate-env. External references such
   as docker.io/library/golang:1.26.1-alpine also work. Conflicting values in one directory
-  are errors. Without the directive, the directory uses the configured base.
+  are errors. Without the directive, the directory uses the module's own base
+  container: the caller's base if one was set, otherwise a container for the
+  toolchain its go.mod asks for.
   Consecutive directories with the same value share a container. When the value
   changes, workspace files carry over, so later commands can use earlier output.
   Modules run independently; cross-module dependencies are not inferred.
@@ -605,11 +607,6 @@ type GoModule {
   }
 
   """
-  Test container with this module's sources, testdata, and otelgotest in
-  place, before any test command runs.
-  """
-
-  """
   The otelgotest binary the tests are run with, when the container does not
   already carry one.
 
@@ -625,6 +622,10 @@ type GoModule {
       .file("/usr/local/bin/otelgotest")
   }
 
+  """
+  Test container with this module's sources, testdata, and otelgotest in
+  place, before any test command runs.
+  """
   let testEnv(ws: Workspace!): Container! {
     gomod
       .withTool(base(ws), "otelgotest", testRunner)

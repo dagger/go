@@ -27,7 +27,8 @@ non-root type and because the type is that tool's public API.
 When changing a module, always make sure the tests are up to date.
 
 To run tests: `dagger check` runs all four suites, because each is installed in
-`dagger.toml`. This builds a dev engine from dagger/dagger#14178 and runs the
+`.dagger/modules/engine-e2e/workspace.toml`. This builds a dev engine from
+dagger/dagger#14178 and runs the
 module checks in it. The engine commit is set in
 `.dagger/modules/engine-e2e/main.dang` and its `dagger-module.toml`. Keep both
 values equal.

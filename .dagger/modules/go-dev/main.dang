@@ -74,8 +74,9 @@ type GoDev {
   }
 
   """
-  Module discovery (findRoots) returns exactly the directories holding a
-  go.mod, at any depth, and nothing else.
+  Module discovery returns exactly the directories holding a go.mod that is a
+  Go module a tool can work on, at any depth, and nothing else. The go.mod
+  files that are not modules are skipsNonModulesCheck's business.
   """
   discoveryCheck(ws: Workspace!): Void @check {
     let paths = go(version: "1.26.1").modules(ws).{{path}}
@@ -338,7 +339,9 @@ type GoDev {
   }
 
   """
-  A custom base container must be used for Go helpers, tests, and generate.
+  A custom base container must be used for this module's test and generate
+  containers. The source scanner is not one of them: it runs in a pinned
+  container of the library's own, by design.
   """
   baseCheck(ws: Workspace!): Void @check {
     let tool = go(

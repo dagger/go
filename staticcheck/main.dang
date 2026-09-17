@@ -59,13 +59,14 @@ type Staticcheck {
     version: String = null,
     """
     Go toolchain version for every module, overriding what each module's own
-    go.mod asks for. Mutually exclusive with base.
+    go.mod asks for. Ignored when base is set, which supplies its own.
     """
     goVersion: String = null,
     """
     Container to run Staticcheck in. It must carry a Go toolchain, along with
     any C/C++ dependencies the modules need; Staticcheck is installed into it
-    unless it already has one. Mutually exclusive with goVersion.
+    unless it already has one. It supplies its own toolchain, so goVersion is
+    ignored alongside it.
     """
     base: Container = null,
     """
