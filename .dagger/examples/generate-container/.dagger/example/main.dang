@@ -2,7 +2,7 @@ type Example {
   """
   Go container with a dev engine service and its CLI.
   """
-  pub generateEnv: Container! { engineE2e.generateEnv }
+  pub generateEnv: Container! { dev.generateEnv }
 
   """
   Run this project's Go generator in its selected container.

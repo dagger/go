@@ -9,5 +9,5 @@ name = "go"
 source = "../go"
 
 [[dependencies]]
-name = "engine-e2e"
+name = "dev"
 source = "../engine-e2e"
