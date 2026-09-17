@@ -15,7 +15,7 @@ type EngineE2e {
   }
 
   """
-  Open with `dagger api call playground terminal`.
+  Open with `dagger shell playground`.
   Includes the dev engine, its CLI, and an example Git repository at /example.
   Run `dagger generate` there to try the container directive.
   """
