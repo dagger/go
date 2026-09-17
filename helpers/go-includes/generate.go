@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path"
 	"path/filepath"
@@ -35,4 +36,34 @@ func (index *localIndex) generateDirectoriesFor(moduleRoot string) ([]string, er
 	}
 	sort.Strings(dirs)
 	return dirs, nil
+}
+
+// generateContainersFor uses the same parsed comments and directory scope as
+// go:generate:include. Values are passed unchanged to Workspace.resolve.
+func (index *localIndex) generateContainersFor(moduleRoot string) (map[string]string, error) {
+	directives, err := index.directives(moduleRoot)
+	if err != nil {
+		return nil, err
+	}
+	containers := map[string]string{}
+	positions := map[string]string{}
+	for _, directive := range directives {
+		if !directive.hasName("go:generate:container") {
+			continue
+		}
+		args, err := directive.args()
+		if err != nil {
+			return nil, err
+		}
+		if len(args) != 1 || strings.TrimSpace(args[0]) == "" {
+			return nil, fmt.Errorf("%s: //go:generate:container requires one non-empty value", directive.position)
+		}
+		dir := path.Dir(directive.filePath)
+		if previous, ok := containers[dir]; ok && previous != args[0] {
+			return nil, fmt.Errorf("%s: conflicting //go:generate:container values in directory %s: %q (at %s) and %q", directive.position, dir, previous, positions[dir], args[0])
+		}
+		containers[dir] = args[0]
+		positions[dir] = directive.position
+	}
+	return containers, nil
 }

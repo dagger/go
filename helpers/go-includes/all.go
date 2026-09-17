@@ -79,12 +79,25 @@ func (index *localIndex) writeAllDir(dir string, test, generate bool) error {
 		}
 
 		if generate {
+			containers, err := index.generateContainersFor(moduleRoot)
+			if err != nil {
+				return err
+			}
 			dirs, err := index.generateDirectoriesFor(moduleRoot)
 			if err != nil {
 				return err
 			}
 			if err := os.WriteFile(filepath.Join(dir, moduleOutputFile(moduleRoot, ".generatedirs")), []byte(strings.Join(dirs, "\n")), 0o644); err != nil {
 				return err
+			}
+			for _, generateDir := range dirs {
+				outPath := filepath.Join(dir, moduleOutputFile(generateDir, ".generatecontainer"))
+				if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+					return err
+				}
+				if err := os.WriteFile(outPath, []byte(containers[generateDir]), 0o644); err != nil {
+					return err
+				}
 			}
 		}
 

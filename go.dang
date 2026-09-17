@@ -276,8 +276,14 @@ type Go {
   Directories without generator commands are skipped; go:generate:include alone
   is not a command. Go controls build tags and file and command order in a package.
 
-  Within each Go module, directories run in lexical path order and share a
-  container using the configured base. Later commands can use earlier output.
+  Within each Go module, directories run in lexical path order.
+  //go:generate:container selects a container for its directory, using the
+  caller's Workspace.resolve. For example, //go:generate:container generate-env
+  selects the workspace container named generate-env. External references such
+  as docker.io/library/golang:1.26.1-alpine also work. Conflicting values in one directory
+  are errors. Without the directive, the directory uses the configured base.
+  Consecutive directories with the same value share a container. When the value
+  changes, workspace files carry over, so later commands can use earlier output.
   Modules run independently; cross-module dependencies are not inferred.
   Use an explicit coordinating command when generators need a different order.
   """
@@ -596,7 +602,11 @@ type GoModule {
   Base Go container before source files and commands are added.
   """
   base: Container! {
-    let ctr = baseImage
+    prepareBase(baseImage)
+  }
+
+  let prepareBase(input: Container!): Container! {
+    let ctr = input
       .withoutEntrypoint
       .withWorkdir(mountPath)
       .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
@@ -657,11 +667,21 @@ type GoModule {
   """
   let generateExec(ws: Workspace!): Container! {
     let initial = base.withDirectory(".", source(ws, generate: true))
-    generateDirectories(ws).reduce(initial) { ctr, dir =>
-      ctr
-        .withWorkdir(mountPath + "/" + dir)
-        .withExec(["go", "generate", "."], experimentalPrivilegedNesting: true)
-    }.withWorkdir(mountPath + "/" + path)
+    let index = allIncludesDir(ws, test: false, generate: true)
+    generateDirectories(ws).reduce(GoGeneration(container: initial, value: "")) { state, dir =>
+      let value = index.file((if (dir == ".") { "_root_" } else { dir }) + ".generatecontainer").contents
+      let ctr = if (value == state.value) {
+        state.container
+      } else {
+        let selected = if (value == "") { base } else { prepareBase(ws.resolve(value).container) }
+        selected.withDirectory(mountPath, state.container.directory(mountPath))
+      }
+      GoGeneration(
+        value: value,
+        container: ctr.withWorkdir(mountPath + "/" + dir)
+          .withExec(["go", "generate", "."], experimentalPrivilegedNesting: true),
+      )
+    }.container.withWorkdir(mountPath + "/" + path)
   }
 
   """
@@ -729,4 +749,10 @@ type GoDirectory {
     }
     null
   }
+}
+
+# Carry workspace files across changes in the generation container.
+type GoGeneration {
+  let container: Container!
+  let value: String!
 }
