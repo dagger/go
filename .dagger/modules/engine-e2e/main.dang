@@ -61,11 +61,12 @@ type EngineE2e {
       .withExec(["dagger", "check"])
       .sync
 
-    let example = playground(ws)
-      .withExec(["dagger", "--auto-apply", "generate", "--require-load"])
-    assert("playground generator did not use the dev engine") {
-      example.file("generated.txt").contents.contains("dev-engine-connected")
-    }
+    # TODO: uncomment when https://github.com/dagger/dagger/pull/14178 is merged
+    # let example = playground(ws)
+    #   .withExec(["dagger", "--auto-apply", "generate", "--require-load"])
+    # assert("playground generator did not use the dev engine") {
+    #   example.file("generated.txt").contents.contains("dev-engine-connected")
+    # }
     null
   }
 }

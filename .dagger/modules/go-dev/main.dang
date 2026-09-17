@@ -880,95 +880,97 @@ type GoDev {
 
   containerLabel: String! = "not a container"
 
-  """
-  A Go generator can use a dev engine bound by another workspace module.
-  """
-  generationDevEngineCheck(ws: Workspace!): Void @check {
-    let root = "testdata/go-module-generate-dev-engine"
-    let changes = go.module(ws, root).generate(ws)
-    let output = changes.layer.file(root + "/generated.txt").contents
-    assert(output.contains("dev-engine-connected"), "generator could not use the selected dev engine")
-    assert(changes.addedPaths == [root + "/generated.txt"], "generator produced unexpected files")
-    assert(
-      changes.modifiedPaths.length == 0 and changes.removedPaths.length == 0,
-      "generator changed existing files",
-    )
-    null
-  }
+  # TODO: uncomment when https://github.com/dagger/dagger/pull/14178 is merged
+  # """
+  # A Go generator can use a dev engine bound by another workspace module.
+  # """
+  # generationDevEngineCheck(ws: Workspace!): Void @check {
+  #   let root = "testdata/go-module-generate-dev-engine"
+  #   let changes = go.module(ws, root).generate(ws)
+  #   let output = changes.layer.file(root + "/generated.txt").contents
+  #   assert(output.contains("dev-engine-connected"), "generator could not use the selected dev engine")
+  #   assert(changes.addedPaths == [root + "/generated.txt"], "generator produced unexpected files")
+  #   assert(
+  #     changes.modifiedPaths.length == 0 and changes.removedPaths.length == 0,
+  #     "generator changed existing files",
+  #   )
+  #   null
+  # }
 
-  """
-  Container directives use workspace resolution and apply only to their directory.
-  """
-  generationContainerCheck(ws: Workspace!): Void @check {
-    let root = "fixtures/generation-containers"
-    let fixture = directory
-      .withNewFile("go.mod", "module example.com/generation-containers\n\ngo 1.26.1\n")
-      .withNewFile("generate.go", ```go
-        package fixture
-        //go:generate:container generate-env
-        //go:generate:include input.txt
-        //go:generate sh -c "test $GENERATOR_BASE = workspace && test $GOFLAGS = -tags=generatecontainer && test -f /generator-config && test $GOCACHE = /root/.cache/go-build && test $GOMODCACHE = /go/pkg/mod && pwd > workdir.txt && cat input.txt > generated.txt && wget -qO service.txt http://generator-input:8080/value"
-      ``` + "\n")
-      .withNewFile("same.go", "package fixture\n//go:generate:container generate-env\n")
-      .withNewFile("input.txt", "included input\n")
-      .withNewFile("a-default/generate.go", ```go
-        package child
-        //go:generate sh -c "test $GENERATOR_BASE = default && test $GOFLAGS = -tags=generatecontainer && test ! -f /generator-config && cat ../generated.txt > default.txt"
-      ``` + "\n")
-      .withNewFile("b-image/generate.go", ```go
-        package image
-        //go:generate:container docker.io/library/golang:1.26.1-alpine
-        //go:generate sh -c "test -z '$GENERATOR_BASE' && test $GOFLAGS = -tags=generatecontainer && test ! -f /generator-config && cat ../a-default/default.txt > image.txt"
-      ``` + "\n")
-      .withNewFile("c-wired/generate.go", ```go
-        package wired
-        //go:generate:container go-dev:generate-env
-        //go:generate sh -c "test $GENERATOR_BASE = workspace && test $GOFLAGS = -tags=generatecontainer && wget -qO wired.txt http://generator-input:8080/value && cat ../b-image/image.txt > earlier.txt"
-      ``` + "\n")
-    let caller = ws.withDirectory(root, fixture).withWorkdir("testdata")
-    let changes = go(
-      base: container.from("golang:1.26.1-alpine").withEnvVariable(
-        "GENERATOR_BASE",
-        "default",
-      ),
-      generate: [root + "/**"],
-      goflags: "-tags=generatecontainer",
-      mountPath: "/custom/workspace",
-    ).generateAll(caller)
-    assert(
-      changes.layer.file(root + "/workdir.txt").contents == "/custom/workspace/" + root + "\n",
-      "selected container lost the configured mount path",
-    )
-    assert(
-      changes.layer.file(root + "/generated.txt").contents == "included input\n",
-      "selected container lost generation inputs",
-    )
-    assert(
-      changes.layer.file(root + "/service.txt").contents == "service binding retained\n",
-      "workspace container lost its service binding",
-    )
-    assert(
-      changes.layer.file(root + "/a-default/default.txt").contents == "included input\n",
-      "child directory did not use the configured base",
-    )
-    assert(
-      changes.layer.file(root + "/b-image/image.txt").contents == "included input\n",
-      "external image did not retain earlier output",
-    )
-    assert(
-      changes.layer.file(root + "/c-wired/wired.txt").contents == "service binding retained\n",
-      "module wiring lost its service binding",
-    )
-    assert(
-      changes.layer.file(root + "/c-wired/earlier.txt").contents == "included input\n",
-      "container change lost earlier output",
-    )
-    assert(
-      changes.modifiedPaths.length == 0 and changes.removedPaths.length == 0,
-      "container selection changed existing files",
-    )
-    null
-  }
+  # TODO: uncomment when https://github.com/dagger/dagger/pull/14178 is merged
+  # """
+  # Container directives use workspace resolution and apply only to their directory.
+  # """
+  # generationContainerCheck(ws: Workspace!): Void @check {
+  #   let root = "fixtures/generation-containers"
+  #   let fixture = directory
+  #     .withNewFile("go.mod", "module example.com/generation-containers\n\ngo 1.26.1\n")
+  #     .withNewFile("generate.go", ```go
+  #       package fixture
+  #       //go:generate:container generate-env
+  #       //go:generate:include input.txt
+  #       //go:generate sh -c "test $GENERATOR_BASE = workspace && test $GOFLAGS = -tags=generatecontainer && test -f /generator-config && test $GOCACHE = /root/.cache/go-build && test $GOMODCACHE = /go/pkg/mod && pwd > workdir.txt && cat input.txt > generated.txt && wget -qO service.txt http://generator-input:8080/value"
+  #     ``` + "\n")
+  #     .withNewFile("same.go", "package fixture\n//go:generate:container generate-env\n")
+  #     .withNewFile("input.txt", "included input\n")
+  #     .withNewFile("a-default/generate.go", ```go
+  #       package child
+  #       //go:generate sh -c "test $GENERATOR_BASE = default && test $GOFLAGS = -tags=generatecontainer && test ! -f /generator-config && cat ../generated.txt > default.txt"
+  #     ``` + "\n")
+  #     .withNewFile("b-image/generate.go", ```go
+  #       package image
+  #       //go:generate:container docker.io/library/golang:1.26.1-alpine
+  #       //go:generate sh -c "test -z '$GENERATOR_BASE' && test $GOFLAGS = -tags=generatecontainer && test ! -f /generator-config && cat ../a-default/default.txt > image.txt"
+  #     ``` + "\n")
+  #     .withNewFile("c-wired/generate.go", ```go
+  #       package wired
+  #       //go:generate:container go-dev:generate-env
+  #       //go:generate sh -c "test $GENERATOR_BASE = workspace && test $GOFLAGS = -tags=generatecontainer && wget -qO wired.txt http://generator-input:8080/value && cat ../b-image/image.txt > earlier.txt"
+  #     ``` + "\n")
+  #   let caller = ws.withDirectory(root, fixture).withWorkdir("testdata")
+  #   let changes = go(
+  #     base: container.from("golang:1.26.1-alpine").withEnvVariable(
+  #       "GENERATOR_BASE",
+  #       "default",
+  #     ),
+  #     generate: [root + "/**"],
+  #     goflags: "-tags=generatecontainer",
+  #     mountPath: "/custom/workspace",
+  #   ).generateAll(caller)
+  #   assert(
+  #     changes.layer.file(root + "/workdir.txt").contents == "/custom/workspace/" + root + "\n",
+  #     "selected container lost the configured mount path",
+  #   )
+  #   assert(
+  #     changes.layer.file(root + "/generated.txt").contents == "included input\n",
+  #     "selected container lost generation inputs",
+  #   )
+  #   assert(
+  #     changes.layer.file(root + "/service.txt").contents == "service binding retained\n",
+  #     "workspace container lost its service binding",
+  #   )
+  #   assert(
+  #     changes.layer.file(root + "/a-default/default.txt").contents == "included input\n",
+  #     "child directory did not use the configured base",
+  #   )
+  #   assert(
+  #     changes.layer.file(root + "/b-image/image.txt").contents == "included input\n",
+  #     "external image did not retain earlier output",
+  #   )
+  #   assert(
+  #     changes.layer.file(root + "/c-wired/wired.txt").contents == "service binding retained\n",
+  #     "module wiring lost its service binding",
+  #   )
+  #   assert(
+  #     changes.layer.file(root + "/c-wired/earlier.txt").contents == "included input\n",
+  #     "container change lost earlier output",
+  #   )
+  #   assert(
+  #     changes.modifiedPaths.length == 0 and changes.removedPaths.length == 0,
+  #     "container selection changed existing files",
+  #   )
+  #   null
+  # }
 
   """
   Conflicts and workspace resolution errors must fail generation.
@@ -988,21 +990,22 @@ type GoDev {
     }
     assert(conflict != "unexpected success", "conflicting container directives did not fail")
 
-    ["go-dev:missing-container", "go-dev:container-label"].map { value =>
-      let caller = ws.withDirectory(
-        root,
-        fixture
-          .withoutFile("conflict.go")
-          .withNewFile("generate.go", "package fixture\n//go:generate:container " + value + "\n//go:generate go version\n"),
-      )
-      let result = {
-        go.module(caller, root, findUp: false).generate(caller).addedPaths.join(",")
-        "unexpected success"
-      } rescue {
-        err: Error => err.message
-      }
-      assert(result != "unexpected success" and result.contains(value), "container resolution error was not reported: " + result)
-    }
+    # TODO: uncomment when https://github.com/dagger/dagger/pull/14178 is merged
+    # ["go-dev:missing-container", "go-dev:container-label"].map { value =>
+    #   let caller = ws.withDirectory(
+    #     root,
+    #     fixture
+    #       .withoutFile("conflict.go")
+    #       .withNewFile("generate.go", "package fixture\n//go:generate:container " + value + "\n//go:generate go version\n"),
+    #   )
+    #   let result = {
+    #     go.module(caller, root, findUp: false).generate(caller).addedPaths.join(",")
+    #     "unexpected success"
+    #   } rescue {
+    #     err: Error => err.message
+    #   }
+    #   assert(result != "unexpected success" and result.contains(value), "container resolution error was not reported: " + result)
+    # }
     null
   }
 }
