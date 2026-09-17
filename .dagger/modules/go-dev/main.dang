@@ -9,11 +9,17 @@ type GoDev {
   let emptyFixturePath: String! = "testdata/go-module-empty"
   let regenerateFixturePath: String! = "testdata/go-module-regenerate"
   let cgoCxxFixturePath: String! = "testdata/go-module-cgo-cxx"
+  let buildTagsFixturePath: String! = "testdata/go-module-build-tags"
+  let mountPathFixturePath: String! = "testdata/go-module-mount-path"
+  let noPackagesFixturePath: String! = "testdata/go-module-no-packages"
   let test: [String!]! = [
     "**",
     "!" + baseFixturePath,
     "!" + cgoCxxFixturePath,
     "!" + emptyFixturePath,
+    "!" + buildTagsFixturePath,
+    "!" + mountPathFixturePath,
+    "!" + noPackagesFixturePath,
     "!testdata/go-module-excluded",
     "!testdata/go-module-skip-tree",
   ]
@@ -62,7 +68,7 @@ type GoDev {
   Module discovery (findRoots) returns exactly the directories holding a
   go.mod, at any depth, and nothing else.
   """
-  pub discoveryCheck(ws: Workspace!): Void @check {
+  discoveryCheck(ws: Workspace!): Void @check {
     let paths = go(version: "1.26.1").modules(ws).{{path}}
 
     # A go.mod is discovered at any depth: top level, nested inside another
@@ -90,12 +96,11 @@ type GoDev {
   stay workspace-root-relative, so they remain usable with every other
   workspace API.
   """
-  pub discoveryFromSubdirCheck(ws: Workspace!): Void @check {
+  discoveryFromSubdirCheck(ws: Workspace!): Void @check {
     let tool = go(version: "1.26.1")
 
     let below = tool
-      .modules(ws.withWorkdir("fixtures/go-module-with-nested-module"))
-      .{{path}}
+      .modules(ws.withWorkdir("fixtures/go-module-with-nested-module")).{{path}}
     assert(
       containsModulePath(below, "fixtures/go-module-with-nested-module"),
       "discovery from a module root missed that module",
@@ -124,7 +129,7 @@ type GoDev {
   """
   Run testAll while respecting per-module skip configuration.
   """
-  pub singleModuleCheck(ws: Workspace!): Void @check {
+  singleModuleCheck(ws: Workspace!): Void @check {
     let tool = go(version: "1.26.1", test: test, generate: generate)
     tool.testAll(ws)
     tool.module(ws, "testdata/go-module-excluded").test(ws)
@@ -133,7 +138,7 @@ type GoDev {
   """
   A directive in one module must not affect another module's source mount.
   """
-  pub perModuleDirectiveCheck(ws: Workspace!): Void @check {
+  perModuleDirectiveCheck(ws: Workspace!): Void @check {
     let tool = go(version: "1.26.1")
     tool.module(ws, "fixtures/go-module-cross-include-a").test(ws)
     tool.module(ws, "fixtures/go-module-cross-include-b").test(ws)
@@ -142,29 +147,123 @@ type GoDev {
   """
   A nested module's directives must not affect its parent module's source mount.
   """
-  pub nestedModuleDirectiveCheck(ws: Workspace!): Void @check {
+  nestedModuleDirectiveCheck(ws: Workspace!): Void @check {
     go(version: "1.26.1").module(ws, "fixtures/go-module-with-nested-module").test(ws)
   }
 
   """
   A local replace target must be mounted with its non-Go assets.
   """
-  pub goModReplaceCheck(ws: Workspace!): Void @check {
+  goModReplaceCheck(ws: Workspace!): Void @check {
     go(version: "1.26.1").module(ws, "fixtures/go-module-with-replace").test(ws)
   }
 
   """
   Cgo C++ source is mounted and linked when running Go tests.
   """
-  pub cgoCxxCheck(ws: Workspace!): Void @check {
+  cgoCxxCheck(ws: Workspace!): Void @check {
     let mod = go(base: cgoCxxBase).module(ws, cgoCxxFixturePath)
     mod.test(ws)
   }
 
   """
+  The goflags setting reaches Go commands as GOFLAGS, so build tags select
+  source files without a custom base container.
+  """
+  goflagsCheck(ws: Workspace!): Void @check {
+    let tool = go(version: "1.26.1", goflags: "-tags=extended")
+    assert(
+      tool.goflags == "-tags=extended",
+      "constructor did not expose goflags: " + (tool.goflags ?? "<null>"),
+    )
+    let mod = tool.module(ws, buildTagsFixturePath)
+    assert(
+      mod.base.envVariable("GOFLAGS") == "-tags=extended",
+      "base container did not set GOFLAGS",
+    )
+    assert(
+      go(version: "1.26.1").module(ws, buildTagsFixturePath).base.envVariable("GOFLAGS") == null,
+      "base container set GOFLAGS without a goflags setting",
+    )
+    # The fixture test fails unless the extended tag was applied at build time.
+    mod.test(ws)
+  }
+
+  """
+  The workspace mounts at a configurable path that defaults to
+  "/src/<workspace name>".
+
+  Only the local checkout is covered here: the cwd and git version selector
+  handling in the name derivation needs a session started at a remote or
+  subdirectory address, which a check cannot set up.
+  """
+  mountPathCheck(ws: Workspace!): Void @check {
+    let mod = go(version: "1.26.1", mountPath: "/src/hugo").module(ws, mountPathFixturePath)
+    assert(
+      mod.mountPath == "/src/hugo",
+      "module did not expose the configured mount path: " + mod.mountPath,
+    )
+    # The fixture test asserts its working directory and the .git marker
+    # both live under /src/hugo.
+    mod.test(ws)
+
+    let derived = go(version: "1.26.1").module(ws, mountPathFixturePath).mountPath
+    assert(
+      derived.hasPrefix("/src/") and derived != "/src/",
+      "default mount path did not derive a workspace name: " + derived,
+    )
+    assert(
+      derived.contains("/fixtures") == false and derived.contains("/testdata") == false,
+      "default mount path leaked a workspace path into the name: " + derived,
+    )
+    let relative = { go(version: "1.26.1", mountPath: "src/hugo").mountPath ?? "missing rejection" } rescue {
+      err: Error => err.message
+    }
+    assert(
+      relative.contains("absolute"),
+      "constructor did not reject a relative mount path: " + relative,
+    )
+    null
+  }
+
+  """
+  A failing test names the Go module it came from, whether run alone or as
+  part of testAll, so a multi-module repository does not need a manual search.
+  """
+  namedFailureCheck(ws: Workspace!): Void @check {
+    # The fixture's test command exits non-zero without running a Go test, so
+    # the check exercises failure naming without reporting a failed test.
+    let failing = noPackagesFixturePath
+    let passing = "testdata/go-module-with-testdata"
+    let single = { go(version: "1.26.1").module(ws, failing).test(ws); "no failure" } rescue {
+      err: Error => err.message
+    }
+    assert(
+      single.contains("Go module " + failing + ":"),
+      "single module failure did not name the module: " + single,
+    )
+
+    let all = {
+      go(version: "1.26.1", test: [failing, passing]).testAll(ws)
+      "no failure"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(
+      all.contains("- " + failing + ":"),
+      "testAll failure did not name the failing module: " + all,
+    )
+    assert(
+      all.contains(passing) == false,
+      "testAll failure named a passing module: " + all,
+    )
+    null
+  }
+
+  """
   A custom base container must be used for Go helpers, tests, and generate.
   """
-  pub baseCheck(ws: Workspace!): Void @check {
+  baseCheck(ws: Workspace!): Void @check {
     let tool = go(
       base: base,
     )
@@ -175,10 +274,8 @@ type GoDev {
       "base-only constructor exposed a Go version for a black-box base image",
     )
 
-    let conflict = try {
-      go(version: "1.26.1", base: base).version ?? "missing conflict"
-    } catch {
-      err => err.message
+    let conflict = { go(version: "1.26.1", base: base).version ?? "missing conflict" } rescue {
+      err: Error => err.message
     }
     assert(
       conflict.contains("version and base are mutually exclusive"),
@@ -207,13 +304,39 @@ type GoDev {
   }
 
   """
+  Test directories run their own tests in the containing module's environment,
+  and are skipped when the module is.
+  """
+  testDirectoriesCheck(ws: Workspace!): Void @check {
+    let modPath = "testdata/go-module-with-testdata"
+    let dirs = go(version: "1.26.1").module(ws, modPath).testDirectories(ws)
+    assert(
+      containsModulePath(dirs.{{path}}, modPath),
+      "test directory discovery missed the module root: " + dirs.{{path}}.join(", "),
+    )
+    assert(
+      dirs.{{module.{{path}}}}.all { dir => dir.module.path == modPath },
+      "a test directory reported a different containing module",
+    )
+    dirs.{{execute}}
+
+    # A skipped module's directories run nothing, so the failing fixture passes.
+
+    go(version: "1.26.1", test: ["!" + noPackagesFixturePath])
+      .module(ws, noPackagesFixturePath)
+      .testDirectories(ws).{{execute}}
+
+    null
+  }
+
+  """
   Per-module introspection fields must expose the source selection intermediates.
   """
-  pub moduleIntrospectionCheck(ws: Workspace!): Void @check {
+  moduleIntrospectionCheck(ws: Workspace!): Void @check {
     let mod = go(version: "1.26.1").module(ws, "testdata/go-module-with-testdata/testdata")
 
     assert(
-      go().version == "1.26",
+      go.version == "1.26",
       "default constructor did not expose default Go version",
     )
     assert(
@@ -225,7 +348,11 @@ type GoDev {
       "module did not expose inherited Go version: " + (mod.version ?? "<null>"),
     )
 
-    let direct = go(version: "1.26.1").module(ws, "testdata/go-module-with-testdata/testdata", findUp: false)
+    let direct = go(version: "1.26.1").module(
+      ws,
+      "testdata/go-module-with-testdata/testdata",
+      findUp: false,
+    )
     assert(
       direct.path == "testdata/go-module-with-testdata/testdata",
       "module lookup unexpectedly snapped with findUp false: " + direct.path,
@@ -247,8 +374,7 @@ type GoDev {
     )
 
     let includedModulePaths = tool
-      .modules(ws, include: ["fixtures/go-module-cross-include-a"])
-      .{{path}}
+      .modules(ws, include: ["fixtures/go-module-cross-include-a"]).{{path}}
     assert(
       containsModulePath(includedModulePaths, "fixtures/go-module-cross-include-a"),
       "modules include filter did not include matching module root",
@@ -259,8 +385,7 @@ type GoDev {
     )
 
     let excludedModulePaths = tool
-      .modules(ws, exclude: ["fixtures/go-module-cross-include-a"])
-      .{{path}}
+      .modules(ws, exclude: ["fixtures/go-module-cross-include-a"]).{{path}}
     assert(
       containsModulePath(excludedModulePaths, "fixtures/go-module-cross-include-a") == false,
       "modules exclude filter included excluded module root",
@@ -271,8 +396,7 @@ type GoDev {
         ws,
         include: ["fixtures/go-module-cross-include-*"],
         exclude: ["fixtures/go-module-cross-include-b"],
-      )
-      .{{path}}
+      ).{{path}}
     assert(
       containsModulePath(combinedModulePaths, "fixtures/go-module-cross-include-a"),
       "modules combined filters did not include matching module root",
@@ -283,8 +407,7 @@ type GoDev {
     )
 
     let contentMatchedModulePaths = tool
-      .modules(ws, include: ["**/module-a-only.data"])
-      .{{path}}
+      .modules(ws, include: ["**/module-a-only.data"]).{{path}}
     assert(
       containsModulePath(contentMatchedModulePaths, "fixtures/go-module-cross-include-a"),
       "modules include filter did not match module directory contents",
@@ -295,8 +418,7 @@ type GoDev {
     )
 
     let testSkippedModulePaths = tool
-      .modules(ws, includeSkipTest: false)
-      .{{path}}
+      .modules(ws, includeSkipTest: false).{{path}}
     assert(
       containsModulePath(testSkippedModulePaths, "testdata/go-module-excluded") == false,
       "modules includeSkipTest false included test-skipped module",
@@ -315,8 +437,7 @@ type GoDev {
     )
 
     let generateSkippedModulePaths = tool
-      .modules(ws, includeSkipGenerate: false)
-      .{{path}}
+      .modules(ws, includeSkipGenerate: false).{{path}}
     assert(
       containsModulePath(generateSkippedModulePaths, "testdata/go-module-excluded") == false,
       "modules includeSkipGenerate false included generate-skipped module",
@@ -349,7 +470,7 @@ type GoDev {
 
     let skipped = tool.module(ws, "testdata/go-module-excluded")
     assert(
-      skipped.skipTest(ws),
+      skipped.skipTest,
       "module did not detect test skip config",
     )
     assert(
@@ -359,7 +480,7 @@ type GoDev {
 
     let treeSkipped = tool.module(ws, "testdata/go-module-skip-tree/nested")
     assert(
-      treeSkipped.skipTest(ws),
+      treeSkipped.skipTest,
       "nested module did not inherit test skip config from ancestor",
     )
     assert(
@@ -368,7 +489,7 @@ type GoDev {
     )
 
     assert(
-      mod.skipTest(ws) == false,
+      mod.skipTest == false,
       "module without skip config reported skipped tests",
     )
     assert(
@@ -470,7 +591,7 @@ type GoDev {
   """
   Run go generate and verify its changeset.
   """
-  pub generateCheck(ws: Workspace!): Void @check {
+  generateCheck(ws: Workspace!): Void @check {
     go(version: "1.26.1")
       .module(ws, "fixtures/go-module-with-included-gomod-replace/sdk/go")
       .generate(ws)
@@ -544,7 +665,7 @@ type GoDev {
   see the files the first one produced; a baseline that read as empty would
   report every generated file as newly added.
   """
-  pub regenerateCheck(ws: Workspace!): Void @check {
+  regenerateCheck(ws: Workspace!): Void @check {
     let changes = go(version: "1.26.1").module(ws, regenerateFixturePath).generate(ws)
 
     assert(
@@ -565,31 +686,64 @@ type GoDev {
   """
   Generation uses Dagger globs, including root paths and exclusions.
   """
-  pub generationGlobsCheck(ws: Workspace!): Void @check {
+  generationGlobsCheck(ws: Workspace!): Void @check {
     let root = "fixtures/go-module-generate-directories"
     let dirs = [root, root + "/later", root + "/version"]
     assert(go(generate: []).module(ws, root).generateDirectories(ws) == dirs, "empty selection did not include all directories")
-    assert(go(generate: ["!" + root]).module(ws, root).generateDirectories(ws) == [root + "/later", root + "/version"], "literal exclusion recursed into children")
-    assert(go(generate: [root + "/**", "!" + root + "/**", root + "/version"]).module(ws, root).generateDirectories(ws).length == 0, "include overrode an exclusion")
-    assert(go(generate: [root + "/[lv]*"]).module(ws, root).generateDirectories(ws) == [root + "/later", root + "/version"], "character class glob did not match")
-    assert(go(generate: ["fixtures/**/version"]).module(ws, root).generateDirectories(ws) == [root + "/version"], "mid-path recursive glob did not match")
-    assert(go(generate: ["./" + root + "/"]).module(ws, root).generateDirectories(ws) == [root], "relative directory spelling did not match")
+    assert(
+      go(generate: ["!" + root]).module(ws, root).generateDirectories(ws) == [root + "/later", root + "/version"],
+      "literal exclusion recursed into children",
+    )
+    assert(
+      go(generate: [root + "/**", "!" + root + "/**", root + "/version"]).module(
+        ws,
+        root,
+      ).generateDirectories(ws).length == 0,
+      "include overrode an exclusion",
+    )
+    assert(
+      go(generate: [root + "/[lv]*"]).module(ws, root).generateDirectories(ws) == [root + "/later", root + "/version"],
+      "character class glob did not match",
+    )
+    assert(
+      go(generate: ["fixtures/**/version"]).module(ws, root).generateDirectories(ws) == [root + "/version"],
+      "mid-path recursive glob did not match",
+    )
+    assert(
+      go(generate: ["./" + root + "/"]).module(ws, root).generateDirectories(ws) == [root],
+      "relative directory spelling did not match",
+    )
     assert(go(generate: ["!**"]).module(ws, root).hasGenerateDirectives(ws), "selection hid existing directives")
 
-    let rooted = ws.withDirectory("/", directory
-      .withNewFile("go.mod", "module example.com/root\n\ngo 1.26.1\n")
-      .withNewFile("generate.go", "package root\n\n//go:generate go version\n"))
-    assert(go(generate: ["."]).module(rooted, ".", findUp: false).generateDirectories(rooted) == ["."], "literal root did not match")
-    assert(go(generate: ["**"]).module(rooted, ".", findUp: false).generateDirectories(rooted) == ["."], "recursive glob missed root")
-    assert(go(generate: ["*"]).module(rooted, ".", findUp: false).generateDirectories(rooted).length == 0, "single-segment glob included root")
-    assert(go(generate: ["!."]).module(rooted, ".", findUp: false).generateDirectories(rooted).length == 0, "root exclusion failed")
+    let rooted = ws.withDirectory(
+      "/",
+      directory
+        .withNewFile("go.mod", "module example.com/root\n\ngo 1.26.1\n")
+        .withNewFile("generate.go", "package root\n\n//go:generate go version\n"),
+    )
+    assert(
+      go(generate: ["."]).module(rooted, ".", findUp: false).generateDirectories(rooted) == ["."],
+      "literal root did not match",
+    )
+    assert(
+      go(generate: ["**"]).module(rooted, ".", findUp: false).generateDirectories(rooted) == ["."],
+      "recursive glob missed root",
+    )
+    assert(
+      go(generate: ["*"]).module(rooted, ".", findUp: false).generateDirectories(rooted).length == 0,
+      "single-segment glob included root",
+    )
+    assert(
+      go(generate: ["!."]).module(rooted, ".", findUp: false).generateDirectories(rooted).length == 0,
+      "root exclusion failed",
+    )
     null
   }
 
   """
   Directory selection runs only the selected package, regardless of invocation cwd.
   """
-  pub selectionCheck(ws: Workspace!): Void @check {
+  selectionCheck(ws: Workspace!): Void @check {
     let root = "fixtures/go-module-generate-directories"
     let child = root + "/version"
     let tool = go(version: "1.26.1", generate: [child])
@@ -604,9 +758,15 @@ type GoDev {
     assert(rootOnly.addedPaths == [root + "/generated.go"], "literal module root recursed into child directories")
 
     let globbed = go(version: "1.26.1", generate: [root + "/**", "!" + root, "!" + root + "/nested/**"])
-    assert(globbed.module(ws, root).generateDirectories(ws) == [root + "/later", child], "recursive glob or exclusion failed")
+    assert(
+      globbed.module(ws, root).generateDirectories(ws) == [root + "/later", child],
+      "recursive glob or exclusion failed",
+    )
     let ordered = globbed.generateAll(ws)
-    assert(ordered.layer.file(child + "/generated.go").contents.contains("Earlier"), "directories did not share generated output in lexical order")
+    assert(
+      ordered.layer.file(child + "/generated.go").contents.contains("Earlier"),
+      "directories did not share generated output in lexical order",
+    )
 
     let nested = go(version: "1.26.1", generate: [root + "/nested"]).generateAll(ws)
     assert(nested.addedPaths == [root + "/nested/generated.go"], "nested module generator was not isolated")

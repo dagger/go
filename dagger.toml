@@ -9,3 +9,10 @@ source = "github.com/dagger/dang-sdk"
 [modules.go-dev]
 source = ".dagger/modules/go-dev"
 entrypoint = true
+
+[sdks.dang]
+module = "dang-sdk"
+
+[sdks.dang.scopes."."]
+is-module = true
+name = "go"

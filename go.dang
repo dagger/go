@@ -10,12 +10,12 @@ type Go {
   """
   Go version used for the default Go base image. Null when a custom base is set.
   """
-  pub version: String
+  version: String
 
   """
   Base image used for Go test, generate, and helper containers.
   """
-  pub base: Container!
+  base: Container!
 
   new(
     """
@@ -60,29 +60,33 @@ type Go {
     See generateAll for execution behavior.
     """
     generate: [String!]! = ["**"],
+    """
+    Value of the GOFLAGS environment variable in every Go container, e.g.
+    "-tags=extended,withdeploy". Flags that take a value must use the
+    -flag=value form, as Go requires inside GOFLAGS.
+    """
+    goflags: String = null,
+    """
+    Absolute container path where the workspace is mounted for Go commands.
+    Defaults to "/src/<workspace name>", where the name is the last segment of
+    the workspace address (usually the repository name), so tests that expect
+    the repository name in their working directory keep passing.
+    """
+    mountPath: String = null,
   ) {
     if (version != null and base != null) {
       raise "version and base are mutually exclusive"
+    } else if ((mountPath ?? "/").hasPrefix("/") == false) {
+      raise "mountPath must be an absolute container path: " + (mountPath ?? "")
     } else {
       self.version = if (base == null) { version ?? "1.26" } else { null }
       self.base = base ?? container.from("golang:" + (version ?? "1.26") + "-alpine")
       self.includeExtraFiles = includeExtraFiles
-      self.test = normalizePatterns(test)
+      self.test = test
       self.generate = generate
+      self.goflags = goflags
+      self.mountPath = mountPath
       self
-    }
-  }
-
-  """
-  Normalize selector strings from workspace module settings.
-
-  Dagger v1.0.0-beta.4 may pass TOML string arrays as JSON-fragment strings
-  like ["[\"!infra\"", "\"!docs\"]"]; trim those wrappers so selection still
-  sees the intended patterns.
-  """
-  let normalizePatterns(patterns: [String!]!): [String!]! {
-    patterns.map { p =>
-      p.trimPrefix("[").trimSuffix("]").trimPrefix("\"").trimSuffix("\"")
     }
   }
 
@@ -91,24 +95,68 @@ type Go {
   Use this for fixtures, generator inputs, or other files not covered by the
   built-in Go patterns.
   """
-  pub includeExtraFiles: [String!]! = []
+  includeExtraFiles: [String!]! = []
 
   """
   Module roots to test ("!" excludes; see the `test` constructor argument).
   """
-  pub test: [String!]! = ["**"]
+  test: [String!]! = ["**"]
 
   """
   Directories to run go generate in ("!" excludes; see the constructor).
   """
-  pub generate: [String!]! = ["**"]
+  generate: [String!]! = ["**"]
+
+  """
+  Value of the GOFLAGS environment variable in every Go container. Null leaves
+  GOFLAGS unset.
+  """
+  goflags: String
+
+  """
+  Configured container mount path for the workspace. Null derives
+  "/src/<workspace name>" from the workspace address.
+  """
+  mountPath: String
+
+  """
+  Container path where the workspace is mounted for Go commands: the
+  configured mountPath, or "/src/<workspace name>".
+  """
+  let workspaceMountPath(ws: Workspace!): String! {
+    mountPath ?? ("/src/" + workspaceName(ws))
+  }
+
+  """
+  Last segment of the workspace root address, usually the repository name.
+  """
+  let workspaceName(ws: Workspace!): String! {
+    # The canonical address spans the cwd and, for a git workspace, ends with
+    # a version selector: "file:///home/me/hugo/docs" and
+    # "github.com/org/hugo/docs@main" both have cwd "/docs". Drop the selector
+    # first, then the cwd, then take what is left. The selector pattern stops
+    # at "/" and ":" so an ssh user ("ssh://git@github.com/...") is untouched.
+    let cwd = ws.cwd.trimSuffix("/")
+    let location = ws.address.replaceMatches(`@[^/:@]*$`, with: "").trimSuffix("/")
+    let root = if (cwd != "" and location.hasSuffix(cwd)) {
+      location.trimSuffix(cwd)
+    } else {
+      location
+    }
+    root
+      .split("/")
+      .filter { segment => segment != "" }
+      .takeLast(1)
+      .join("")
+      .trimSuffix(".git")
+  }
 
   """
   Go modules discovered from go.mod files at or below the working directory,
   plus the enclosing module when the cwd is inside one. Optional include/exclude
   patterns filter the discovered module roots.
   """
-  pub modules(
+  modules(
     ws: Workspace!,
     include: [String!]! = [],
     exclude: [String!]! = [],
@@ -129,11 +177,13 @@ type Go {
           includeExtraFiles: includeExtraFiles,
           testPatterns: test,
           generatePatterns: generate,
+          goflags: goflags,
+          mountPath: workspaceMountPath(ws),
         )
       }
       .filter { mod =>
-        (includeSkipTest or mod.skipTest(ws) == false) and
-        (includeSkipGenerate or mod.skipGenerate(ws) == false)
+        (includeSkipTest or mod.skipTest == false)
+          and (includeSkipGenerate or mod.skipGenerate(ws) == false)
       }
   }
 
@@ -177,7 +227,7 @@ type Go {
   By default, path may be a module root or a directory inside a module. Set
   findUp to false when path is already a module root and no lookup is needed.
   """
-  pub module(ws: Workspace!, path: String!, findUp: Boolean! = true): GoModule! {
+  module(ws: Workspace!, path: String!, findUp: Boolean! = true): GoModule! {
     GoModule(
       path: if (findUp) {
         let foundGoModPath = ws.findUp("go.mod", path)
@@ -197,26 +247,27 @@ type Go {
       includeExtraFiles: includeExtraFiles,
       testPatterns: test,
       generatePatterns: generate,
+      goflags: goflags,
+      mountPath: workspaceMountPath(ws),
     )
   }
 
   """
   Run tests in every discovered Go module.
   Modules configured to skip tests are skipped.
+  Every module runs even after one fails, and the failure lists each failing
+  module by path.
   """
-  pub testAll(ws: Workspace!): Void @check {
-    let mods = modules(ws, includeSkipTest: false)
-    let layers = mods.reduce(directory) { layers, mod =>
-      layers.withDirectory(
-        mod.path,
-        directory.withFile("go.mod", mod.testExec(ws).file("go.mod")),
-      )
+  testAll(ws: Workspace!): Void @check {
+    # A selection over a list evaluates its elements concurrently, so all
+    # module test commands run in parallel.
+    let failures = modules(ws, includeSkipTest: false).{{path, failure: testFailure(ws)}}
+      .filter { result => result.failure != null }
+    if (failures.length > 0) {
+      raise "Go module tests failed:\n" + failures.map { result =>
+        "- " + result.path + ": " + (result.failure ?? "")
+      }.join("\n")
     }
-    # FIXME: replace this when Dagger can directly run multiple containers in
-    # parallel. For now, merge one file from each module's test container into
-    # a directory and sync it to force every module test command to run.
-
-    layers.sync
     null
   }
 
@@ -230,7 +281,7 @@ type Go {
   Modules run independently; cross-module dependencies are not inferred.
   Use an explicit coordinating command when generators need a different order.
   """
-  pub generateAll(ws: Workspace!): Changeset! @generate {
+  generateAll(ws: Workspace!): Changeset! @generate {
     let mods = modules(ws.withWorkdir(".")).filter { mod =>
       mod.skipGenerate(ws) == false
     }
@@ -248,7 +299,6 @@ type Go {
     }
     after.changes(before)
   }
-
 }
 
 # Keep all Dang types in one source file until Dagger v0.21.x can
@@ -262,12 +312,12 @@ type GoModule {
   """
   Workspace-relative path of this module root.
   """
-  pub path: String!
+  path: String!
 
   """
   Go version configured on the root Go module. Null when a custom base is set.
   """
-  pub version: String
+  version: String
 
   """
   Base image used by this module's Go containers.
@@ -277,7 +327,7 @@ type GoModule {
   """
   Extra workspace-root include patterns mounted for this module's Go commands.
   """
-  pub includeExtraFiles: [String!]!
+  includeExtraFiles: [String!]!
 
   """
   Gitignore-style globs selecting which module roots to test.
@@ -288,6 +338,16 @@ type GoModule {
   Workspace-root-relative globs selecting directories to run go generate in.
   """
   let generatePatterns: [String!]!
+
+  """
+  Value of the GOFLAGS environment variable in this module's Go containers.
+  """
+  let goflags: String
+
+  """
+  Container path where the workspace is mounted for this module's Go commands.
+  """
+  mountPath: String!
 
   """
   Return a workspace-root path for a module-relative subpath.
@@ -303,21 +363,21 @@ type GoModule {
   """
   Whether this module falls outside the configured test selection.
   """
-  pub skipTest(ws: Workspace!): Boolean! {
+  skipTest: Boolean! {
     outOfScope(testPatterns)
   }
 
   """
   Whether this module has no selected directories with go:generate commands.
   """
-  pub skipGenerate(ws: Workspace!): Boolean! {
+  skipGenerate(ws: Workspace!): Boolean! {
     generateDirectories(ws).length == 0
   }
 
   """
   Whether this module has go:generate commands, regardless of selection.
   """
-  pub hasGenerateDirectives(ws: Workspace!): Boolean! {
+  hasGenerateDirectives(ws: Workspace!): Boolean! {
     discoveredGenerateDirectories(ws).length > 0
   }
 
@@ -325,14 +385,14 @@ type GoModule {
   Selected generation directories in this module, in lexical order.
   Paths are workspace-root-relative. Nested modules have their own directory lists.
   """
-  pub generateDirectories(ws: Workspace!): [String!]! {
+  generateDirectories(ws: Workspace!): [String!]! {
     let included = generatePatterns.filter { p => p.hasPrefix("!") == false }
     let excluded = generatePatterns.filter { p => p.hasPrefix("!") }.map { p => p.trimPrefix("!") }
     let includeDirs = matchingGenerateDirectories(ws, included)
     let excludeDirs = matchingGenerateDirectories(ws, excluded)
     discoveredGenerateDirectories(ws).filter { dir =>
-      (included.length == 0 or includeDirs.any { match => match == dir }) and
-        excludeDirs.any { match => match == dir } == false
+      (included.length == 0 or includeDirs.any { match => match == dir })
+        and excludeDirs.any { match => match == dir } == false
     }
   }
 
@@ -341,7 +401,8 @@ type GoModule {
   let matchingGenerateDirectories(ws: Workspace!, patterns: [String!]!): [String!]! {
     let empty: [String!]! = []
     patterns.reduce(empty) { dirs, pattern =>
-      dirs + ws.glob(pattern.trimSuffix("/") + "/*.go")
+      dirs + ws
+        .glob(pattern.trimSuffix("/") + "/*.go")
         .filter { file => file.hasSuffix("/") == false }
         .map { file =>
           let dir = file.split("/").dropLast(1).join("/")
@@ -351,7 +412,7 @@ type GoModule {
   }
 
   let discoveredGenerateDirectories(ws: Workspace!): [String!]! {
-    let dirsFile = (if (path == ".") { "_root_" } else { path }) + ".generatedirs"
+    let dirsFile = outputStem + ".generatedirs"
     allIncludesDir(ws, test: false, generate: true)
       .file(dirsFile)
       .contents
@@ -420,8 +481,10 @@ type GoModule {
     test: Boolean!,
     generate: Boolean!,
   ): Directory! {
+    let testFlags = if (test) { ["--test"] } else { [] }
+    let generateFlags = if (generate) { ["--generate"] } else { [] }
     allIncludesHelper(ws)
-      .withExec(["go-includes", "--all", "--output-dir", "/output"] + includeFlags(test, generate))
+      .withExec(["go-includes", "--all", "--output-dir", "/output"] + testFlags + generateFlags)
       .directory("/output")
   }
 
@@ -430,61 +493,41 @@ type GoModule {
   and local go.mod replaces reachable from this module's include graph.
   With no include flags, defaults to test inputs.
   """
-  pub includeDiscovered(
+  includeDiscovered(
     ws: Workspace!,
     test: Boolean! = false,
     generate: Boolean! = false,
   ): [String!]! {
-    let includeFile = (if (path == ".") { "_root_" } else { path }) + ".inc"
     allIncludesDir(ws, test: test, generate: generate)
-      .file(includeFile)
+      .file(outputStem + ".inc")
       .contents
       .split("\n")
       .filter { pattern => pattern != "" }
+  }
+
+  """
+  File name stem of this module's entries in the discovery output directory.
+  """
+  let outputStem: String! {
+    if (path == ".") { "_root_" } else { path }
   }
 
   """
   Directories in this module containing Go test files.
   """
-  pub testDirectories(ws: Workspace!): [GoDirectory!]! {
-    let outputStem = if (path == ".") { "_root_" } else { path }
-    let index = allIncludesDir(ws, test: true, generate: false)
-    let discoveredIncludes = index
-      .file(outputStem + ".inc")
-      .contents
-      .split("\n")
-      .filter { pattern => pattern != "" }
-    index
+  testDirectories(ws: Workspace!): [GoDirectory!]! {
+    allIncludesDir(ws, test: true, generate: false)
       .file(outputStem + ".testdirs")
       .contents
       .split("\n")
       .filter { testPath => testPath != "" }
-      .map { testPath =>
-        GoDirectory(
-          path: testPath,
-          ws: ws,
-          modulePath: path,
-          baseImage: baseImage,
-          includeExtraFiles: includeExtraFiles,
-          includeDiscovered: discoveredIncludes,
-          testPatterns: testPatterns,
-        )
-      }
-  }
-
-  """
-  CLI flags for selecting include sources.
-  """
-  let includeFlags(test: Boolean!, generate: Boolean!): [String!]! {
-    let testFlags = if (test) { ["--test"] } else { [] }
-    let generateFlags = if (generate) { ["--generate"] } else { [] }
-    testFlags + generateFlags
+      .map { testPath => GoDirectory(path: testPath, ws: ws, module: self) }
   }
 
   """
   Built-in workspace include patterns for this module's own Go source files.
   """
-  pub includeBase: [String!]! {
+  includeBase: [String!]! {
     [
       subpath("**/*.go"),
       subpath("**/*.c"),
@@ -509,7 +552,7 @@ type GoModule {
   Final workspace include patterns used to build this module's source directory.
   With no include flags, defaults to test inputs.
   """
-  pub include(
+  include(
     ws: Workspace!,
     test: Boolean! = false,
     generate: Boolean! = false,
@@ -525,7 +568,7 @@ type GoModule {
   Workspace source mounted for this module's Go commands.
   With no include flags, defaults to test inputs.
   """
-  pub source(
+  source(
     ws: Workspace!,
     test: Boolean! = false,
     generate: Boolean! = false,
@@ -539,7 +582,7 @@ type GoModule {
   """
   Workspace testdata directories mounted while testing this module.
   """
-  pub testData(ws: Workspace!): Directory! {
+  testData(ws: Workspace!): Directory! {
     ws.directory(
       "/",
       include: [
@@ -552,23 +595,43 @@ type GoModule {
   """
   Base Go container before source files and commands are added.
   """
-  pub base: Container! {
-    baseImage
+  base: Container! {
+    let ctr = baseImage
       .withoutEntrypoint
-      .withWorkdir("/ws")
+      .withWorkdir(mountPath)
       .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
       .withEnvVariable("GOMODCACHE", "/go/pkg/mod")
       .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
       .withEnvVariable("GOCACHE", "/root/.cache/go-build")
+    if (goflags == null) { ctr } else { ctr.withEnvVariable("GOFLAGS", goflags) }
   }
 
   """
   Run tests in this module.
   If this module is configured to skip tests, no tests are run.
+  A failure names this module's path so it can be told apart from other
+  modules tested in the same run.
   """
-  pub test(ws: Workspace!): Void @check {
-    testExec(ws).sync
+  test(ws: Workspace!): Void @check {
+    let failure = testFailure(ws)
+    if (failure != null) {
+      raise "Go module " + path + ": " + failure
+    }
     null
+  }
+
+  """
+  Error message from running this module's tests, or null when they pass or
+  this module is configured to skip tests.
+  """
+  let testFailure(ws: Workspace!): String {
+    if (skipTest) {
+      null
+    } else {
+      { testExec(ws).sync; null } rescue {
+        err: Error => err.message
+      }
+    }
   }
 
   """
@@ -576,7 +639,7 @@ type GoModule {
   Returns an empty changeset if no directories are selected. Execution follows
   the ordering and container rules described by Go.generateAll.
   """
-  pub generate(ws: Workspace!): Changeset! {
+  generate(ws: Workspace!): Changeset! {
     if (skipGenerate(ws)) {
       directory.changes(directory)
     } else {
@@ -595,31 +658,33 @@ type GoModule {
   let generateExec(ws: Workspace!): Container! {
     let initial = base.withDirectory(".", source(ws, generate: true))
     generateDirectories(ws).reduce(initial) { ctr, dir =>
-      ctr.withWorkdir("/ws/" + dir)
+      ctr
+        .withWorkdir(mountPath + "/" + dir)
         .withExec(["go", "generate", "."], experimentalPrivilegedNesting: true)
-    }.withWorkdir("/ws/" + path)
+    }.withWorkdir(mountPath + "/" + path)
   }
 
   """
-  Container synced by this module's test check.
+  Test container with this module's sources, testdata, and otelgotest in
+  place, before any test command runs.
+  """
+  let testEnv(ws: Workspace!): Container! {
+    base
+      .withExec(["go", "install", "github.com/dagger/otel-go/cmd/otelgotest@main"])
+      .withDirectory(".", source(ws, test: true))
+      .withDirectory(".", testData(ws))
+      # Nested Dagger clients find the workspace boundary by walking up to .git.
+      .withNewFile(".git/HEAD", "ref: refs/heads/main\n")
+  }
+
+  """
+  Container that has run this module's tests.
   """
   let testExec(ws: Workspace!): Container! {
-    if (skipTest(ws)) {
-      base
-        .withDirectory(".", ws.directory("/", include: [subpath("go.mod")]))
-        .withWorkdir(path)
-    } else {
-      base
-        .withExec(["go", "install", "github.com/dagger/otel-go/cmd/otelgotest@main"])
-        .withDirectory(".", source(ws, test: true))
-        .withDirectory(".", testData(ws))
-        # Nested Dagger clients find the workspace boundary by walking up to .git.
-        .withNewFile(".git/HEAD", "ref: refs/heads/main\n")
-        .withWorkdir(path)
-        .withExec(["otelgotest", "./..."], experimentalPrivilegedNesting: true)
-    }
+    testEnv(ws)
+      .withWorkdir(path)
+      .withExec(["otelgotest", "./..."], experimentalPrivilegedNesting: true)
   }
-
 }
 
 """
@@ -629,7 +694,7 @@ type GoDirectory {
   """
   Workspace-relative path of this directory.
   """
-  pub path: String!
+  path: String!
 
   """
   Workspace containing this directory.
@@ -637,136 +702,31 @@ type GoDirectory {
   let ws: Workspace!
 
   """
-  Workspace-relative path of this directory's Go module root.
+  Go module containing this directory.
   """
-  let modulePath: String!
+  module: GoModule!
 
   """
-  Extra workspace-root include patterns mounted for this directory's Go tests.
-  """
-  let includeExtraFiles: [String!]!
-
-  """
-  Additional workspace inputs discovered for this directory's Go module.
-  """
-  let includeDiscovered: [String!]!
-
-  """
-  Base image used by this directory's Go containers.
-  """
-  let baseImage: Container!
-
-  """
-  Gitignore-style globs selecting which module roots to test.
-  """
-  let testPatterns: [String!]!
-
-  """
-  Return a workspace-root path for a module-relative subpath.
-  """
-  let subpath(relativePath: String!): String! {
-    if (modulePath == ".") {
-      relativePath
-    } else {
-      modulePath.trimSuffix("/") + "/" + relativePath
-    }
-  }
-
-  """
-  Whether this directory's module falls outside the configured test selection.
-
-  Matching is on the module root path only — no workspace files are read. A
-  bare pattern includes; a "!"-prefixed pattern excludes; an exclude always
-  wins. With no include pattern, every module is included.
-  """
-  let skipTest: Boolean! {
-    let included = testPatterns.filter { p => p.hasPrefix("!") == false }
-    let excluded = testPatterns.filter { p => p.hasPrefix("!") }.map { p => p.trimPrefix("!") }
-    let isIncluded = included.length == 0 or included.any { p => matchesModulePath(p) }
-    let isExcluded = excluded.any { p => matchesModulePath(p) }
-    isIncluded == false or isExcluded
-  }
-
-  """
-  Whether this directory's module root matches a single glob: "**"/"*" match
-  everything, "X/**" or bare "X" match X and any module below it.
-  """
-  let matchesModulePath(pattern: String!): Boolean! {
-    let p = pattern.trimPrefix("/").trimSuffix("/")
-    if (p == "**" or p == "*") {
-      true
-    } else {
-      let prefix = p.trimSuffix("/**")
-      modulePath == prefix or modulePath.hasPrefix(prefix + "/")
-    }
-  }
-
-  """
-  Final workspace include patterns used to build this directory's source.
-  """
-  let include: [String!]! {
-    includeExtraFiles + includeDiscovered
-  }
-
-  """
-  Workspace source mounted for this directory's Go tests.
-  """
-  let source: Directory! {
-    ws.directory("/", include: include)
-  }
-
-  """
-  Workspace testdata directories mounted while testing this directory.
-  """
-  let testData: Directory! {
-    ws.directory(
-      "/",
-      include: [
-        subpath("testdata/**"),
-        subpath("**/testdata/**"),
-      ],
-    )
-  }
-
-  """
-  Base Go container before source files and commands are added.
-  """
-  let base: Container! {
-    baseImage
-      .withoutEntrypoint
-      .withWorkdir("/ws")
-      .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
-      .withEnvVariable("GOMODCACHE", "/go/pkg/mod")
-      .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
-      .withEnvVariable("GOCACHE", "/root/.cache/go-build")
-  }
-
-  """
-  Container synced by this directory's test check.
+  Container that has run the Go tests in this directory.
   """
   let testExec: Container! {
-    if (skipTest) {
-      base
-        .withDirectory(".", ws.directory("/", include: [subpath("go.mod")]))
-        .withWorkdir(modulePath)
-    } else {
-      base
-        .withExec(["go", "install", "github.com/dagger/otel-go/cmd/otelgotest@main"])
-        .withDirectory(".", source)
-        .withDirectory(".", testData)
-        # Nested Dagger clients find the workspace boundary by walking up to .git.
-        .withNewFile(".git/HEAD", "ref: refs/heads/main\n")
-        .withWorkdir(path)
-        .withExec(["otelgotest"], experimentalPrivilegedNesting: true)
-    }
+    module
+      .testEnv(ws)
+      .withWorkdir(path)
+      .withExec(["otelgotest"], experimentalPrivilegedNesting: true)
   }
 
   """
   Run Go tests in this directory.
+  If the containing module is configured to skip tests, no tests are run.
+  A failure names this directory's path.
   """
-  pub execute(): Void @check {
-    testExec.sync
+  execute: Void @check {
+    if (module.skipTest == false) {
+      testExec.sync rescue {
+        err: Error => raise "Go tests in " + path + ": " + err.message
+      }
+    }
     null
   }
-
 }
