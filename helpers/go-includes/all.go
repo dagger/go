@@ -78,6 +78,16 @@ func (index *localIndex) writeAllDir(dir string, test, generate bool) error {
 			return err
 		}
 
+		if generate {
+			dirs, err := index.generateDirectoriesFor(moduleRoot)
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(dir, moduleOutputFile(moduleRoot, ".generatedirs")), []byte(strings.Join(dirs, "\n")), 0o644); err != nil {
+				return err
+			}
+		}
+
 		testDirs := index.testDirectoriesFor(moduleRoot)
 		testDirsData := strings.Join(testDirs, "\n")
 		if len(testDirs) > 0 {
