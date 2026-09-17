@@ -678,7 +678,8 @@ type GoModule {
       }
       GoGeneration(
         value: value,
-        container: ctr.withWorkdir(mountPath + "/" + dir)
+        container: ctr
+          .withWorkdir(mountPath + "/" + dir)
           .withExec(["go", "generate", "."], experimentalPrivilegedNesting: true),
       )
     }.container.withWorkdir(mountPath + "/" + path)
