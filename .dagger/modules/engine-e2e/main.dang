@@ -62,7 +62,7 @@ type EngineE2e {
       .sync
 
     let example = playground(ws)
-      .withExec(["dagger", "generate", "--require-load"])
+      .withExec(["dagger", "--auto-apply", "generate", "--require-load"])
     assert("playground generator did not use the dev engine") {
       example.file("generated.txt").contents.contains("dev-engine-connected")
     }
