@@ -370,8 +370,10 @@ type GoMod {
   """
   File name stem of this module's entries in the scan output directory.
   """
-  let outputStem: String! {
-    if (path == ".") { "_root_" } else { path }
+  let outputStem: String! { stemFor(path) }
+
+  let stemFor(directory: String!): String! {
+    if (directory == ".") { "_root_" } else { directory }
   }
 
   """
@@ -449,6 +451,21 @@ type GoMod {
   """
   testDirectories(ws: Workspace!): [String!]! {
     scanFile(ws, true, false, ".testdirs")
+  }
+
+  """
+  The container a generate directory asks for with //go:generate:container, or
+  "" when it asks for none. `directory` is one of `generateDirectories`.
+
+  The value is whatever the directive said, unread: the caller resolves it
+  against its own workspace.
+  """
+  generateContainer(ws: Workspace!, directory: String!): String! {
+    gomod
+      .scan(ws, generate: true)
+      .file(stemFor(directory) + ".generatecontainer")
+      .contents
+      .trimSpace
   }
 
   """

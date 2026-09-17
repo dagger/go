@@ -544,7 +544,7 @@ func goDirectivesInFile(filePath string, data []byte) ([]goDirective, error) {
 				position: fset.Position(comment.Slash).String(),
 				comment:  comment.Text,
 			}
-			if directive.isEmbed() || directive.isTestInclude() || directive.isGenerateInclude() || directive.isGenerate() {
+			if directive.isEmbed() || directive.isTestInclude() || directive.isGenerateInclude() || directive.hasName("go:generate:container") || directive.isGenerate() {
 				directives = append(directives, directive)
 			}
 		}
@@ -675,7 +675,7 @@ func (d goDirective) line() (string, string, bool) {
 		nameEnd = len(line)
 	}
 	name := line[:nameEnd]
-	if name != "go:embed" && name != "go:test:include" && name != "go:generate:include" && name != "go:generate" {
+	if name != "go:embed" && name != "go:test:include" && name != "go:generate:include" && name != "go:generate:container" && name != "go:generate" {
 		return "", "", false
 	}
 	return name, line[nameEnd:], true

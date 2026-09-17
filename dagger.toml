@@ -6,21 +6,9 @@
 [modules.dang-sdk]
 source = "github.com/dagger/dang-sdk"
 
-[modules.go-dev]
-source = ".dagger/modules/go-dev"
+[modules.engine-e2e]
+source = ".dagger/modules/engine-e2e"
 entrypoint = true
-
-# Each tool's suite is installed under a <tool>-checks key, so `dagger check`
-# from the root runs all four and prefixes each check with the tool it belongs
-# to. The key is what prefixes; "e2e" would kebab-case into "e-2-e".
-[modules.gomod-checks]
-source = "gomod/.dagger/modules/e2e"
-
-[modules.golangci-lint-checks]
-source = "golangci-lint/.dagger/modules/e2e"
-
-[modules.staticcheck-checks]
-source = "staticcheck/.dagger/modules/e2e"
 
 [sdks.dang]
 module = "dang-sdk"

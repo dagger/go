@@ -64,6 +64,13 @@ On a module: `test`, `generate`, `test-directories`, `skip-test`,
 Tests run with a nested Dagger engine, so a suite that drives Dagger works. The
 workspace mounts at `/src/<workspace name>` unless `mountPath` says otherwise.
 
+A directory can pick the container its generators run in with
+`//go:generate:container`, resolved against the caller's workspace — a
+workspace container by name, or an image reference. Consecutive directories
+naming the same one share a container; when it changes, workspace files carry
+over so later commands still see earlier output. Without the directive, the
+directory uses the module's own toolchain.
+
 ### `golangci-lint`
 
 | Function     | Description                                   |
@@ -227,22 +234,30 @@ once, in Dang, rather than twice here.
 
 ## Development
 
-All four suites are installed in `dagger.toml`, so one command runs them all:
+One command runs all four suites:
 
 ```sh
 dagger check
 ```
 
-The root module's checks are unprefixed; each other suite prefixes its own:
+That builds a dev engine from dagger/dagger and runs them inside it, because
+`//go:generate:container` needs `Workspace.resolve`, which no released engine
+has yet. The engine commit is pinned in `.dagger/modules/engine-e2e/`, and the
+suites it runs are listed in that module's `workspace.toml`.
+
+The three suites that do not need the dev engine also run against a released
+one directly, which is far quicker while iterating:
 
 ```sh
-dagger check -m .dagger/modules/go-dev            # the root go module
 dagger check -m gomod/.dagger/modules/e2e         # the shared library
 dagger check -m golangci-lint/.dagger/modules/e2e
 dagger check -m staticcheck/.dagger/modules/e2e
 
-dagger check gomod-checks:scan-check              # or one check by name
+dagger check -m gomod/.dagger/modules/e2e scan-check   # or one check by name
 ```
+
+`dagger shell playground` opens the dev engine with an example repository at
+`/example`; run `dagger generate` there to try the container directive.
 
 `testdata/` and `fixtures/` hold the modules the suites run against. Several of
 them fail on purpose — a failing test, a lint diagnostic, a module with no

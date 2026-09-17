@@ -79,6 +79,12 @@ func (index *localIndex) writeAllDir(dir string, test, generate bool) error {
 		}
 		if generate {
 			files[moduleOutputFile(moduleRoot, ".generatedirs")] = strings.Join(scan.generateDirs, "\n")
+			// Keyed by generate directory rather than module root: a container
+			// is chosen per directory, and a directory with none records the
+			// empty string so a reader never has to tell absent from empty.
+			for _, generateDir := range scan.generateDirs {
+				files[moduleOutputFile(generateDir, ".generatecontainer")] = scan.generateContainers[generateDir]
+			}
 		}
 		for name, contents := range files {
 			if err := writeModuleOutput(dir, name, contents); err != nil {
@@ -209,10 +215,11 @@ func linesWithTrailer(lines []string) string {
 // moduleScan is one module's slice of the workspace scan, or the reason there
 // is none.
 type moduleScan struct {
-	includes     []string
-	testDirs     []string
-	generateDirs []string
-	failure      string
+	includes           []string
+	testDirs           []string
+	generateDirs       []string
+	generateContainers map[string]string
+	failure            string
 }
 
 // scanModule computes one module's inputs, returning the failure as data
@@ -223,16 +230,22 @@ func (index *localIndex) scanModule(moduleRoot string, test, generate bool) modu
 		return moduleScan{failure: err.Error() + "\n"}
 	}
 	var generateDirs []string
+	var generateContainers map[string]string
 	if generate {
 		generateDirs, err = index.generateDirectoriesFor(moduleRoot)
 		if err != nil {
 			return moduleScan{failure: err.Error() + "\n"}
 		}
+		generateContainers, err = index.generateContainersFor(moduleRoot)
+		if err != nil {
+			return moduleScan{failure: err.Error() + "\n"}
+		}
 	}
 	return moduleScan{
-		includes:     includes,
-		testDirs:     index.testDirectoriesFor(moduleRoot),
-		generateDirs: generateDirs,
+		includes:           includes,
+		testDirs:           index.testDirectoriesFor(moduleRoot),
+		generateDirs:       generateDirs,
+		generateContainers: generateContainers,
 	}
 }
 

@@ -1,0 +1,13 @@
+name = "example"
+engineVersion = "v1.0.0-beta.13"
+
+[runtime]
+source = "dang"
+
+[[dependencies]]
+name = "go"
+source = "../go"
+
+[[dependencies]]
+name = "dev"
+source = "../engine-e2e"

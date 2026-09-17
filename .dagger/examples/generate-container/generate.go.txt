@@ -1,0 +1,4 @@
+package example
+
+//go:generate:container generate-env
+//go:generate go run ./internal/generate
