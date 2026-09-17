@@ -591,9 +591,13 @@ type GoModule {
         let selected = if (value == "") {
           base(ws)
         } else {
-          prepareBase(
-            gomod.withGoCaches(ws.resolve(value).container.withoutEntrypoint),
-          )
+          # TODO: uncomment when https://github.com/dagger/dagger/pull/14178 is merged
+          # Workspace.resolve is unavailable on beta.13; fall back to the base.
+          # prepareBase(
+          #   gomod.withGoCaches(ws.resolve(value).container.withoutEntrypoint),
+          # )
+          # TODO: delete when https://github.com/dagger/dagger/pull/14178 is merged
+          base(ws)
         }
         selected.withDirectory(mountPath, state.container.directory(mountPath))
       }
