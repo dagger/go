@@ -4,7 +4,7 @@
 #   dagger mod install github.com/dagger/dagger/modules/wolfi
 
 [modules.dang-sdk]
-source = "github.com/dagger/dang-sdk"
+source = "github.com/dagger/dang-sdk@collections"
 
 [modules.engine-e2e]
 source = ".dagger/modules/engine-e2e"

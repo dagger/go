@@ -52,32 +52,105 @@ mean all of them; `["!**"]` means none. Other glob shapes are not interpreted.
 
 | Function              | Description                                                   |
 | --------------------- | ------------------------------------------------------------- |
-| `test-all`            | Test every discovered module (a `@check`).                    |
-| `generate-all`        | Run `go generate` in selected directories (a `@generate`).    |
-| `modules`             | Modules discovered from the workspace.                        |
+| `modules`             | Modules discovered from the workspace, as a collection.       |
 | `module`              | The module containing a workspace path.                       |
 
 On a module: `test`, `generate`, `test-directories`, `skip-test`,
 `skip-generate`, `has-generate-directives`, `generate-directories`, `base`,
 `include`, `include-base`, `include-discovered`, `source`, `test-data`.
 
-Tests run with a nested Dagger engine, so a suite that drives Dagger works. The
-workspace mounts at `/src/<workspace name>` unless `mountPath` says otherwise.
+#### Settings
+
+| Setting               | Meaning                                                       |
+| --------------------- | ------------------------------------------------------------- |
+| `version`             | Go version for every module, instead of each one's `go.mod`.  |
+| `base`                | Base image for Go containers.                                 |
+| `includeExtraFiles`   | Extra workspace files to mount, as include patterns.          |
+| `test`                | Module roots to test (see [Scoping](#scoping)).               |
+| `generate`            | Directories to run `go generate` in (see below).              |
+| `goflags`             | `GOFLAGS` in every Go container.                              |
+| `mountPath`           | Where the workspace is mounted in Go containers.              |
+
+`base` must carry a Go toolchain and any C/C++ dependencies the modules need.
+otelgotest is installed into it unless it already has one. It supplies its own
+toolchain, so `version` is ignored alongside it and recorded in `warnings`.
+
+`goflags` is passed as-is, e.g. `-tags=extended,withdeploy`. Flags that take a
+value must use the `-flag=value` form, as Go requires inside `GOFLAGS`.
+
+`mountPath` defaults to `/src/<workspace name>`, where the name is the last
+segment of the workspace address — usually the repository name — so tests that
+expect it in their working directory keep passing. It must be absolute.
+
+#### Modules and batches
+
+`modules` finds the Go modules at or below the workspace cwd, plus the
+enclosing module when the cwd is inside one. `include`/`exclude` filter the
+roots it finds. `module` returns the module containing a path; pass
+`findUp: false` when the path is already a module root.
+
+`modules` is a collection keyed by module root, so it adds a `go-module`
+dimension. Its batch holds `test` (a `@check`) and `generate` (a `@generate`),
+which run once over the selected modules in place of each module's own:
+
+```console
+$ dagger check go/modules/test --go-module=sdk/go --go-module=cmd/tool
+$ dagger generate go/modules/generate --go-module=sdk/go
+$ dagger call go modules subset --keys=sdk/go batch test sync
+```
+
+Because discovery starts at the cwd, `dagger -W ./sdk/go check` scopes every
+tool to that module without a dimension flag.
+
+The batch `test` runs every selected module even after one fails, then lists
+each failing module by path. A module outside the `test` selection passes
+without running anything, as does a module's own `test`.
+
+#### Generate
+
+`generate` patterns are relative to the workspace root, whatever the cwd, and
+use Dagger glob syntax: `*`, `?` and character classes match within a path
+segment, and `**` matches zero or more segments.
+
+- A literal path selects only that directory, even if it is a module root.
+  `.` selects the workspace root only.
+- `internal/**` selects `internal` and everything below it.
+- A `!` prefix excludes, and exclusions always win.
+- An empty list, or one with only exclusions, starts from every directory.
+- The default `["**"]` reaches directories in nested modules.
+
+For example: `["sdk/go/engineconn", "internal/**", "!internal/fixtures/**"]`.
+
+`go generate .` runs in each selected directory that has a generator command;
+`go:generate:include` alone is not one. Within a module, directories run in
+lexical path order. Modules run independently and cross-module dependencies are
+not inferred; use an explicit coordinating command when generators need a
+different order.
 
 A directory can pick the container its generators run in with
-`//go:generate:container`, resolved against the caller's workspace — a
-workspace container by name, or an image reference. Consecutive directories
-naming the same one share a container; when it changes, workspace files carry
-over so later commands still see earlier output. Without the directive, the
-directory uses the module's own toolchain.
+`//go:generate:container`, resolved with the caller's `Workspace.resolve` — a
+workspace container by name, such as `generate-env`, or an image reference such
+as `docker.io/library/golang:1.26.1-alpine`. Conflicting values in one
+directory are errors. Consecutive directories naming the same one share a
+container; when it changes, workspace files carry over so later commands still
+see earlier output. Without the directive, the directory uses the module's own
+base container.
+
+A module's own `generate` fails on a module the scan could not read, naming the
+file, while the batch `generate` skips it (see below).
+
+Tests run with a nested Dagger engine, so a suite that drives Dagger works.
 
 ### `golangci-lint`
 
 | Function     | Description                                   |
 | ------------ | --------------------------------------------- |
-| `lint-all`   | Lint every selected module (a `@check`).      |
-| `lint`       | Lint one module.                              |
+| `modules`    | Modules discovered from the workspace, as a collection. |
+| `module`     | The module containing a workspace path.       |
 | `version`    | The bundled golangci-lint version.            |
+
+On a module: `lint` (a `@check`). The collection's batch `lint` runs once over
+the selected modules in place of each module's own, as for `go`.
 
 `version` is the linter release, pinned to 2.11.4 by digest, and `goVersion` is
 the Go toolchain — chosen independently, because the binary is copied out of
@@ -88,8 +161,11 @@ dependencies need one during typecheck.
 
 | Function     | Description                                   |
 | ------------ | --------------------------------------------- |
-| `lint-all`   | Check every selected module (a `@check`).     |
-| `lint`       | Check one module.                             |
+| `modules`    | Modules discovered from the workspace, as a collection. |
+| `module`     | The module containing a workspace path.       |
+
+On a module: `lint` (a `@check`). The collection's batch `lint` runs once over
+the selected modules in place of each module's own, as for `go`.
 
 `version` is the Staticcheck release, built once with `go install` in a pinned
 Go container, and `goVersion` is the Go toolchain. Test files are analyzed;
@@ -192,8 +268,8 @@ message about it names the module already.
 the workspace, so a module with an unreadable `go.mod` or a Go file that will
 not parse records the reason against itself and the pass carries on. Anything
 that needs that module's sources raises the reason, which names the file;
-everything else is unaffected. `test-all` reports it beside the modules that
-passed, and `generate-all` — which has to ask every module in the workspace
+everything else is unaffected. The batch `test` reports it beside the modules
+that passed, and the batch `generate` — which has to ask every selected module
 whether it holds generators — gets an answer rather than an error. Failing the
 whole scan instead would let one bad file stop every check in the repository,
 including for modules you had excluded.
@@ -217,14 +293,14 @@ it.
 **Fixtures are shared where they are the same.** `testdata/` and `fixtures/` at
 the root serve every module. A tool keeps its own only when the fixture is
 specific to it — `golangci-lint/testdata/go-module-lint-fail` does not compile,
-so it cannot live where `go`'s `test-all` would find it.
+so it cannot live where `go`'s batch `test` would find it.
 
 ## Known problem: only one failure is reported
 
 A batch of three failing modules reports one failure, not three. The lint
 modules aggregate results into a directory and sync it, and the first error
 stops every later report; you repair one module, run again, and find the next.
-`go`'s `test-all` does not have this shape — it collects each module's failure
+`go`'s batch `test` does not have this shape — it collects each module's failure
 and names them all.
 
 The obvious repair for the lint modules — collecting exit codes rather than

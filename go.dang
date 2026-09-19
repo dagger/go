@@ -1,87 +1,47 @@
 """
-A Dagger module for Go - a programming language for building simple, secure, scalable systems.
+Test Go modules and run go generate across a workspace.
 
-Discovery, selection and source policy come from the shared `gomod` library, so
-this module agrees with `github.com/dagger/go/golangci-lint` and
-`github.com/dagger/go/staticcheck` about what a module is, which ones a pattern
-list covers, and which files a command needs.
-
-For Go lint checks, use github.com/dagger/go/golangci-lint or
+For lint checks, use github.com/dagger/go/golangci-lint or
 github.com/dagger/go/staticcheck.
-
-https://dagger.io
-https://golang.org
 """
 type Go {
   """
-  Go toolchain version every module uses. Null when each module uses the one
-  its own go.mod asks for, and when a custom base is set.
+  Go version for every module. Null uses each module's go.mod.
   """
   version: String
 
   """
-  Base image for Go test and generate containers, as supplied by the caller.
-  Null when each module gets one built for its own Go toolchain.
+  Custom base image for Go containers, if set.
   """
   base: Container
 
   new(
     """
-    Go toolchain version for every module, overriding what each module's own
-    go.mod asks for. Ignored when base is set, which supplies its own.
+    Go version for every module, overriding go.mod. Ignored when base is set.
     """
     version: String = null,
     """
-    Base image for Go test and generate containers. It must carry a Go
-    toolchain, along with any C/C++ dependencies the modules need; otelgotest
-    is installed into it unless it already has one. It supplies its own
-    toolchain, so version is ignored alongside it.
+    Base image for Go containers. Must include a Go toolchain.
     """
     base: Container = null,
     """
-    Extra workspace-root include patterns mounted for each module's Go commands.
-    Use this for fixtures, generator inputs, or other files not covered by the
-    built-in Go patterns.
+    Extra workspace files to mount for Go commands, as include patterns.
     """
     includeExtraFiles: [String!]! = [],
     """
-    Module roots to test. A bare pattern selects, a "!"-prefixed pattern
-    excludes, and an exclude always wins (order does not matter). With no
-    selecting pattern, every module is tested. Supported patterns: "**" or "*"
-    (all modules), and "X" or "X/**" (module X and any module below it); other
-    glob forms (mid-path "**", single-segment "*") are not interpreted.
-    Examples: ["**", "!docs"] tests all but docs; ["e2e/**"] tests only e2e;
-    ["!**"] tests nothing.
+    Module roots to test, e.g. ["**", "!docs"]. "!" excludes.
     """
     test: [String!]! = ["**"],
     """
-    Directories to run go generate in. Paths are relative to the workspace root
-    (the directory containing dagger.toml), independent of the invocation directory.
-
-    A literal path selects only that directory, even if it is a Go module root.
-    "." selects the workspace root only. Patterns use Dagger glob syntax:
-    *, ?, and character classes match within a path segment; ** matches zero
-    or more segments. "internal/**" includes internal itself and its descendants.
-    A ! prefix excludes. Exclusions always win, regardless of pattern order.
-    An empty list or a list containing only exclusions starts with all directories.
-    The default ["**"] includes directories in nested Go modules.
-
-    Example: ["sdk/go/engineconn", "internal/**", "!internal/fixtures/**"].
-    This replaces module-level selection; literal paths no longer select children.
-    See generateAll for execution behavior.
+    Directories to run go generate in, as workspace-root globs. "!" excludes.
     """
     generate: [String!]! = ["**"],
     """
-    Value of the GOFLAGS environment variable in every Go container, e.g.
-    "-tags=extended,withdeploy". Flags that take a value must use the
-    -flag=value form, as Go requires inside GOFLAGS.
+    GOFLAGS for every Go container, e.g. "-tags=extended".
     """
     goflags: String = null,
     """
-    Absolute container path where the workspace is mounted for Go commands.
-    Defaults to "/src/<workspace name>", where the name is the last segment of
-    the workspace address (usually the repository name), so tests that expect
-    the repository name in their working directory keep passing.
+    Where to mount the workspace in Go containers. Defaults to "/src/<workspace name>".
     """
     mountPath: String = null,
   ) {
@@ -108,37 +68,32 @@ type Go {
   }
 
   """
-  Settings that were given but are not in use, said once per container so they
-  show up in the progress output rather than being silently dropped.
+  Settings that were given but are ignored.
   """
   warnings: [String!]! = []
 
   """
-  Extra workspace-root include patterns mounted for each module's Go commands.
-  Use this for fixtures, generator inputs, or other files not covered by the
-  built-in Go patterns.
+  Extra workspace files mounted for Go commands, as include patterns.
   """
   includeExtraFiles: [String!]! = []
 
   """
-  Module roots to test ("!" excludes; see the `test` constructor argument).
+  Module roots to test. "!" excludes.
   """
   test: [String!]! = ["**"]
 
   """
-  Directories to run go generate in ("!" excludes; see the constructor).
+  Directories to run go generate in. "!" excludes.
   """
   generate: [String!]! = ["**"]
 
   """
-  Value of the GOFLAGS environment variable in every Go container. Null leaves
-  GOFLAGS unset.
+  GOFLAGS for every Go container.
   """
   goflags: String
 
   """
-  Configured container mount path for the workspace. Null derives
-  "/src/<workspace name>" from the workspace address.
+  Configured workspace mount path. Null uses "/src/<workspace name>".
   """
   mountPath: String
 
@@ -182,9 +137,7 @@ type Go {
   let lib: Gomod! { gomod(includeExtraFiles: includeExtraFiles) }
 
   """
-  Go modules discovered from go.mod files at or below the working directory,
-  plus the enclosing module when the cwd is inside one. Optional include/exclude
-  patterns filter the discovered module roots.
+  Go modules at or below the working directory, keyed by module root.
   """
   modules(
     ws: Workspace!,
@@ -192,27 +145,33 @@ type Go {
     exclude: [String!]! = [],
     includeSkipTest: Boolean! = true,
     includeSkipGenerate: Boolean! = true,
-  ): [GoModule!]! {
-    lib
-      .modules(ws, include: include, exclude: exclude).{{path}}
-      .map { found => goModule(ws, found.path) }
-      .filter { mod =>
-        (includeSkipTest or mod.skipTest == false)
-          and (includeSkipGenerate or mod.skipGenerate(ws) == false)
-      }
+  ): GoModules! {
+    GoModules(
+      paths: lib
+        .modules(ws, include: include, exclude: exclude).{{path}}
+        .map { found => goModule(ws, found.path) }
+        .filter { mod =>
+          (includeSkipTest or mod.skipTest == false)
+            and (includeSkipGenerate or mod.skipGenerate(ws) == false)
+        }
+        .map { mod => mod.path },
+      mountPath: workspaceMountPath(ws),
+      tool: self,
+    )
   }
 
   """
-  Return the Go module containing a workspace path.
-
-  By default, path may be a module root or a directory inside a module. Set
-  findUp to false when path is already a module root and no lookup is needed.
+  The Go module containing a workspace path.
   """
   module(ws: Workspace!, path: String!, findUp: Boolean! = true): GoModule! {
     goModule(ws, lib.module(ws, path, findUp: findUp).path)
   }
 
   let goModule(ws: Workspace!, modPath: String!): GoModule! {
+    goModuleAt(modPath, workspaceMountPath(ws))
+  }
+
+  let goModuleAt(modPath: String!, mount: String!): GoModule! {
     GoModule(
       path: modPath,
       configuredVersion: version,
@@ -222,20 +181,46 @@ type Go {
       testPatterns: test,
       generatePatterns: generate,
       goflags: goflags,
-      mountPath: workspaceMountPath(ws),
+      mountPath: mount,
     )
+  }
+}
+
+# Keep all Dang types in one source file until Dagger v0.21.x can
+# convert Workspace arguments for installed multi-file Dang toolchains.
+# See dagger/dagger#13476.
+
+"""
+Go modules in a workspace, keyed by module root.
+"""
+type GoModules @collection {
+  """
+  Module root paths.
+  """
+  paths: [String!]! @keys
+
+  # Held instead of the workspace, which would stop the collection caching.
+  let mountPath: String!
+
+  """
+  Settings every module is built with.
+  """
+  let tool: Go!
+
+  """
+  The Go module rooted at path.
+  """
+  module(path: String!): GoModule! @get {
+    tool.goModuleAt(path, mountPath)
   }
 
   """
-  Run tests in every discovered Go module.
-  Modules configured to skip tests are skipped.
-  Every module runs even after one fails, and the failure lists each failing
-  module by path.
+  Run tests in the selected Go modules.
   """
-  testAll(ws: Workspace!): Void @check {
+  test(ws: Workspace!): Void @check {
     # A selection over a list evaluates its elements concurrently, so all
     # module test commands run in parallel.
-    let failures = modules(ws, includeSkipTest: false).{{path, failure: testFailure(ws)}}
+    let failures = paths.map { p => module(p) }.{{path, failure: testFailure(ws)}}
       .filter { result => result.failure != null }
     if (failures.length > 0) {
       raise "Go module tests failed:\n" + failures.map { result =>
@@ -246,25 +231,10 @@ type Go {
   }
 
   """
-  Run go generate . in selected directories across the workspace.
-  Directories without generator commands are skipped; go:generate:include alone
-  is not a command. Go controls build tags and file and command order in a package.
-
-  Within each Go module, directories run in lexical path order.
-  //go:generate:container selects a container for its directory, using the
-  caller's Workspace.resolve. For example, //go:generate:container generate-env
-  selects the workspace container named generate-env. External references such
-  as docker.io/library/golang:1.26.1-alpine also work. Conflicting values in one directory
-  are errors. Without the directive, the directory uses the module's own base
-  container: the caller's base if one was set, otherwise a container for the
-  toolchain its go.mod asks for.
-  Consecutive directories with the same value share a container. When the value
-  changes, workspace files carry over, so later commands can use earlier output.
-  Modules run independently; cross-module dependencies are not inferred.
-  Use an explicit coordinating command when generators need a different order.
+  Run go generate in the selected Go modules.
   """
-  generateAll(ws: Workspace!): Changeset! @generate {
-    let mods = modules(ws.withWorkdir(".")).filter { mod =>
+  generate(ws: Workspace!): Changeset! @generate {
+    let mods = paths.map { p => module(p) }.filter { mod =>
       mod.skipGenerate(ws) == false
     }
 
@@ -275,7 +245,7 @@ type Go {
     }
 
     # Merge each generated module tree back into that snapshot, then diff once
-    # so callers get one changeset for the whole workspace.
+    # so callers get one changeset for all the selected modules.
     let after = mods.reduce(before) { after, mod =>
       after.withDirectory(mod.path, mod.generateExec(ws).directory("."))
     }
@@ -283,16 +253,12 @@ type Go {
   }
 }
 
-# Keep all Dang types in one source file until Dagger v0.21.x can
-# convert Workspace arguments for installed multi-file Dang toolchains.
-# See dagger/dagger#13476.
-
 """
 A Go module rooted at a workspace-relative path.
 """
 type GoModule {
   """
-  Workspace-relative path of this module root.
+  Module root, relative to the workspace.
   """
   path: String!
 
@@ -305,7 +271,7 @@ type GoModule {
   let baseImage: Container
 
   """
-  Extra workspace-root include patterns mounted for this module's Go commands.
+  Extra workspace files mounted for Go commands, as include patterns.
   """
   includeExtraFiles: [String!]!
 
@@ -325,7 +291,7 @@ type GoModule {
   let goflags: String
 
   """
-  Container path where the workspace is mounted for this module's Go commands.
+  Where the workspace is mounted in Go containers.
   """
   mountPath: String!
 
@@ -340,32 +306,21 @@ type GoModule {
   let lib: Gomod! { gomod(includeExtraFiles: includeExtraFiles) }
 
   """
-  Whether this module falls outside the configured test selection.
+  Whether tests are skipped for this module.
   """
   skipTest: Boolean! {
     lib.at(path).selected(testPatterns) == false
   }
 
   """
-  Why this module's sources could not be worked out, or null when they could.
-
-  A module with an unreadable go.mod, or a Go file that will not parse, records
-  the reason at scan time instead of failing the scan the whole workspace
-  shares. Anything that needs this module's sources raises that reason, which
-  names the file.
+  Why this module could not be scanned, or null.
   """
   scanFailure(ws: Workspace!): String {
     lib.at(path).scanError(ws, generate: true)
   }
 
   """
-  Whether this module has no selected directories with go:generate commands.
-
-  A module the scan could not read has no generators anyone can find, and
-  nothing that could be run there in any case. generateAll asks this of every
-  module in the workspace, so raising here would let one unreadable go.mod stop
-  generation everywhere; testAll and the linters raise it instead, because they
-  do need that module's sources.
+  Whether go generate has nothing to run in this module.
   """
   skipGenerate(ws: Workspace!): Boolean! {
     if (scanFailure(ws) != null) {
@@ -387,8 +342,7 @@ type GoModule {
   }
 
   """
-  Selected generation directories in this module, in lexical order.
-  Paths are workspace-root-relative. Nested modules have their own directory lists.
+  Directories go generate runs in, in lexical order.
   """
   generateDirectories(ws: Workspace!): [String!]! {
     let included = generatePatterns.filter { p => p.hasPrefix("!") == false }
@@ -421,12 +375,7 @@ type GoModule {
   }
 
   """
-  Additional workspace include patterns discovered by scanning Go directives
-  and local go.mod replaces reachable from this module's include graph.
-
-  With neither flag, only go:embed directives and local replaces are followed;
-  `test` also follows go:test:include and `generate` also follows
-  go:generate:include and the modules a go:generate `go -C` reaches.
+  Include patterns found by scanning Go directives and local replaces.
   """
   includeDiscovered(
     ws: Workspace!,
@@ -447,14 +396,14 @@ type GoModule {
   }
 
   """
-  Built-in workspace include patterns for this module's own Go source files.
+  Built-in include patterns for this module's Go files.
   """
   includeBase: [String!]! {
     lib.at(path).includeBase
   }
 
   """
-  Final workspace include patterns used to build this module's source directory.
+  All include patterns for this module's source.
   """
   include(
     ws: Workspace!,
@@ -465,7 +414,7 @@ type GoModule {
   }
 
   """
-  Workspace source mounted for this module's Go commands.
+  Source mounted for this module's Go commands.
   """
   source(
     ws: Workspace!,
@@ -476,17 +425,14 @@ type GoModule {
   }
 
   """
-  Workspace testdata directories mounted while testing this module.
+  Testdata directories mounted for this module's tests.
   """
   testData(ws: Workspace!): Directory! {
     lib.at(path).testData(ws)
   }
 
   """
-  Go toolchain version this module's commands run under: the configured
-  version, or the one its own go.mod asks for, or the fallback for a module
-  that asks for none. Null when a custom base is set, because its toolchain is
-  whatever that container carries.
+  Go version this module runs under. Null with a custom base.
   """
   version(ws: Workspace!): String {
     if (baseImage == null) { toolchainVersion(ws) } else { null }
@@ -497,8 +443,7 @@ type GoModule {
   }
 
   """
-  Base Go container before source files and commands are added: this module's
-  own Go toolchain, or the caller's base image as it is.
+  Go container for this module, before source is added.
   """
   base(ws: Workspace!): Container! {
     prepareBase(
@@ -525,9 +470,6 @@ type GoModule {
 
   """
   Run tests in this module.
-  If this module is configured to skip tests, no tests are run.
-  A failure names this module's path so it can be told apart from other
-  modules tested in the same run.
   """
   test(ws: Workspace!): Void @check {
     let failure = testFailure(ws)
@@ -552,17 +494,9 @@ type GoModule {
   }
 
   """
-  Changes made by running go generate . in this module's selected directories.
-  Returns an empty changeset if no directories are selected. Execution follows
-  the ordering and container rules described by Go.generateAll.
-
-  A module the scan could not read fails here, naming the file, because the
-  caller named this module and asking it to generate should not quietly do
-  nothing. generateAll skips it instead: it asks every module in the workspace
-  whether it holds generators, and one unreadable go.mod must not stop
-  generation everywhere.
+  Run go generate in this module.
   """
-  generate(ws: Workspace!): Changeset! {
+  generate(ws: Workspace!): Changeset! @generate {
     let failure = scanFailure(ws)
     if (failure != null) {
       raise failure
@@ -591,9 +525,13 @@ type GoModule {
         let selected = if (value == "") {
           base(ws)
         } else {
-          prepareBase(
-            gomod.withGoCaches(ws.resolve(value).container.withoutEntrypoint),
-          )
+          # TODO: uncomment when https://github.com/dagger/dagger/pull/14178 is merged
+          # Workspace.resolve is unavailable on beta.13; fall back to the base.
+          # prepareBase(
+          #   gomod.withGoCaches(ws.resolve(value).container.withoutEntrypoint),
+          # )
+          # TODO: delete when https://github.com/dagger/dagger/pull/14178 is merged
+          base(ws)
         }
         selected.withDirectory(mountPath, state.container.directory(mountPath))
       }
@@ -650,7 +588,7 @@ A workspace directory containing Go test files.
 """
 type GoDirectory {
   """
-  Workspace-relative path of this directory.
+  Directory path, relative to the workspace.
   """
   path: String!
 
@@ -676,8 +614,6 @@ type GoDirectory {
 
   """
   Run Go tests in this directory.
-  If the containing module is configured to skip tests, no tests are run.
-  A failure names this directory's path.
   """
   execute: Void @check {
     if (module.skipTest == false) {

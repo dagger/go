@@ -106,19 +106,22 @@ type GolangciLint {
   let lib: Gomod! { gomod(includeExtraFiles: includeExtraFiles) }
 
   """
-  Discover Go modules at or below the workspace cwd, including its enclosing
-  module. Paths and include/exclude globs are workspace-root-relative.
+  Go modules at or below the working directory, keyed by module root.
   """
   modules(
     ws: Workspace!,
     include: [String!]! = [],
     exclude: [String!]! = [],
     includeSkipLint: Boolean! = true,
-  ): [GoModule!]! {
-    lib
-      .modules(ws, include: include, exclude: exclude).{{path}}
-      .map { found => goModule(found.path) }
-      .filter { mod => includeSkipLint or mod.skipLint == false }
+  ): GoModules! {
+    GoModules(
+      paths: lib
+        .modules(ws, include: include, exclude: exclude).{{path}}
+        .map { found => goModule(found.path) }
+        .filter { mod => includeSkipLint or mod.skipLint == false }
+        .map { mod => mod.path },
+      tool: self,
+    )
   }
 
   """
@@ -140,26 +143,46 @@ type GolangciLint {
       lintPatterns: lint,
     )
   }
+}
+
+# Keep all Dang types in one source file until Dagger can convert Workspace
+# arguments for installed multi-file Dang modules. See dagger/dagger#13476.
+
+"""
+Go modules in a workspace, keyed by module root.
+"""
+type GoModules @collection {
+  """
+  Module root paths.
+  """
+  paths: [String!]! @keys
+
+  let tool: GolangciLint!
 
   """
-  Run golangci-lint in every selected Go module.
+  The Go module rooted at path.
   """
-  lintAll(ws: Workspace!): Void @check {
-    let layers = modules(ws, includeSkipLint: false).reduce(directory) { layers, mod =>
+  module(path: String!): GoModule! @get {
+    tool.goModule(path)
+  }
+
+  """
+  Run golangci-lint in the selected Go modules.
+  """
+  lint(ws: Workspace!): Void @check {
+    let mods = paths.map { p => module(p) }.filter { mod => mod.skipLint == false }
+    let layers = mods.reduce(directory) { layers, mod =>
       layers.withDirectory(
         mod.path,
         directory.withFile("go.mod", mod.lintExec(ws).file("go.mod")),
       )
     }
-    # Merge a file from each lint container to force all commands to run in
-    # parallel until Dagger supports parallel sub-checks directly.
+    # Merging one output from each container forces all lint commands to run
+    # in parallel until Dagger supports directly awaiting multiple containers.
     layers.sync
     null
   }
 }
-
-# Keep all Dang types in one source file until Dagger can convert Workspace
-# arguments for installed multi-file Dang modules. See dagger/dagger#13476.
 
 """
 A Go module rooted at a workspace-relative path, ready for golangci-lint.

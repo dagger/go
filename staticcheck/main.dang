@@ -124,20 +124,22 @@ type Staticcheck {
   let lib: Gomod! { gomod(includeExtraFiles: includeExtraFiles) }
 
   """
-  Discover go.mod files at or below the working directory, including the
-  enclosing module when the working directory is inside one.
-  Returned paths are relative to the workspace root.
+  Go modules at or below the working directory, keyed by module root.
   """
   modules(
     ws: Workspace!,
     include: [String!]! = [],
     exclude: [String!]! = [],
     includeSkipped: Boolean! = true,
-  ): [GoModule!]! {
-    lib
-      .modules(ws, include: include, exclude: exclude).{{path}}
-      .map { found => goModule(found.path) }
-      .filter { mod => includeSkipped or mod.skipLint == false }
+  ): GoModules! {
+    GoModules(
+      paths: lib
+        .modules(ws, include: include, exclude: exclude).{{path}}
+        .map { found => goModule(found.path) }
+        .filter { mod => includeSkipped or mod.skipLint == false }
+        .map { mod => mod.path },
+      tool: self,
+    )
   }
 
   """
@@ -159,12 +161,35 @@ type Staticcheck {
       lintPatterns: lint,
     )
   }
+}
+
+# Keep all Dang types in one source file until Dagger can convert Workspace
+# arguments for installed multi-file Dang modules. See dagger/dagger#13476.
+
+"""
+Go modules in a workspace, keyed by module root.
+"""
+type GoModules @collection {
+  """
+  Module root paths.
+  """
+  paths: [String!]! @keys
+
+  let tool: Staticcheck!
 
   """
-  Run Staticcheck in every selected Go module.
+  The Go module rooted at path.
   """
-  lintAll(ws: Workspace!): Void @check {
-    let layers = modules(ws, includeSkipped: false).reduce(directory) { layers, mod =>
+  module(path: String!): GoModule! @get {
+    tool.goModule(path)
+  }
+
+  """
+  Run Staticcheck in the selected Go modules.
+  """
+  lint(ws: Workspace!): Void @check {
+    let mods = paths.map { p => module(p) }.filter { mod => mod.skipLint == false }
+    let layers = mods.reduce(directory) { layers, mod =>
       layers.withDirectory(
         mod.path,
         directory.withFile("go.mod", mod.lintExec(ws).file("go.mod")),
@@ -176,9 +201,6 @@ type Staticcheck {
     null
   }
 }
-
-# Keep all Dang types in one source file until Dagger can convert Workspace
-# arguments for installed multi-file Dang modules. See dagger/dagger#13476.
 
 """
 A Go module checked with Staticcheck.
