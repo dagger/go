@@ -102,6 +102,19 @@ $ dagger call go modules subset --keys=sdk/go batch test sync
 Because discovery starts at the cwd, `dagger -W ./sdk/go check` scopes every
 tool to that module without a dimension flag.
 
+Each module's tests are a collection too, keyed by test function name, so
+`go-test` is a second dimension. Its batch `run` runs the selected tests in one
+`go test -run` command:
+
+```console
+$ dagger list go-tests --go-module=sdk/go
+$ dagger check go/modules/tests/run --go-module=sdk/go --go-test=TestConnect
+```
+
+Test names come from `go test -list`, so reading them builds the module's
+tests. A module outside the `test` selection, or one whose sources do not
+build, reports no tests instead of failing discovery.
+
 The batch `test` runs every selected module even after one fails, then lists
 each failing module by path. A module outside the `test` selection passes
 without running anything, as does a module's own `test`.

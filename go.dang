@@ -469,6 +469,40 @@ type GoModule {
   }
 
   """
+  Test functions in this module, keyed by name. Empty when tests are skipped
+  or the sources do not build.
+  """
+  tests(ws: Workspace!): GoTests! {
+    GoTests(names: testNames(ws), module: self)
+  }
+
+  # go test -list compiles the module, so a module that does not build reports
+  # no tests rather than failing discovery for the whole workspace. Names
+  # repeat across packages, and a collection rejects duplicate keys.
+  let testNames(ws: Workspace!): [String!]! {
+    let empty: [String!]! = []
+    if (skipTest) {
+      empty
+    } else {
+      let listed = {
+        testEnv(ws)
+          .withWorkdir(path)
+          .withExec(["go", "test", "-list", ".*", "./..."])
+          .stdout
+      } rescue {
+        err: Error => ""
+      }
+      listed
+        .split("\n")
+        .map { line => line.trimSuffix("\r") }
+        .filter { line => line.hasPrefix("Test") }
+        .reduce(empty) { names, name =>
+          if (names.contains(name)) { names } else { names + [name] }
+        }
+    }
+  }
+
+  """
   Run tests in this module.
   """
   test(ws: Workspace!): Void @check {
@@ -580,6 +614,76 @@ type GoModule {
     testEnv(ws)
       .withWorkdir(path)
       .withExec(["otelgotest", "./..."], experimentalPrivilegedNesting: true)
+  }
+
+  """
+  Run the named tests, naming this module when they fail.
+  """
+  let runTests(ws: Workspace!, names: [String!]!): Void {
+    testExecMatching(ws, "^(" + names.join("|") + ")$").sync rescue {
+      err: Error => raise "Go tests in " + path + ": " + err.message
+    }
+    null
+  }
+
+  """
+  Container that has run the tests matching a -run pattern.
+  """
+  let testExecMatching(ws: Workspace!, pattern: String!): Container! {
+    testEnv(ws)
+      .withWorkdir(path)
+      .withExec(
+        ["otelgotest", "-run", pattern, "./..."],
+        experimentalPrivilegedNesting: true,
+      )
+  }
+}
+
+"""
+Go test functions in a module, keyed by test name.
+"""
+type GoTests @collection {
+  """
+  Test function names.
+  """
+  names: [String!]! @keys
+
+  let module: GoModule!
+
+  """
+  The test function with this name.
+  """
+  test(name: String!): GoTest! @get {
+    GoTest(name: name, module: module)
+  }
+
+  """
+  Run the selected tests in this module.
+  """
+  run(ws: Workspace!): Void @check {
+    if (names.length > 0) {
+      module.runTests(ws, names)
+    }
+    null
+  }
+}
+
+"""
+A Go test function.
+"""
+type GoTest {
+  """
+  Test function name.
+  """
+  name: String!
+
+  let module: GoModule!
+
+  """
+  Run this test.
+  """
+  run(ws: Workspace!): Void @check {
+    module.runTests(ws, [name])
   }
 }
 

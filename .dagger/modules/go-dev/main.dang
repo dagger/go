@@ -203,6 +203,43 @@ type GoDev {
   }
 
   """
+  A module's tests form a collection keyed by test name: a subset runs only
+  its own tests, a single test runs on its own, and a module whose tests are
+  skipped or whose sources do not build reports none.
+  """
+  testsCollectionCheck(ws: Workspace!): Void @check {
+    let modPath = "testdata/go-module-with-testdata"
+    let tool = go(version: "1.26.1")
+    let tests = tool.module(ws, modPath).tests(ws)
+    let missing = [
+      "TestFixtureFromTestdata",
+      "TestGoTestIncludeAnnotation",
+      "TestGoEmbedAssets",
+    ].filter { name => tests.keys.contains(name) == false }
+    assert(missing.length == 0, "test discovery missed: " + missing.join(", "))
+
+    let one = "TestGoEmbedAssets"
+    assert(tests.get(key: one).name == one, "get did not return the test at its key")
+    run(tests.subset(keys: [one]).batch.run(ws))
+    run(tests.get(key: one).run(ws))
+
+    # A module outside the test selection offers no tests to run, so the
+    # fixture that fails on purpose stays unrun.
+    let skipped = go(version: "1.26.1", test: ["!" + noPackagesFixturePath])
+      .module(ws, noPackagesFixturePath)
+      .tests(ws)
+    assert(skipped.keys.length == 0, "a skipped module offered tests: " + skipped.keys.join(", "))
+    run(skipped.batch.run(ws))
+
+    # Sources that do not build report no tests rather than failing discovery.
+    assert(
+      tool.module(ws, "golangci-lint/testdata/go-module-lint-fail").tests(ws).keys.length == 0,
+      "a module that does not build offered tests",
+    )
+    null
+  }
+
+  """
   Run the batch test over every module while respecting per-module skip
   configuration.
   """
