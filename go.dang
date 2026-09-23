@@ -502,7 +502,7 @@ type GoModule {
       files
         .reduce(empty) { names, file =>
           names + matches
-            .filter { match => match.filePath == file }
+            .filter { match => match.filePath.trimPrefix("/").trimPrefix("./") == file }
             .map { match =>
               match.matchedLines.trimPrefix("func ").split("(").takeFirst(1).join("")
             }
