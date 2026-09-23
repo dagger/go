@@ -107,9 +107,12 @@ filtered out it runs `go test -run` over the selected names.
 Because discovery starts at the cwd, `dagger -W ./sdk/go check` scopes every
 tool to that module without a dimension flag.
 
-Test names come from `go test -list`, so reading them builds the module's
-tests. A module outside the `test` selection, or one whose sources do not
-build, reports no tests instead of failing discovery.
+Test names come from searching the module's `_test.go` files for
+`func TestXxx(t *testing.T)`, so listing them runs no container. `TestMain`,
+`testdata` and nested modules are left out. Build constraints are not
+evaluated: a test excluded by one is still listed, and selecting it runs
+nothing. A module outside the `test` selection, or one the scan cannot read,
+reports no tests.
 
 `test` on a module, and the `modules` batch `test`, are plain functions rather
 than checks, so that `dagger check` does not run the same tests twice. The

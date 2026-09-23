@@ -231,10 +231,32 @@ type GoDev {
     assert(skipped.keys.length == 0, "a skipped module offered tests: " + skipped.keys.join(", "))
     run(skipped.batch.run(ws))
 
-    # Sources that do not build report no tests rather than failing discovery.
+    # Names come from the source: TestMain, a lowercase suffix and the wrong
+    # signature are not tests; testdata and a nested module are not this
+    # module's; build constraints are not evaluated; a name repeated in
+    # another package is one key; and the order is stable.
+    let rooted = ws.withDirectory(
+      "/",
+      directory
+        .withNewFile("go.mod", "module example.com/root\n\ngo 1.26.1\n")
+        .withNewFile("a_test.go", ```go
+          package root
+          import "testing"
+          func TestAlpha(t *testing.T) {}
+          func TestMain(m *testing.M) {}
+          func Testify(t *testing.T) {}
+          func TestHelper(n int) {}
+        ``` + "\n")
+        .withNewFile("constrained_test.go", "//go:build never\n\npackage root\nimport \"testing\"\nfunc TestConstrained(t *testing.T) {}\n")
+        .withNewFile("sub/b_test.go", "package sub\nimport \"testing\"\nfunc TestBeta(t *testing.T) {}\nfunc TestAlpha(t *testing.T) {}\n")
+        .withNewFile("testdata/c_test.go", "package c\nimport \"testing\"\nfunc TestIgnored(t *testing.T) {}\n")
+        .withNewFile("nested/go.mod", "module example.com/nested\n\ngo 1.26.1\n")
+        .withNewFile("nested/d_test.go", "package nested\nimport \"testing\"\nfunc TestNested(t *testing.T) {}\n"),
+    )
+    let found = go(version: "1.26.1").module(rooted, ".", findUp: false).tests(rooted).keys
     assert(
-      tool.module(ws, "golangci-lint/testdata/go-module-lint-fail").tests(ws).keys.length == 0,
-      "a module that does not build offered tests",
+      found == ["TestAlpha", "TestConstrained", "TestBeta"],
+      "static test discovery found: " + found.join(", "),
     )
     null
   }
