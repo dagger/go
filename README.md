@@ -90,34 +90,31 @@ roots it finds. `module` returns the module containing a path; pass
 `findUp: false` when the path is already a module root.
 
 `modules` is a collection keyed by module root, so it adds a `go-module`
-dimension. Its batch holds `test` (a `@check`) and `generate` (a `@generate`),
-which run once over the selected modules in place of each module's own:
-
-```console
-$ dagger check go/modules/test --go-module=sdk/go --go-module=cmd/tool
-$ dagger generate go/modules/generate --go-module=sdk/go
-$ dagger call go modules subset --keys=sdk/go batch test sync
-```
-
-Because discovery starts at the cwd, `dagger -W ./sdk/go check` scopes every
-tool to that module without a dimension flag.
-
-Each module's tests are a collection too, keyed by test function name, so
-`go-test` is a second dimension. Its batch `run` runs the selected tests in one
-`go test -run` command:
+dimension. Each module's tests are a collection too, keyed by test function
+name, which adds `go-test`. Checks and generators select on both:
 
 ```console
 $ dagger list go-tests --go-module=sdk/go
+$ dagger check go/modules/tests/run --go-module=sdk/go --go-module=cmd/tool
 $ dagger check go/modules/tests/run --go-module=sdk/go --go-test=TestConnect
+$ dagger generate go/modules/generate --go-module=sdk/go
 ```
+
+Tests run once per selected module, through the `GoTests` batch `run`. With
+every test selected it runs `go test ./...`, examples included; with some
+filtered out it runs `go test -run` over the selected names.
+
+Because discovery starts at the cwd, `dagger -W ./sdk/go check` scopes every
+tool to that module without a dimension flag.
 
 Test names come from `go test -list`, so reading them builds the module's
 tests. A module outside the `test` selection, or one whose sources do not
 build, reports no tests instead of failing discovery.
 
-The batch `test` runs every selected module even after one fails, then lists
-each failing module by path. A module outside the `test` selection passes
-without running anything, as does a module's own `test`.
+`test` on a module, and the `modules` batch `test`, are plain functions rather
+than checks, so that `dagger check` does not run the same tests twice. The
+batch `test` runs every selected module even after one fails, then lists each
+failing module by path.
 
 #### Generate
 

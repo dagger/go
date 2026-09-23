@@ -217,7 +217,7 @@ type GoModules @collection {
   """
   Run tests in the selected Go modules.
   """
-  test(ws: Workspace!): Void @check {
+  test(ws: Workspace!): Void {
     # A selection over a list evaluates its elements concurrently, so all
     # module test commands run in parallel.
     let failures = paths.map { p => module(p) }.{{path, failure: testFailure(ws)}}
@@ -505,7 +505,7 @@ type GoModule {
   """
   Run tests in this module.
   """
-  test(ws: Workspace!): Void @check {
+  test(ws: Workspace!): Void {
     let failure = testFailure(ws)
     if (failure != null) {
       raise "Go module " + path + ": " + failure
@@ -648,6 +648,11 @@ type GoTests @collection {
   """
   names: [String!]! @keys
 
+  """
+  Tests selected in or out since the collection was discovered.
+  """
+  delta: CollectionDelta
+
   let module: GoModule!
 
   """
@@ -661,7 +666,17 @@ type GoTests @collection {
   Run the selected tests in this module.
   """
   run(ws: Workspace!): Void @check {
-    if (names.length > 0) {
+    # With nothing selected out, run the module's tests as a whole, examples
+    # included, rather than listing every name in a -run pattern. Without a
+    # delta, the pattern is the safe choice.
+    let whole = if (delta == null) {
+      false
+    } else {
+      delta.addedKeys.length == 0 and delta.removedKeys.length == 0
+    }
+    if (whole) {
+      module.test(ws)
+    } else if (names.length > 0) {
       module.runTests(ws, names)
     }
     null
