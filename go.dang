@@ -469,31 +469,28 @@ type GoModule {
   }
 
   """
-  Test functions in this module, keyed by name. Empty when tests are skipped
-  or the sources cannot be scanned.
+  Test functions in this module, keyed by name. Empty when tests are skipped.
   """
   tests(ws: Workspace!): GoTests! {
     GoTests(names: testNames(ws), module: self)
   }
 
   # Test names are found by searching the source rather than asking go test,
-  # so discovery needs no test container. Build constraints are not evaluated:
-  # a test excluded by one is still listed, and selecting it runs nothing.
-  # Files are taken in the scanner's lexical directory order, then glob order,
-  # so the keys, and the -run pattern built from them, are stable.
+  # and without the scanner, so listing tests runs no container. Build
+  # constraints are not evaluated: a test excluded by one is still listed, and
+  # selecting it runs nothing. Files are taken in byte order, so the keys, and
+  # the -run pattern built from them, are stable.
   let testNames(ws: Workspace!): [String!]! {
     let empty: [String!]! = []
-    if (skipTest or lib.at(path).scanError(ws, test: true) != null) {
+    let files = if (skipTest) { empty } else {
+      lib.at(path).ownFiles(ws, "*_test.go")
+    }
+    if (files.length == 0) {
       empty
     } else {
-      let files = lib
-        .at(path)
-        .testDirectories(ws)
-        .filter { dir => goIgnores(dir) == false }
-        .reduce(empty) { files, dir =>
-          let pattern = if (dir == ".") { "*_test.go" } else { dir + "/*_test.go" }
-          files + ws.glob(pattern).map { file => file.trimPrefix("/").trimPrefix("./") }
-        }
+      # One search over the module tree, matched back to its own files below.
+      # Searching the files by name would be narrower, but fails on a
+      # workspace built with withDirectory.
       let matches = ws.search(
         paths: [if (path == ".") { "/" } else { "/" + path }],
         globs: ["*_test.go"],
@@ -508,17 +505,6 @@ type GoModule {
             }
         }
         .uniq
-    }
-  }
-
-  # Whether Go skips a directory when it looks for packages: a testdata
-  # directory, or one whose name starts with "." or "_", below the module root.
-  let goIgnores(dir: String!): Boolean! {
-    let rel = if (path == ".") { dir.trimPrefix(".") } else {
-      dir.trimPrefix(path)
-    }
-    rel.split("/").filter { segment => segment != "" }.any { segment =>
-      segment == "testdata" or segment.hasPrefix(".") or segment.hasPrefix("_")
     }
   }
 

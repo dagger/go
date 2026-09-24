@@ -111,8 +111,7 @@ Test names come from searching the module's `_test.go` files for
 `func TestXxx(t *testing.T)`, so listing them runs no container. `TestMain`,
 `testdata` and nested modules are left out. Build constraints are not
 evaluated: a test excluded by one is still listed, and selecting it runs
-nothing. A module outside the `test` selection, or one the scan cannot read,
-reports no tests.
+nothing. A module outside the `test` selection reports no tests.
 
 `test` on a module, and the `modules` batch `test`, are plain functions rather
 than checks, so that `dagger check` does not run the same tests twice. The
@@ -264,14 +263,21 @@ says. Each ignored setting is listed in `warnings` and announced as a step in
 the container, since Dang has no diagnostics channel of its own.
 
 **A directory with a `go.mod` is not automatically a module.** Discovery
-reports a module root only when its `go.mod` parses and carries a module line,
+reports a module root only when its `go.mod` carries a module line,
 and when the module holds Go files that Go itself would look at — not only ones
 under `testdata/` or a `.`/`_` directory. Everything else is left out, because
 handing it to a tool yields a complaint about the tool rather than about the
 directory: golangci-lint errors on a module with no packages, and no Go command
 accepts a `go.mod` with no module line. `module` and `at` still reach one, so a
 caller that spells out a path gets that path, and an unparseable `go.mod` still
-says what is wrong with it. `gomod`'s `scanned-module-roots` is the list.
+says what is wrong with it. `gomod`'s `scanned-module-roots` is the scanner's
+view of the same list, and its suite asserts the two agree.
+
+**Listing never runs the scanner.** Which roots are modules, and which tests a
+module has, are answered from the workspace directly: `findRoots`, a read of
+each `go.mod`, globs and `Workspace.search`. The scanner builds and runs only
+when something needs a module's sources, so `dagger check -l` and
+`dagger list` pay for neither.
 
 The line is "no Go files", not "no packages after build constraints". A module
 whose files are all constrained out is still a module, and the toolchain's

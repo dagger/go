@@ -36,9 +36,9 @@ type Gomod {
   the enclosing module when the cwd is inside one. Paths are workspace-root-
   relative.
 
-  A directory holding a go.mod that will not parse, or holding no Go files, is
-  not a module and is not reported; see `scannedModuleRoots`. `module` and `at`
-  still reach one, because a caller naming a path means that path.
+  A directory whose go.mod has no module line, or that holds no Go files Go
+  would read, is not a module and is not reported. `module` and `at` still
+  reach one, because a caller naming a path means that path.
 
   Optional include/exclude patterns filter the discovered roots by matching
   workspace content, which is Dagger's own glob syntax rather than the
@@ -49,11 +49,12 @@ type Gomod {
     include: [String!]! = [],
     exclude: [String!]! = [],
   ): [GoMod!]! {
-    let goModules = scannedModuleRoots(ws)
+    # Answered from the workspace directly rather than from the scan, so that
+    # listing modules never builds or runs the scanner.
     ws
       .findRoots(markers: ["go.mod"])
       .map { root => workspaceRootPath(ws, root) }
-      .filter { modPath => goModules.any { goModule => goModule == modPath } }
+      .filter { modPath => at(modPath).isGoModule(ws) }
       .filter { modPath => pathIncluded(ws, modPath, include, exclude) }
       .map { modPath => at(modPath) }
   }
@@ -365,6 +366,61 @@ type GoMod {
     } else {
       let prefix = trimmed.trimSuffix("/**")
       path == prefix or path.hasPrefix(prefix + "/")
+    }
+  }
+
+  """
+  Whether this root is a Go module a tool can work on: its go.mod has a module
+  line, and it holds Go files that Go would read.
+  """
+  isGoModule(ws: Workspace!): Boolean! {
+    ws.file("/" + subpath("go.mod")).contents.match(`(?m)^[ \t]*module([ \t(]|$)`) != null
+      and ownFiles(ws, "*.go").length > 0
+  }
+
+  """
+  This module's files matching a glob, in byte order. Nested modules, testdata
+  and names starting with "." or "_" are left out, as Go leaves them out.
+  """
+  ownFiles(ws: Workspace!, glob: String!): [String!]! {
+    let nested = nestedRoots(ws)
+    sorted(
+      ws
+        .glob(subpath("**/" + glob))
+        .filter { file => file.hasSuffix("/") == false }
+        .map { file => file.trimPrefix("/").trimPrefix("./") }
+        .filter { file => nested.any { root => file.hasPrefix(root + "/") } == false }
+        .filter { file => goIgnores(relative(file)) == false },
+    )
+  }
+
+  """
+  Module roots below this one.
+  """
+  nestedRoots(ws: Workspace!): [String!]! {
+    ws
+      .findRoots(start: "/" + subpath(""), markers: ["go.mod"])
+      .map { root => gomod.workspaceRootPath(ws, root) }
+      .filter { root => root != path }
+  }
+
+  # A workspace path made relative to this module root.
+  let relative(file: String!): String! {
+    if (path == ".") { file } else { file.trimPrefix(path + "/") }
+  }
+
+  # Whether Go skips a module-relative path when it looks for packages.
+  let goIgnores(rel: String!): Boolean! {
+    rel.split("/").any { segment =>
+      segment == "testdata" or segment.hasPrefix(".") or segment.hasPrefix("_")
+    }
+  }
+
+  # Byte-order sort, as Go's sort.Strings.
+  let sorted(items: [String!]!): [String!]! {
+    let empty: [String!]! = []
+    items.reduce(empty) { acc, item =>
+      acc.takeWhile { x => x <= item } + [item] + acc.dropWhile { x => x <= item }
     }
   }
 

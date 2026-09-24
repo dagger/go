@@ -200,6 +200,17 @@ type E2e {
       "discovery lost a real module",
     )
 
+    # Discovery reads the workspace directly and the scanner reads its own
+    # snapshot; they must still agree on what a module is.
+    let scanned = gomod.scannedModuleRoots(ws)
+    let onlyDiscovered = discovered.filter { p => scanned.contains(p) == false }
+    let onlyScanned = scanned.filter { p => discovered.contains(p) == false }
+    assert(
+      onlyDiscovered.length == 0 and onlyScanned.length == 0,
+      "discovery and the scanner disagree: discovery alone has "
+        + onlyDiscovered.join(", ") + "; the scanner alone has " + onlyScanned.join(", "),
+    )
+
     # Naming one directly still reaches it: a caller that spells out a path
     # means that path.
     assert(gomod.at(unreadablePath).path == unreadablePath, "a named path was not reachable")
