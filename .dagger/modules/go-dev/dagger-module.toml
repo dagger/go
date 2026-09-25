@@ -1,5 +1,5 @@
 name = "go-dev"
-engineVersion = "v1.0.0-beta.12"
+engineVersion = "v1.0.0-beta.15"
 
 [runtime]
   source = "dang"

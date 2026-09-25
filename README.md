@@ -360,8 +360,9 @@ That builds a dev engine from dagger/dagger and runs them inside it, because
 has yet. The engine commit is pinned in `.dagger/modules/engine-e2e/`, and the
 suites it runs are listed in that module's `workspace.toml`.
 
-The three suites that do not need the dev engine also run against a released
-one directly, which is far quicker while iterating:
+Every module needs v1.0.0-beta.15 or later for collections; until that is
+released, use a dev engine build. The three suites that do not need the pinned
+dev engine also run against one directly, which is far quicker while iterating:
 
 ```sh
 dagger check -m gomod/.dagger/modules/e2e         # the shared library
