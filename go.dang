@@ -664,14 +664,14 @@ type GoTests @collection {
   """
   The test function with this name.
   """
-  test(name: String!): GoTest! @get {
+  function(name: String!): GoTest! @get {
     GoTest(name: name, module: module)
   }
 
   """
   Run the selected tests in this module.
   """
-  run(ws: Workspace!): Void @check {
+  test(ws: Workspace!): Void @check {
     # With nothing selected out, run the module's tests as a whole, examples
     # included, rather than listing every name in a -run pattern. Without a
     # delta, the pattern is the safe choice.
@@ -703,7 +703,7 @@ type GoTest {
   """
   Run this test.
   """
-  run(ws: Workspace!): Void @check {
+  test(ws: Workspace!): Void @check {
     module.runTests(ws, [name])
   }
 }

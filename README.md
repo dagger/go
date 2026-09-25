@@ -91,16 +91,24 @@ roots it finds. `module` returns the module containing a path; pass
 
 `modules` is a collection keyed by module root, so it adds a `go-module`
 dimension. Each module's tests are a collection too, keyed by test function
-name, which adds `go-test`. Checks and generators select on both:
+name, which adds `go-test`. Checks and generators select on both, and a
+check's name is a flag too:
 
 ```console
 $ dagger list go-tests --go-module=sdk/go
-$ dagger check go/modules/tests/run --go-module=sdk/go --go-module=cmd/tool
-$ dagger check go/modules/tests/run --go-module=sdk/go --go-test=TestConnect
-$ dagger generate go/modules/generate --go-module=sdk/go
+$ dagger check --go --test --go-module=sdk/go --go-module=cmd/tool
+$ dagger check --go --test --go-module=sdk/go --go-test=TestConnect
+$ dagger generate --go --go-module=sdk/go
+$ dagger check -l --all --go -f=cli     # one line per test, as flags to reuse
 ```
 
-Tests run once per selected module, through the `GoTests` batch `run`. With
+`--test` alone also selects every other module's check named `test`; `--go`
+narrows it to this one. When another installed module has a `GoModule` type
+too, as `golangci-lint` and `staticcheck` do, each tool's flag takes its
+qualified name: `--golangci-lint-module`, `--staticcheck-module`. `dagger check
+--help` lists the flags in effect.
+
+Tests run once per selected module, through the `GoTests` batch `test`. With
 every test selected it runs `go test ./...`, examples included; with some
 filtered out it runs `go test -run` over the selected names.
 
@@ -162,7 +170,10 @@ Tests run with a nested Dagger engine, so a suite that drives Dagger works.
 | `version`    | The bundled golangci-lint version.            |
 
 On a module: `lint` (a `@check`). The collection's batch `lint` runs once over
-the selected modules in place of each module's own, as for `go`.
+the selected modules in place of each module's own, as for `go`. Both linters
+name their check `lint`, so `dagger check --lint` runs them together and
+`--golangci-lint --lint` runs this one; select modules with
+`--golangci-lint-module=PATH`.
 
 `version` is the linter release, pinned to 2.11.4 by digest, and `goVersion` is
 the Go toolchain — chosen independently, because the binary is copied out of
@@ -177,7 +188,8 @@ dependencies need one during typecheck.
 | `module`     | The module containing a workspace path.       |
 
 On a module: `lint` (a `@check`). The collection's batch `lint` runs once over
-the selected modules in place of each module's own, as for `go`.
+the selected modules in place of each module's own, as for `go`. Select it
+with `--staticcheck --lint`, and modules with `--staticcheck-module=PATH`.
 
 `version` is the Staticcheck release, built once with `go install` in a pinned
 Go container, and `goVersion` is the Go toolchain. Test files are analyzed;

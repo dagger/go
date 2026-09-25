@@ -220,8 +220,8 @@ type GoDev {
 
     let one = "TestGoEmbedAssets"
     assert(tests.get(key: one).name == one, "get did not return the test at its key")
-    run(tests.subset(keys: [one]).batch.run(ws))
-    run(tests.get(key: one).run(ws))
+    run(tests.subset(keys: [one]).batch.test(ws))
+    run(tests.get(key: one).test(ws))
 
     # A module outside the test selection offers no tests to run, so the
     # fixture that fails on purpose stays unrun.
@@ -229,7 +229,7 @@ type GoDev {
       .module(ws, noPackagesFixturePath)
       .tests(ws)
     assert(skipped.keys.length == 0, "a skipped module offered tests: " + skipped.keys.join(", "))
-    run(skipped.batch.run(ws))
+    run(skipped.batch.test(ws))
 
     # Names come from the source: TestMain, a lowercase suffix and the wrong
     # signature are not tests; testdata and a nested module are not this
