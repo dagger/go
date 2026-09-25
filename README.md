@@ -180,6 +180,14 @@ the Go toolchain — chosen independently, because the binary is copied out of
 its image onto that toolchain. A C/C++ toolchain is present, since cgo
 dependencies need one during typecheck.
 
+Both linters take `base`, `goVersion`, `includeExtraFiles` and `lint` settings
+that work as `go`'s do. A `base` must carry a Go toolchain and any C/C++
+dependencies; the linter is installed into it unless it already has one, and
+`goVersion` is ignored alongside it and recorded in `warnings`. Each linter's
+configuration files are mounted with their directory structure, so its normal
+config lookup applies. Use `includeExtraFiles` for files the linter reads that
+the Go patterns miss, such as generated inputs or non-Go embedded assets.
+
 ### `staticcheck`
 
 | Function     | Description                                   |

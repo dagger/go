@@ -1,81 +1,53 @@
 """
-Lint Go modules in a Dagger workspace with golangci-lint.
-
-Discovery, selection and source policy come from the shared `gomod` library, so
-this module agrees with `go` and `staticcheck` about what a module is, which
-ones a pattern list covers, and which files a command needs. What is left here
-is golangci-lint's own: its release, its configuration files, and its command
-line.
-
-Each module is linted with the Go toolchain its own go.mod asks for, unless
-goVersion or base says otherwise. The golangci-lint binary is taken from its
-pinned image and copied in, so the linter's release and the module's toolchain
-are chosen independently.
-
-https://dagger.io
-https://golangci-lint.run
+Lint Go modules in a workspace with golangci-lint.
 """
 type GolangciLint {
   """
-  golangci-lint release every module is linted with. Installed only when the
-  container does not already carry golangci-lint.
+  golangci-lint release every module is linted with.
   """
   version: String!
 
   """
-  Go toolchain version every module is linted with. Null when each module uses
-  the one its own go.mod asks for, and when a custom base is set.
+  Go version for every module. Null uses each module's go.mod.
   """
   goVersion: String
 
   """
-  Container to run golangci-lint in, as supplied by the caller. Null when each
-  module gets one built for its own Go toolchain.
+  Custom base image for Go containers, if set.
   """
   base: Container
 
   """
-  Settings that were given but are not in use, said once per container so they
-  show up in the progress output rather than being silently dropped.
+  Settings that were given but are ignored.
   """
   warnings: [String!]! = []
 
   """
-  Extra workspace-root include patterns mounted for every module.
+  Extra workspace files mounted for Go commands, as include patterns.
   """
   includeExtraFiles: [String!]! = []
 
   """
-  Module roots to lint ("!" excludes; see the constructor argument).
+  Module roots to lint. "!" excludes.
   """
   lint: [String!]! = ["**"]
 
   new(
     """
-    golangci-lint release every module is linted with, without the v prefix.
-    Installed only when the container does not already carry golangci-lint, so
-    a base that brings its own build keeps it.
+    golangci-lint release, without the v prefix.
     """
     version: String = null,
     """
-    Go toolchain version for every module, overriding what each module's own
-    go.mod asks for. Ignored when base is set, which supplies its own.
+    Go version for every module, overriding go.mod. Ignored when base is set.
     """
     goVersion: String = null,
     """
-    Container to run golangci-lint in. It must carry a Go toolchain, along with
-    any C/C++ dependencies the modules need; golangci-lint is installed into it
-    unless it already has one. It supplies its own toolchain, so goVersion is
-    ignored alongside it.
+    Base image for Go containers. Must include a Go toolchain.
     """
     base: Container = null,
     includeExtraFiles: [String!]! = [],
     """
-    Module roots to lint. Bare patterns select, "!"-prefixed patterns exclude,
-    and exclusions always win. With no selecting pattern, all modules are
-    selected. "**" or "*" matches all modules; "X" or "X/**" matches X and
-    modules below it. Other glob forms are not interpreted.
-    Examples: ["!docs"] selects everything except docs; ["!**"] skips all.
+    Module roots to lint, e.g. ["**", "!docs"]. "!" excludes.
     """
     lint: [String!]! = ["**"],
   ) {
@@ -125,8 +97,7 @@ type GolangciLint {
   }
 
   """
-  Return the Go module containing a workspace directory. Set findUp to false
-  when path is already a workspace-root-relative module root.
+  The Go module containing a workspace path.
   """
   module(ws: Workspace!, path: String!, findUp: Boolean! = true): GoModule! {
     goModule(lib.module(ws, path, findUp: findUp).path)
@@ -185,14 +156,16 @@ type GoModules @collection {
 }
 
 """
-A Go module rooted at a workspace-relative path, ready for golangci-lint.
+A Go module rooted at a workspace-relative path.
 """
 type GoModule {
+  """
+  Module root, relative to the workspace.
+  """
   path: String!
 
   """
-  golangci-lint release this module is linted with, installed only when the
-  container does not already carry golangci-lint.
+  golangci-lint release this module is linted with.
   """
   version: String!
 
@@ -238,17 +211,14 @@ type GoModule {
   let lib: Gomod! { gomod(includeExtraFiles: includeExtraFiles) }
 
   """
-  Whether this module falls outside the configured lint selection.
+  Whether linting is skipped for this module.
   """
   skipLint: Boolean! {
     lib.at(path).selected(lintPatterns) == false
   }
 
   """
-  Go toolchain version this module is linted with: the configured goVersion,
-  or the one its own go.mod asks for, or the fallback for a module that asks
-  for none. Null when a custom base container is set, because its toolchain is
-  whatever that container carries.
+  Go version this module is linted with. Null with a custom base.
   """
   goVersion(ws: Workspace!): String {
     if (baseImage == null) { toolchainVersion(ws) } else { null }
@@ -259,9 +229,7 @@ type GoModule {
   }
 
   """
-  Container golangci-lint runs in: this module's own Go toolchain, or the
-  caller's base, with golangci-lint on PATH -- the container's own if it has
-  one, otherwise the pinned release.
+  Go container for this module, with golangci-lint installed.
   """
   base(ws: Workspace!): Container! {
     let toolchain = if (baseImage == null) {
@@ -276,10 +244,7 @@ type GoModule {
   }
 
   """
-  Workspace patterns golangci-lint reads its configuration from.
-
-  Mounted with their directory structure intact, so golangci-lint's normal
-  configuration lookup applies.
+  Include patterns for golangci-lint configuration files.
   """
   includeConfig: [String!]! {
     [
@@ -291,30 +256,28 @@ type GoModule {
   }
 
   """
-  Source patterns discovered from Go files, go:embed directives, and transitive
-  local go.mod replacements. Test- and generate-only include directives are
-  ignored: golangci-lint type checks the code, and does not run it.
+  Include patterns found by scanning Go directives and local replaces.
   """
   includeDiscovered(ws: Workspace!): [String!]! {
     lib.at(path).includeDiscovered(ws)
   }
 
   """
-  Final workspace-root include patterns, including golangci-lint configuration.
+  All include patterns for this module's source.
   """
   include(ws: Workspace!): [String!]! {
     lib.at(path).include(ws, extra: includeConfig)
   }
 
   """
-  Workspace-shaped source directory mounted for linting this module.
+  Source mounted for this module's lint command.
   """
   source(ws: Workspace!): Directory! {
     lib.at(path).source(ws, extra: includeConfig)
   }
 
   """
-  Run golangci-lint in this module, respecting the configured selection.
+  Run golangci-lint in this module.
   """
   lint(ws: Workspace!): Void @check {
     if (skipLint == false) {
