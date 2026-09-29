@@ -107,8 +107,7 @@ $ dagger list go-tests --go-module=sdk/go --go-package=.
 $ dagger check --go --test --go-module=sdk/go --go-module=cmd/tool
 $ dagger check --go --test --go-module=sdk/go --go-test=TestConnect
 $ dagger check --go --test --go-module=sdk/go --go-package=. --go-test=TestConnect
-$ dagger check --go --build --go-binary=cmd/dagger --go-binary=cmd/engine
-$ dagger check --go --build --go-binary=cmd/dagger --go-platform=windows/amd64
+$ dagger list go-binaries --go-module=.
 $ dagger generate --go --go-module=sdk/go
 $ dagger check -l --all --go -f=cli     # one line per test, as flags to reuse
 ```
@@ -144,16 +143,17 @@ failing module by path.
 
 `binaries` lists a module's main packages by directory relative to the module
 root, e.g. `cmd/dagger`, or `.` for the root package. Each is a `GoBinary` with
-a `name`, the compiled `file` and its `platforms`. The `GoBinaries` batch
-`directory` builds the selected packages with one `go build` and holds one
-binary per package. Both are for the engine's platform.
+a `name`, its `platforms`, and `build`, which returns the compiled file. The
+`GoBinaries` batch `build` compiles the selected packages with one `go build`
+and returns a directory with one binary per package. Both build for the
+engine's platform.
 
 A binary is named as `go build` names it: after the last element of the
 package's import path, or the one before when that is a major version such as
 `v2`. The root package takes its name from the module path in `go.mod`. Keys
 are directories rather than names because names can collide: `cmd/foo` and
-`tools/foo` both build `foo`. `directory` refuses such a pair and names both
-packages; everything else builds each binary on its own and does not mind.
+`tools/foo` both build `foo`. The `GoBinaries` batch `build` refuses such a
+pair and names both packages; a single binary's `build` does not mind.
 
 A directory is a main package when one of its own non-test `.go` files says
 `package main`, so listing them runs no container. Files with an `ignore` build
@@ -175,28 +175,24 @@ never see them. Every binary in every module gets the same flags.
 #### Platforms
 
 A binary's `platforms` are keyed by `GOOS/GOARCH`, and every pair the pinned Go
-toolchain supports is a key (`gomod`'s `go-platforms`). The `build` check lives
-on each platform, and the `GoPlatforms` batch `build` replaces it:
+toolchain supports is a key (`gomod`'s `go-platforms`). Each platform's `build`
+returns the binary cross-compiled for it, in the native container with `GOOS`
+and `GOARCH` set; nothing is emulated. Windows binaries end in `.exe`.
+
+The `GoPlatforms` batch `build` returns one subdirectory per platform, e.g.
+`linux-amd64/`, `windows-amd64/`:
 
 - With no platform selected, it builds for the engine's platform only, e.g.
-  `linux/arm64`. That is what a plain `dagger check` does.
-- With platforms selected, it builds for exactly those, cross-compiled in the
-  native container with `GOOS` and `GOARCH` set. Nothing is emulated.
+  `linux/arm64`.
+- With platforms selected, it builds for exactly those.
 
 The batch tells the two apart by its delta: an unnarrowed collection means no
-platform was asked for. The same rule gives the batch `directory`, which holds
-one subdirectory per platform, e.g. `linux-amd64/`, `windows-amd64/`. Windows
-binaries end in `.exe`.
+platform was asked for. So selecting every platform explicitly looks the same
+as selecting none, and builds only the engine's. A single platform's `build`
+has no such default; it builds for its own key.
 
-Some consequences follow from every platform being a key:
-
-- `check -l -a` lists every platform for every binary, though a plain run
-  builds only one.
-- A plain run reports one result naming every platform, though only the
-  engine's was built.
-- Selecting every platform explicitly looks the same as selecting none, so it
-  builds only the engine's.
-- Per-platform `file` artifacts have no default: each is built for its own key.
+`build` returns artifacts and is not a check. A `main` package that stops compiling is
+caught by `golangci-lint` and `staticcheck`, which type-check every package.
 
 Tests and `go generate` always run natively. cgo is off when cross-compiling
 unless `base` brings a C cross-toolchain; some ports, such as `ios/*`, need

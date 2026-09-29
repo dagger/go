@@ -757,30 +757,22 @@ type GoModule {
   }
 
   """
-  Compile the given main packages with one go build, discarding the binaries,
-  and name this module when it fails.
-  """
-  let buildPackages(ws: Workspace!, platform: String!, pkgs: [String!]!): Void {
-    if (pkgs.length > 0) {
-      # go build discards what it builds for several packages, but writes a
-      # single package's binary unless told otherwise.
-      let output = if (pkgs.length == 1) { ["-o", "/dev/null"] } else { [] }
-      buildEnv(ws, platform)
-        .withExec(["go", "build"] + buildFlags + output + pkgs.map { pkg => packageArg(pkg) })
-        .sync rescue {
-        err: Error => raise "Go binaries in " + path + " for " + platform + ": " + err.message
-      }
-    }
-    null
-  }
-
-  """
   The binary for one main package, as go build names it.
   """
   let buildBinary(ws: Workspace!, platform: String!, pkg: String!, name: String!): File! {
-    buildEnv(ws, platform)
-      .withExec(["go", "build"] + buildFlags + ["-o", "/out/" + name, packageArg(pkg)])
-      .file("/out/" + name)
+    built(
+      buildEnv(ws, platform).withExec(["go", "build"] + buildFlags + ["-o", "/out/" + name, packageArg(pkg)]),
+      "Go binary " + packagePath(pkg) + " for " + platform,
+    ).file("/out/" + name)
+  }
+
+  # A build container that has run, raising its failure under a name: the
+  # engine's own message is only the exit code.
+  let built(ctr: Container!, what: String!): Container! {
+    ctr.sync rescue {
+      err: Error => raise what + ": " + err.message
+    }
+    ctr
   }
 
   """
@@ -789,7 +781,7 @@ type GoModule {
   """
   let platformBinaries(ws: Workspace!, targets: [GoPlatform!]!): Directory! {
     targets.reduce(directory) { out, target =>
-      out.withFile(target.name.split("/").join("-") + "/" + target.fileName, target.file(ws))
+      out.withFile(target.name.split("/").join("-") + "/" + target.fileName, target.build(ws))
     }
   }
 
@@ -801,9 +793,12 @@ type GoModule {
     if (pkgs.length == 0) {
       directory
     } else {
-      buildEnv(ws, platform)
-        .withExec(["go", "build"] + buildFlags + ["-o", "/out/"] + pkgs.map { pkg => packageArg(pkg) })
-        .directory("/out")
+      built(
+        buildEnv(ws, platform).withExec(
+          ["go", "build"] + buildFlags + ["-o", "/out/"] + pkgs.map { pkg => packageArg(pkg) },
+        ),
+        "Go binaries in " + path + " for " + platform,
+      ).directory("/out")
     }
   }
 }
@@ -948,9 +943,9 @@ type GoBinaries @collection {
   }
 
   """
-  The selected binaries for the engine's platform, one file each.
+  Build the selected binaries for the engine's platform, one file each.
   """
-  directory(ws: Workspace!): Directory! {
+  build(ws: Workspace!): Directory! {
     let names = packages.map { pkg => execName(pkg) }
     let clashes = packages.filter { pkg =>
       names.filter { name => name == execName(pkg) }.length > 1
@@ -981,9 +976,9 @@ type GoBinary {
   let module: GoModule!
 
   """
-  The binary compiled for the engine's platform.
+  Build this binary for the engine's platform.
   """
-  file(ws: Workspace!): File! {
+  build(ws: Workspace!): File! {
     module.buildBinary(ws, gomod.hostPlatform, package, name)
   }
 
@@ -1020,10 +1015,10 @@ type GoPlatforms @collection {
     GoPlatform(name: name, package: package, binaryName: binaryName, module: module)
   }
 
-  # The platforms a batch works on. Every platform Go supports is a key, and
+  # The platforms a batch builds for. Every platform Go supports is a key, and
   # naming none selects them all, so an unnarrowed collection means no
-  # platform was asked for: the batch then targets the engine's own. Without a
-  # delta, the keys are taken as asked for.
+  # platform was asked for: the batch then builds for the engine's own.
+  # Without a delta, the keys are taken as asked for.
   let targets: [String!]! {
     let whole = if (delta == null) {
       false
@@ -1034,25 +1029,10 @@ type GoPlatforms @collection {
   }
 
   """
-  Build this binary for the selected platforms, or the engine's when none is.
-  """
-  build(ws: Workspace!): Void @check {
-    # A selection over a list evaluates its elements concurrently.
-    let failures = targets.map { name => platform(name) }.{{name, failure: buildFailure(ws)}}
-      .filter { result => result.failure != null }
-    if (failures.length > 0) {
-      raise "Go binary " + module.path + " " + package + " failed to build:\n" + failures.map { result =>
-        "- " + result.name + ": " + (result.failure ?? "")
-      }.join("\n")
-    }
-    null
-  }
-
-  """
-  This binary for the selected platforms, or the engine's when none is, in
+  Build this binary for the selected platforms, or the engine's when none is,
   one directory per platform, e.g. "linux-arm64/".
   """
-  directory(ws: Workspace!): Directory! {
+  build(ws: Workspace!): Directory! {
     module.platformBinaries(ws, targets.map { name => platform(name) })
   }
 }
@@ -1078,24 +1058,10 @@ type GoPlatform {
   }
 
   """
-  The binary compiled for this platform.
-  """
-  file(ws: Workspace!): File! {
-    module.buildBinary(ws, name, package, fileName)
-  }
-
-  """
   Build this binary for this platform.
   """
-  build(ws: Workspace!): Void @check {
-    module.buildPackages(ws, name, [package])
-  }
-
-  # Why building for this platform failed, or null.
-  let buildFailure(ws: Workspace!): String {
-    { build(ws); null } rescue {
-      err: Error => err.message
-    }
+  build(ws: Workspace!): File! {
+    module.buildBinary(ws, name, package, fileName)
   }
 }
 

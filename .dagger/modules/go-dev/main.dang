@@ -302,8 +302,8 @@ type GoDev {
   A module's main packages form a collection keyed by package directory. The
   search skips libraries, tests, ignored generators, testdata and nested
   modules; binaries are named as go build names them; and build patterns
-  narrow the keys. Each binary's platforms build for the engine's platform
-  unless some are selected, and then for exactly those.
+  narrow the keys. A binary's platforms build for the engine's platform unless
+  some are selected, and then for exactly those.
   """
   binariesCollectionCheck(ws: Workspace!): Void @check {
     let onDisk = go(version: "1.26.1").module(ws, generatedFixturePath).binaries(ws).keys
@@ -343,22 +343,20 @@ type GoDev {
 
     let host = `${defaultPlatform}`.split("/").takeFirst(2).join("/")
     let good = bins.subset(keys: ["cmd/hello", "cmd/tool/v2", "."])
-    run(bins.get(key: "cmd/hello").platforms.batch.build(caller))
-    run(bins.get(key: "cmd/hello").platforms.get(key: host).build(caller))
-    let built = good.batch.directory(caller)
+    let built = good.batch.build(caller)
     assert(
       built.entries == ["binaries", "hello", "tool"],
       "binary directory held: " + built.entries.join(", "),
     )
     let said = mod
       .base(caller)
-      .withFile("/usr/local/bin/hello", bins.get(key: "cmd/hello").file(caller))
+      .withFile("/usr/local/bin/hello", bins.get(key: "cmd/hello").build(caller))
       .withExec(["hello"])
       .stdout
     assert(said == "hello\n", "the built binary printed: " + said)
 
     let clash = {
-      bins.subset(keys: ["cmd/hello", "tools/hello"]).batch.directory(caller).entries.join(",")
+      bins.subset(keys: ["cmd/hello", "tools/hello"]).batch.build(caller).entries.join(",")
       "no failure"
     } rescue {
       err: Error => err.message
@@ -368,12 +366,12 @@ type GoDev {
       "a name clash did not name both packages: " + clash,
     )
 
-    let broken = { run(bins.get(key: "broken").platforms.batch.build(caller)); "no failure" } rescue {
+    let broken = { bins.get(key: "broken").build(caller).size; "no failure" } rescue {
       err: Error => err.message
     }
     assert(
-      broken.contains("Go binaries in " + root + " for " + host + ":"),
-      "a failed build did not name the module and platform: " + broken,
+      broken.contains("Go binary broken for " + host + ":"),
+      "a failed build did not name the package and platform: " + broken,
     )
 
     let selected = go(version: "1.26.1", build: ["cmd/**", "!cmd/tool"]).module(
@@ -391,16 +389,15 @@ type GoDev {
       .module(caller, root, findUp: false)
       .binaries(caller)
       .subset(keys: ["cmd/stamp"])
-    run(stamped.get(key: "cmd/stamp").platforms.batch.build(caller))
     let stampedSaid = mod
       .base(caller)
-      .withFile("/usr/local/bin/stamp", stamped.get(key: "cmd/stamp").file(caller))
+      .withFile("/usr/local/bin/stamp", stamped.get(key: "cmd/stamp").build(caller))
       .withExec(["stamp"])
       .stdout
     assert(stampedSaid == "stamped\n", "buildFlags did not reach the file build: " + stampedSaid)
     let fromDirectory = mod
       .base(caller)
-      .withDirectory("/opt/bin", stamped.batch.directory(caller))
+      .withDirectory("/opt/bin", stamped.batch.build(caller))
       .withExec(["/opt/bin/stamp"])
       .stdout
     assert(fromDirectory == "stamped\n", "buildFlags did not reach the directory build: " + fromDirectory)
@@ -412,14 +409,13 @@ type GoDev {
       platforms.keys.contains("windows/amd64") and platforms.keys.contains(host),
       "platform keys were not Go's platforms: " + platforms.keys.join(", "),
     )
-    let hostOnly = platforms.batch.directory(caller).entries
+    let hostOnly = platforms.batch.build(caller).entries
     assert(
       hostOnly == [host.split("/").join("-") + "/"],
       "a run naming no platform built for: " + hostOnly.join(", "),
     )
     let cross = platforms.subset(keys: ["linux/amd64", "windows/amd64"])
-    run(cross.batch.build(caller))
-    let crossBuilt = cross.batch.directory(caller)
+    let crossBuilt = cross.batch.build(caller)
     assert(
       crossBuilt.entries == ["linux-amd64/", "windows-amd64/"],
       "a platform selection built for: " + crossBuilt.entries.join(", "),
@@ -432,7 +428,7 @@ type GoDev {
     )
     let buildInfo = mod
       .base(caller)
-      .withFile("/tmp/hello.exe", windows.file(caller))
+      .withFile("/tmp/hello.exe", windows.build(caller))
       .withExec(["go", "version", "-m", "/tmp/hello.exe"])
       .stdout
     assert(
