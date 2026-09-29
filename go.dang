@@ -402,16 +402,6 @@ type GoModule {
   }
 
   """
-  Directories in this module containing Go test files.
-  """
-  testDirectories(ws: Workspace!): [GoDirectory!]! {
-    lib
-      .at(path)
-      .testDirectories(ws)
-      .map { testPath => GoDirectory(path: testPath, ws: ws, module: self) }
-  }
-
-  """
   Built-in include patterns for this module's Go files.
   """
   includeBase: [String!]! {
@@ -485,32 +475,42 @@ type GoModule {
   }
 
   """
-  Test functions in this module, keyed by name. Empty when tests are skipped.
+  Packages in this module with test files, keyed by directory. Empty when tests
+  are skipped.
   """
-  tests(ws: Workspace!): GoTests! {
-    GoTests(names: testNames(ws), module: self)
+  packages(ws: Workspace!): GoPackages! {
+    GoPackages(
+      directories: testFiles(ws).map { file => packageDirectory(file) }.uniq,
+      module: self,
+    )
   }
 
-  # Test names are found by searching the source rather than asking go test,
-  # and without the scanner, so listing tests runs no container. Build
-  # constraints are not evaluated: a test excluded by one is still listed, and
-  # selecting it runs nothing. Files are taken in byte order, so the keys, and
-  # the -run pattern built from them, are stable.
-  let testNames(ws: Workspace!): [String!]! {
+  # This module's own test files, in byte order, or none when tests are skipped.
+  let testFiles(ws: Workspace!): [String!]! {
     let empty: [String!]! = []
-    let files = if (skipTest) { empty } else {
-      lib.at(path).ownFiles(ws, "*_test.go")
-    }
+    if (skipTest) { empty } else { lib.at(path).ownFiles(ws, "*_test.go") }
+  }
+
+  # Test, fuzz and example names in one package directory, found by searching
+  # the source rather than asking go test, and without the scanner, so listing
+  # them runs no container. Build constraints are not evaluated: a test
+  # excluded by one is still listed, and selecting it runs nothing. Files are
+  # taken in byte order, so the keys, and the -run pattern built from them, are
+  # stable.
+  let testNames(ws: Workspace!, dir: String!): [String!]! {
+    let empty: [String!]! = []
+    let files = testFiles(ws).filter { file => packageDirectory(file) == dir }
     if (files.length == 0) {
       empty
     } else {
-      # One search over the module tree, matched back to its own files below.
-      # Searching the files by name would be narrower, but fails on a
-      # workspace built with withDirectory.
+      # One search over the module tree, matched back to the package's files
+      # below. The search is the same for every package, so it runs once.
+      # Searching a subdirectory or the files by name would be narrower, but
+      # fails on a workspace built with withDirectory.
       let matches = ws.search(
         paths: [if (path == ".") { "/" } else { "/" + path }],
         globs: ["*_test.go"],
-        pattern: `^func Test([^a-z(]\w*)?\(\s*\w+\s+\*testing\.T\s*\)`,
+        pattern: `^func (Test([^a-z(]\w*)?\(\s*\w+\s+\*testing\.T\s*\)|Fuzz([^a-z(]\w*)?\(\s*\w+\s+\*testing\.F\s*\)|Example([^a-z(]\w*)?\(\s*\))`,
       ).{{filePath, matchedLines}}
       files
         .reduce(empty) { names, file =>
@@ -522,6 +522,11 @@ type GoModule {
         }
         .uniq
     }
+  }
+
+  # The workspace path of a package directory in this module.
+  let packagePath(dir: String!): String! {
+    if (dir == ".") { path } else { lib.at(path).subpath(dir) }
   }
 
   """
@@ -639,25 +644,18 @@ type GoModule {
   }
 
   """
-  Run the named tests, naming this module when they fail.
+  Run the named tests in one package, or all of them when names is empty,
+  naming the package when they fail.
   """
-  let runTests(ws: Workspace!, names: [String!]!): Void {
-    testExecMatching(ws, "^(" + names.join("|") + ")$").sync rescue {
-      err: Error => raise "Go tests in " + path + ": " + err.message
-    }
-    null
-  }
-
-  """
-  Container that has run the tests matching a -run pattern.
-  """
-  let testExecMatching(ws: Workspace!, pattern: String!): Container! {
+  let runTests(ws: Workspace!, dir: String!, names: [String!]!): Void {
+    let run = if (names.length == 0) { [] } else { ["-run", "^(" + names.join("|") + ")$"] }
     testEnv(ws)
       .withWorkdir(path)
-      .withExec(
-        ["otelgotest", "-run", pattern, "./..."],
-        experimentalPrivilegedNesting: true,
-      )
+      .withExec(["otelgotest"] + run + [packageArg(dir)], experimentalPrivilegedNesting: true)
+      .sync rescue {
+      err: Error => raise "Go tests in " + packagePath(dir) + ": " + err.message
+    }
+    null
   }
 
   """
@@ -778,11 +776,49 @@ type GoModule {
 }
 
 """
-Go test functions in a module, keyed by test name.
+Go packages with tests in a module, keyed by directory.
+"""
+type GoPackages @collection {
+  """
+  Package directories, relative to the module root.
+  """
+  directories: [String!]! @keys
+
+  let module: GoModule!
+
+  """
+  The package in this directory.
+  """
+  package(directory: String!): GoPackage! @get {
+    GoPackage(directory: directory, module: module)
+  }
+}
+
+"""
+A Go package with tests.
+"""
+type GoPackage {
+  """
+  Package directory, relative to the module root.
+  """
+  directory: String!
+
+  let module: GoModule!
+
+  """
+  Tests in this package, keyed by name.
+  """
+  tests(ws: Workspace!): GoTests! {
+    GoTests(names: module.testNames(ws, directory), directory: directory, module: module)
+  }
+}
+
+"""
+Go tests in a package, keyed by name.
 """
 type GoTests @collection {
   """
-  Test function names.
+  Test, fuzz and example function names.
   """
   names: [String!]! @keys
 
@@ -791,31 +827,33 @@ type GoTests @collection {
   """
   delta: CollectionDelta
 
+  let directory: String!
+
   let module: GoModule!
 
   """
   The test function with this name.
   """
   function(name: String!): GoTest! @get {
-    GoTest(name: name, module: module)
+    GoTest(name: name, directory: directory, module: module)
   }
 
   """
-  Run the selected tests in this module.
+  Run the selected tests in this package.
   """
   test(ws: Workspace!): Void @check {
-    # With nothing selected out, run the module's tests as a whole, examples
-    # included, rather than listing every name in a -run pattern. Without a
-    # delta, the pattern is the safe choice.
+    # With nothing selected out, run the package as a whole rather than listing
+    # every name in a -run pattern. Without a delta, the pattern is the safe
+    # choice.
     let whole = if (delta == null) {
       false
     } else {
       delta.addedKeys.length == 0 and delta.removedKeys.length == 0
     }
     if (whole) {
-      module.test(ws)
+      module.runTests(ws, directory, [])
     } else if (names.length > 0) {
-      module.runTests(ws, names)
+      module.runTests(ws, directory, names)
     }
     null
   }
@@ -830,13 +868,15 @@ type GoTest {
   """
   name: String!
 
+  let directory: String!
+
   let module: GoModule!
 
   """
   Run this test.
   """
   test(ws: Workspace!): Void @check {
-    module.runTests(ws, [name])
+    module.runTests(ws, directory, [name])
   }
 }
 
@@ -926,48 +966,6 @@ type GoBinary {
   """
   build(ws: Workspace!): Void @check {
     module.buildPackages(ws, [package])
-  }
-}
-
-"""
-A workspace directory containing Go test files.
-"""
-type GoDirectory {
-  """
-  Directory path, relative to the workspace.
-  """
-  path: String!
-
-  """
-  Workspace containing this directory.
-  """
-  let ws: Workspace!
-
-  """
-  Go module containing this directory.
-  """
-  module: GoModule!
-
-  """
-  Container that has run the Go tests in this directory.
-  """
-  let testExec: Container! {
-    module
-      .testEnv(ws)
-      .withWorkdir(path)
-      .withExec(["otelgotest"], experimentalPrivilegedNesting: true)
-  }
-
-  """
-  Run Go tests in this directory.
-  """
-  execute: Void @check {
-    if (module.skipTest == false) {
-      testExec.sync rescue {
-        err: Error => raise "Go tests in " + path + ": " + err.message
-      }
-    }
-    null
   }
 }
 

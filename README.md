@@ -57,7 +57,7 @@ within each module rather than module roots.
 | `modules`             | Modules discovered from the workspace, as a collection.       |
 | `module`              | The module containing a workspace path.                       |
 
-On a module: `test`, `generate`, `binaries`, `test-directories`, `skip-test`,
+On a module: `test`, `generate`, `packages`, `binaries`, `skip-test`,
 `skip-generate`, `has-generate-directives`, `generate-directories`, `base`,
 `include`, `include-base`, `include-discovered`, `source`, `test-data`.
 
@@ -93,15 +93,17 @@ roots it finds. `module` returns the module containing a path; pass
 `findUp: false` when the path is already a module root.
 
 `modules` is a collection keyed by module root, so it adds a `go-module`
-dimension. Each module's tests are a collection too, keyed by test function
-name, which adds `go-test`, and so are its main packages, keyed by package
-directory, which adds `go-binary`. Checks and generators select on all three,
-and a check's name is a flag too:
+dimension. Each module's packages with tests are a collection too, keyed by
+directory relative to the module root, which adds `go-package`; each package's
+tests are one keyed by function name, which adds `go-test`. A module's main
+packages, keyed the same way, add `go-binary`. Checks and generators select on
+all four, and a check's name is a flag too:
 
 ```console
-$ dagger list go-tests --go-module=sdk/go
+$ dagger list go-tests --go-module=sdk/go --go-package=.
 $ dagger check --go --test --go-module=sdk/go --go-module=cmd/tool
 $ dagger check --go --test --go-module=sdk/go --go-test=TestConnect
+$ dagger check --go --test --go-module=sdk/go --go-package=. --go-test=TestConnect
 $ dagger check --go --build --go-binary=cmd/dagger --go-binary=cmd/engine
 $ dagger generate --go --go-module=sdk/go
 $ dagger check -l --all --go -f=cli     # one line per test, as flags to reuse
@@ -113,18 +115,22 @@ too, as `golangci-lint` and `staticcheck` do, each tool's flag takes its
 qualified name: `--golangci-lint-module`, `--staticcheck-module`. `dagger check
 --help` lists the flags in effect.
 
-Tests run once per selected module, through the `GoTests` batch `test`. With
-every test selected it runs `go test ./...`, examples included; with some
-filtered out it runs `go test -run` over the selected names.
+Tests run once per selected package, through the `GoTests` batch `test`. With
+every test in the package selected it runs `go test ./pkg`; with some filtered
+out it runs `go test -run` over the selected names. A test name in two packages
+is two keys, so `--go-test` alone selects both and `--go-package` picks one.
+Collections never batch across parent items, so packages run as separate
+execs, not one `go test ./...` per module.
 
 Because discovery starts at the cwd, `dagger -W ./sdk/go check` scopes every
 tool to that module without a dimension flag.
 
-Test names come from searching the module's `_test.go` files for
-`func TestXxx(t *testing.T)`, so listing them runs no container. `TestMain`,
-`testdata` and nested modules are left out. Build constraints are not
-evaluated: a test excluded by one is still listed, and selecting it runs
-nothing. A module outside the `test` selection reports no tests.
+Test names come from searching the package's `_test.go` files for
+`func TestXxx(t *testing.T)`, `func FuzzXxx(f *testing.F)` and
+`func ExampleXxx()`, so listing them runs no container. `TestMain`, `testdata`
+and nested modules are left out. Build constraints are not evaluated: a test
+excluded by one is still listed, and selecting it runs nothing. A module
+outside the `test` selection reports no packages.
 
 `test` on a module, and the `modules` batch `test`, are plain functions rather
 than checks, so that `dagger check` does not run the same tests twice. The

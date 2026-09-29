@@ -85,12 +85,6 @@ type GoDev {
       .length > 0
   }
 
-  let containsModulePath(mods: [{{path: String!}}!]!, want: String!): Boolean! {
-    mods
-      .filter { mod => mod.path == want }
-      .length > 0
-  }
-
   """
   Module discovery returns exactly the directories holding a go.mod that is a
   Go module a tool can work on, at any depth, and nothing else. The go.mod
@@ -208,14 +202,19 @@ type GoDev {
   }
 
   """
-  A module's tests form a collection keyed by test name: a subset runs only
-  its own tests, a single test runs on its own, and a module whose tests are
-  skipped or whose sources do not build reports none.
+  A module's packages with tests form a collection keyed by directory, and
+  each package's tests a collection keyed by name: a subset runs only its own
+  tests, in its own package, and a module whose tests are skipped reports no
+  packages.
   """
   testsCollectionCheck(ws: Workspace!): Void @check {
     let modPath = "testdata/go-module-with-testdata"
     let tool = go(version: "1.26.1")
-    let tests = tool.module(ws, modPath).tests(ws)
+    let packages = tool.module(ws, modPath).packages(ws)
+    assert(packages.keys == ["."], "package discovery found: " + packages.keys.join(", "))
+    let root = packages.get(key: ".")
+    assert(root.directory == ".", "get did not return the package at its key")
+    let tests = root.tests(ws)
     let missing = [
       "TestFixtureFromTestdata",
       "TestGoTestIncludeAnnotation",
@@ -228,18 +227,18 @@ type GoDev {
     run(tests.subset(keys: [one]).batch.test(ws))
     run(tests.get(key: one).test(ws))
 
-    # A module outside the test selection offers no tests to run, so the
+    # A module outside the test selection offers no packages to run, so the
     # fixture that fails on purpose stays unrun.
     let skipped = go(version: "1.26.1", test: ["!" + noPackagesFixturePath])
       .module(ws, noPackagesFixturePath)
-      .tests(ws)
-    assert(skipped.keys.length == 0, "a skipped module offered tests: " + skipped.keys.join(", "))
-    run(skipped.batch.test(ws))
+      .packages(ws)
+    assert(skipped.keys.length == 0, "a skipped module offered packages: " + skipped.keys.join(", "))
 
-    # Names come from the source: TestMain, a lowercase suffix and the wrong
-    # signature are not tests; testdata and a nested module are not this
-    # module's; build constraints are not evaluated; a name repeated in
-    # another package is one key; and the order is stable.
+    # Names come from the source: tests, fuzz targets and examples count;
+    # TestMain, a lowercase suffix and the wrong signature do not; testdata
+    # and a nested module are not this module's; build constraints are not
+    # evaluated; a name repeated in another package is that package's own key;
+    # and the order is stable.
     let rooted = ws.withDirectory(
       "/",
       directory
@@ -251,18 +250,51 @@ type GoDev {
           func TestMain(m *testing.M) {}
           func Testify(t *testing.T) {}
           func TestHelper(n int) {}
+          func FuzzAlpha(f *testing.F) {}
+          func ExampleAlpha() {}
+          func Examplefoo() {}
         ``` + "\n")
         .withNewFile("constrained_test.go", "//go:build never\n\npackage root\nimport \"testing\"\nfunc TestConstrained(t *testing.T) {}\n")
         .withNewFile("sub/b_test.go", "package sub\nimport \"testing\"\nfunc TestBeta(t *testing.T) {}\nfunc TestAlpha(t *testing.T) {}\n")
+        .withNewFile("examples/c_test.go", "package examples\nfunc Example() {}\n")
         .withNewFile("testdata/c_test.go", "package c\nimport \"testing\"\nfunc TestIgnored(t *testing.T) {}\n")
         .withNewFile("nested/go.mod", "module example.com/nested\n\ngo 1.26.1\n")
         .withNewFile("nested/d_test.go", "package nested\nimport \"testing\"\nfunc TestNested(t *testing.T) {}\n"),
     )
-    let found = go(version: "1.26.1").module(rooted, ".", findUp: false).tests(rooted).keys
+    let found = go(version: "1.26.1").module(rooted, ".", findUp: false).packages(rooted)
+    assert(found.keys == [".", "examples", "sub"], "static package discovery found: " + found.keys.join(", "))
+    let rootNames = found.get(key: ".").tests(rooted).keys
     assert(
-      found == ["TestAlpha", "TestConstrained", "TestBeta"],
-      "static test discovery found: " + found.join(", "),
+      rootNames == ["TestAlpha", "FuzzAlpha", "ExampleAlpha", "TestConstrained"],
+      "static test discovery found: " + rootNames.join(", "),
     )
+    let subNames = found.get(key: "sub").tests(rooted).keys
+    assert(subNames == ["TestBeta", "TestAlpha"], "static test discovery in sub found: " + subNames.join(", "))
+    let exampleNames = found.get(key: "examples").tests(rooted).keys
+    assert(exampleNames == ["Example"], "an examples-only package found: " + exampleNames.join(", "))
+
+    # The same name in two packages runs only where it was selected, and a
+    # failure names the package.
+    let shared = ws.withDirectory(
+      "/",
+      directory
+        .withNewFile("go.mod", "module example.com/shared\n\ngo 1.26.1\n")
+        .withNewFile("a_test.go", "package shared\nimport \"testing\"\nfunc TestShared(t *testing.T) {}\n")
+        .withNewFile("sub/b_test.go", "package sub\nimport \"testing\"\nfunc TestShared(t *testing.T) { t.Fatal(\"ran in sub\") }\n"),
+    )
+    let sharedPackages = go(version: "1.26.1").module(shared, ".", findUp: false).packages(shared)
+    run(
+      sharedPackages.get(key: ".").tests(shared).subset(keys: ["TestShared"]).batch.test(shared),
+    )
+    let failed = {
+      run(
+        sharedPackages.get(key: "sub").tests(shared).get(key: "TestShared").test(shared),
+      )
+      "no failure"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(failed.contains("Go tests in sub:"), "a package failure did not name the package: " + failed)
     null
   }
 
@@ -593,10 +625,9 @@ type GoDev {
       "the base was discarded in favour of the ignored version",
     )
 
-    let testDirs = mod.testDirectories(ws)
     assert(
-      containsModulePath(testDirs.{{path}}, baseFixturePath),
-      "custom base test directory discovery did not include expected path",
+      mod.packages(ws).keys == ["."],
+      "custom base package discovery did not include the module root",
     )
 
     mod.test(ws)
@@ -610,34 +641,6 @@ type GoDev {
       changes.layer.file(baseGeneratedFilePath).contents.contains("GeneratedFromBase"),
       "custom base generate did not produce expected contents",
     )
-
-    null
-  }
-
-  """
-  Test directories run their own tests in the containing module's environment,
-  and are skipped when the module is.
-  """
-  testDirectoriesCheck(ws: Workspace!): Void @check {
-    let modPath = "testdata/go-module-with-testdata"
-    let dirs = go(version: "1.26.1").module(ws, modPath).testDirectories(ws)
-    assert(
-      containsModulePath(dirs.{{path}}, modPath),
-      "test directory discovery missed the module root: " + dirs.{{path}}.join(", "),
-    )
-    assert(
-      dirs.{{module.{{path}}}}.all { dir => dir.module.path == modPath },
-      "a test directory reported a different containing module",
-    )
-    let failed = dirs.{{path, execute.{{pass}}}}.filter { dir => dir.execute.pass == false }
-    assert(failed.length == 0, "test directories failed: " + failed.map { dir => dir.path }.join(", "))
-
-    # A skipped module's directories run nothing, so the failing fixture passes.
-
-    let skipped = go(version: "1.26.1", test: ["!" + noPackagesFixturePath])
-      .module(ws, noPackagesFixturePath)
-      .testDirectories(ws).{{execute.{{pass}}}}
-    assert(skipped.all { dir => dir.execute.pass }, "a skipped module's test directory ran tests")
 
     null
   }
