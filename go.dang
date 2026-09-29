@@ -1,5 +1,5 @@
 """
-Test Go modules and run go generate across a workspace.
+Test, build and run go generate on Go modules across a workspace.
 
 For lint checks, use github.com/dagger/go/golangci-lint or
 github.com/dagger/go/staticcheck.
@@ -37,6 +37,10 @@ type Go {
     """
     generate: [String!]! = ["**"],
     """
+    Main packages to build, as module-relative globs. "!" excludes.
+    """
+    build: [String!]! = ["**"],
+    """
     GOFLAGS for every Go container, e.g. "-tags=extended".
     """
     goflags: String = null,
@@ -61,6 +65,7 @@ type Go {
       self.includeExtraFiles = includeExtraFiles
       self.test = test
       self.generate = generate
+      self.build = build
       self.goflags = goflags
       self.mountPath = mountPath
       self
@@ -86,6 +91,11 @@ type Go {
   Directories to run go generate in. "!" excludes.
   """
   generate: [String!]! = ["**"]
+
+  """
+  Main packages to build, as module-relative globs. "!" excludes.
+  """
+  build: [String!]! = ["**"]
 
   """
   GOFLAGS for every Go container.
@@ -180,6 +190,7 @@ type Go {
       includeExtraFiles: includeExtraFiles,
       testPatterns: test,
       generatePatterns: generate,
+      buildPatterns: build,
       goflags: goflags,
       mountPath: mount,
     )
@@ -284,6 +295,11 @@ type GoModule {
   Workspace-root-relative globs selecting directories to run go generate in.
   """
   let generatePatterns: [String!]!
+
+  """
+  Module-relative globs selecting which main packages to build.
+  """
+  let buildPatterns: [String!]!
 
   """
   Value of the GOFLAGS environment variable in this module's Go containers.
@@ -643,6 +659,122 @@ type GoModule {
         experimentalPrivilegedNesting: true,
       )
   }
+
+  """
+  Main packages in this module, keyed by package directory.
+  """
+  binaries(ws: Workspace!): GoBinaries! {
+    GoBinaries(packages: binaryPackages(ws), importPath: importPath(ws), module: self)
+  }
+
+  # Main packages are found by searching the source, like test names, so
+  # listing them runs no container. A directory is one when one of its own
+  # non-test files says "package main" without an ignore build tag, which is
+  # how go:generate scripts are kept out of the build. Other build constraints
+  # are not evaluated: the build reports what the search got wrong.
+  let binaryPackages(ws: Workspace!): [String!]! {
+    let empty: [String!]! = []
+    let files = lib.at(path).ownFiles(ws, "*.go").filter { f => f.hasSuffix("_test.go") == false }
+    if (files.length == 0) {
+      empty
+    } else {
+      let mains = searchFiles(ws, `^package main\s*(//.*)?$`)
+      let ignored = searchFiles(ws, `^//(go:build| \+build) ignore\s*$`)
+      files
+        .filter { f => mains.contains(f) and ignored.contains(f) == false }
+        .map { f => packageDirectory(f) }
+        .uniq
+        .filter { pkg => lib.at(pkg).selected(buildPatterns) }
+    }
+  }
+
+  # Workspace-root paths of the Go files in this module's tree with a line
+  # matching pattern. The caller narrows them to the module's own files.
+  let searchFiles(ws: Workspace!, pattern: String!): [String!]! {
+    ws.search(
+      paths: [if (path == ".") { "/" } else { "/" + path }],
+      globs: ["*.go"],
+      pattern: pattern,
+      filesOnly: true,
+    ).{{filePath}}.map { match => match.filePath.trimPrefix("/").trimPrefix("./") }
+  }
+
+  # The module-relative directory of a workspace-root file path.
+  let packageDirectory(file: String!): String! {
+    let dir = file.split("/").dropLast(1).join("/")
+    if (dir == "" or dir == path) {
+      "."
+    } else if (path == ".") {
+      dir
+    } else {
+      dir.trimPrefix(path + "/")
+    }
+  }
+
+  # The module path go.mod declares. The root package's binary is named from it.
+  let importPath(ws: Workspace!): String! {
+    ws
+      .file("/" + lib.at(path).subpath("go.mod"))
+      .contents
+      .split("\n")
+      .map { line => line.replaceMatches(`//.*$`, with: "").trimSpace }
+      .filter { line => line.hasPrefix("module ") or line.hasPrefix("module\t") }
+      .map { line => line.trimPrefix("module").trimSpace.trimPrefix("\"").trimSuffix("\"") }
+      .takeFirst(1)
+      .join("")
+  }
+
+  let packageArg(pkg: String!): String! {
+    if (pkg == ".") { "." } else { "./" + pkg }
+  }
+
+  """
+  Build container with this module's source in place, working in the module.
+  """
+  let buildEnv(ws: Workspace!): Container! {
+    base(ws).withDirectory(".", source(ws)).withWorkdir(path)
+  }
+
+  """
+  Compile the given main packages with one go build, discarding the binaries,
+  and name this module when it fails.
+  """
+  let buildPackages(ws: Workspace!, pkgs: [String!]!): Void {
+    if (pkgs.length > 0) {
+      # go build discards what it builds for several packages, but writes a
+      # single package's binary unless told otherwise.
+      let output = if (pkgs.length == 1) { ["-o", "/dev/null"] } else { [] }
+      buildEnv(ws)
+        .withExec(["go", "build"] + output + pkgs.map { pkg => packageArg(pkg) })
+        .sync rescue {
+        err: Error => raise "Go binaries in " + path + ": " + err.message
+      }
+    }
+    null
+  }
+
+  """
+  The binary for one main package, as go build names it.
+  """
+  let buildBinary(ws: Workspace!, pkg: String!, name: String!): File! {
+    buildEnv(ws)
+      .withExec(["go", "build", "-o", "/out/" + name, packageArg(pkg)])
+      .file("/out/" + name)
+  }
+
+  """
+  The binaries for several main packages from one go build, each file named as
+  go build names it. The caller rules out two packages with the same name.
+  """
+  let buildBinaries(ws: Workspace!, pkgs: [String!]!): Directory! {
+    if (pkgs.length == 0) {
+      directory
+    } else {
+      buildEnv(ws)
+        .withExec(["go", "build", "-o", "/out/"] + pkgs.map { pkg => packageArg(pkg) })
+        .directory("/out")
+    }
+  }
 }
 
 """
@@ -705,6 +837,95 @@ type GoTest {
   """
   test(ws: Workspace!): Void @check {
     module.runTests(ws, [name])
+  }
+}
+
+"""
+Go main packages in a module, keyed by package directory.
+"""
+type GoBinaries @collection {
+  """
+  Package directories, relative to the module root.
+  """
+  packages: [String!]! @keys
+
+  # The module path from go.mod, held so that naming a binary needs no workspace.
+  let importPath: String!
+
+  let module: GoModule!
+
+  """
+  The main package in this directory.
+  """
+  binary(package: String!): GoBinary! @get {
+    GoBinary(package: package, name: execName(package), module: module)
+  }
+
+  # The name go build gives a package's binary: the last element of its import
+  # path, or the one before when that is a major version such as "v2".
+  let execName(pkg: String!): String! {
+    let full = if (pkg == ".") { importPath } else { importPath + "/" + pkg }
+    let elements = full.split("/")
+    let last = elements.takeLast(1).join("")
+    if (elements.length > 1 and last.replaceMatches(`^v([2-9]|[1-9][0-9]+)$`, with: "") == "") {
+      elements.dropLast(1).takeLast(1).join("")
+    } else {
+      last
+    }
+  }
+
+  """
+  Build the selected binaries in this module.
+  """
+  build(ws: Workspace!): Void @check {
+    module.buildPackages(ws, packages)
+  }
+
+  """
+  The selected binaries, one file each, named as go build names them.
+  """
+  directory(ws: Workspace!): Directory! {
+    let names = packages.map { pkg => execName(pkg) }
+    let clashes = packages.filter { pkg =>
+      names.filter { name => name == execName(pkg) }.length > 1
+    }
+    if (clashes.length > 0) {
+      raise "Go binaries in " + module.path + " share a name: " + clashes.map { pkg =>
+        pkg + " builds " + execName(pkg)
+      }.join(", ")
+    }
+    module.buildBinaries(ws, packages)
+  }
+}
+
+"""
+A Go main package and the binary it builds.
+"""
+type GoBinary {
+  """
+  Package directory, relative to the module root.
+  """
+  package: String!
+
+  """
+  Binary file name, as go build names it.
+  """
+  name: String!
+
+  let module: GoModule!
+
+  """
+  The compiled binary.
+  """
+  file(ws: Workspace!): File! {
+    module.buildBinary(ws, package, name)
+  }
+
+  """
+  Build this binary.
+  """
+  build(ws: Workspace!): Void @check {
+    module.buildPackages(ws, [package])
   }
 }
 

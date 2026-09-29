@@ -74,6 +74,11 @@ type GoDev {
     null
   }
 
+  # A main package that prints message.
+  let goMain(message: String!): String! {
+    "package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(\"" + message + "\") }\n"
+  }
+
   let containsPath(paths: [String!]!, want: String!): Boolean! {
     paths
       .filter { path => path == want }
@@ -258,6 +263,98 @@ type GoDev {
       found == ["TestAlpha", "TestConstrained", "TestBeta"],
       "static test discovery found: " + found.join(", "),
     )
+    null
+  }
+
+  """
+  A module's main packages form a collection keyed by package directory. The
+  search skips libraries, tests, ignored generators, testdata and nested
+  modules; binaries are named as go build names them; a batch builds only its
+  own packages; and build patterns narrow the keys.
+  """
+  binariesCollectionCheck(ws: Workspace!): Void @check {
+    let onDisk = go(version: "1.26.1").module(ws, generatedFixturePath).binaries(ws).keys
+    assert(onDisk == ["cmd/writegenerated"], "binary discovery on disk found: " + onDisk.join(", "))
+
+    # Rooted at the workspace root, as in testsCollectionCheck: a search below
+    # the root reads the host checkout rather than the overlay.
+    let root = "."
+    let caller = ws.withDirectory(
+      "/",
+      directory
+        .withNewFile("go.mod", "module example.com/binaries\n\ngo 1.26.1\n")
+        .withNewFile("main.go", goMain("root"))
+        .withNewFile("cmd/hello/main.go", goMain("hello"))
+        .withNewFile("cmd/hello/main_test.go", "package main\n")
+        .withNewFile("cmd/tool/v2/main.go", goMain("tool"))
+        .withNewFile("tools/hello/main.go", goMain("tools hello"))
+        .withNewFile("broken/main.go", "package main\n\nfunc main() { undefined() }\n")
+        .withNewFile("lib/lib.go", "package lib\n")
+        .withNewFile("testonly/main_test.go", "package main\n")
+        .withNewFile("gen/gen.go", "//go:build ignore\n\npackage main\n\nfunc main() {}\n")
+        .withNewFile("testdata/fixture/main.go", "package main\n\nfunc main() {}\n")
+        .withNewFile("_skip/main.go", "package main\n\nfunc main() {}\n")
+        .withNewFile("nested/go.mod", "module example.com/nested\n\ngo 1.26.1\n")
+        .withNewFile("nested/main.go", "package main\n\nfunc main() {}\n"),
+    )
+    let mod = go(version: "1.26.1").module(caller, root, findUp: false)
+    let bins = mod.binaries(caller)
+    assert(
+      bins.keys == ["broken", "cmd/hello", "cmd/tool/v2", ".", "tools/hello"],
+      "binary discovery found: " + bins.keys.join(", "),
+    )
+    assert(bins.get(key: ".").name == "binaries", "the root package was not named from its module path")
+    assert(bins.get(key: "cmd/tool/v2").name == "tool", "a major version element named the binary")
+    assert(bins.get(key: "cmd/hello").name == "hello", "a package was not named by its directory")
+
+    let good = bins.subset(keys: ["cmd/hello", "cmd/tool/v2", "."])
+    run(good.batch.build(caller))
+    run(bins.get(key: "cmd/hello").build(caller))
+    let built = good.batch.directory(caller)
+    assert(
+      built.entries == ["binaries", "hello", "tool"],
+      "binary directory held: " + built.entries.join(", "),
+    )
+    let said = mod
+      .base(caller)
+      .withFile("/usr/local/bin/hello", bins.get(key: "cmd/hello").file(caller))
+      .withExec(["hello"])
+      .stdout
+    assert(said == "hello\n", "the built binary printed: " + said)
+
+    let clash = {
+      bins.subset(keys: ["cmd/hello", "tools/hello"]).batch.directory(caller).entries.join(",")
+      "no failure"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(
+      clash.contains("cmd/hello") and clash.contains("tools/hello"),
+      "a name clash did not name both packages: " + clash,
+    )
+
+    let broken = {
+      run(
+        bins.subset(keys: ["broken", "cmd/hello"]).batch.build(caller),
+      )
+      "no failure"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(
+      broken.contains("Go binaries in " + root + ":"),
+      "a failed build did not name the module: " + broken,
+    )
+
+    let selected = go(version: "1.26.1", build: ["cmd/**", "!cmd/tool"]).module(
+      caller,
+      root,
+      findUp: false,
+    ).binaries(caller).keys
+    assert(selected == ["cmd/hello"], "build patterns selected: " + selected.join(", "))
+    let none = go(version: "1.26.1", build: ["!**"]).module(caller, root, findUp: false).binaries(caller)
+    assert(none.keys.length == 0, "an empty build selection kept: " + none.keys.join(", "))
+    run(none.batch.build(caller))
     null
   }
 

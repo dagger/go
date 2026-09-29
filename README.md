@@ -10,7 +10,7 @@ that supplier and do not share its release dates, so they are their own modules
 
 ```
 github.com/dagger/go
-├── go.dang           the main module, at the root: test, generate
+├── go.dang           the main module, at the root: test, build, generate
 ├── gomod/            the shared library. No checks.
 ├── golangci-lint/    lint
 ├── staticcheck/      lint
@@ -22,7 +22,7 @@ github.com/dagger/go
 `go` is the root module, so its address is the repository:
 
 ```sh
-dagger install github.com/dagger/go              # test, generate
+dagger install github.com/dagger/go              # test, build, generate
 dagger install github.com/dagger/go/golangci-lint
 dagger install github.com/dagger/go/staticcheck
 ```
@@ -44,7 +44,9 @@ lint = ["**", "!docs"]
 A bare pattern selects, a `"!"`-prefixed pattern excludes, and an exclude wins
 whatever the order. `docs` means `docs` and every module below it; `**` and `*`
 mean all of them; `["!**"]` means none. Other glob shapes are not interpreted.
-`go` spells its two as `test` and `generate` rather than `lint`.
+`go` spells its two as `test` and `generate` rather than `lint`. Its `build`
+setting uses the same rules, but selects main packages by their directory
+within each module rather than module roots.
 
 ## The modules
 
@@ -55,7 +57,7 @@ mean all of them; `["!**"]` means none. Other glob shapes are not interpreted.
 | `modules`             | Modules discovered from the workspace, as a collection.       |
 | `module`              | The module containing a workspace path.                       |
 
-On a module: `test`, `generate`, `test-directories`, `skip-test`,
+On a module: `test`, `generate`, `binaries`, `test-directories`, `skip-test`,
 `skip-generate`, `has-generate-directives`, `generate-directories`, `base`,
 `include`, `include-base`, `include-discovered`, `source`, `test-data`.
 
@@ -68,6 +70,7 @@ On a module: `test`, `generate`, `test-directories`, `skip-test`,
 | `includeExtraFiles`   | Extra workspace files to mount, as include patterns.          |
 | `test`                | Module roots to test (see [Scoping](#scoping)).               |
 | `generate`            | Directories to run `go generate` in (see below).              |
+| `build`               | Main packages to build, by module-relative directory.         |
 | `goflags`             | `GOFLAGS` in every Go container.                              |
 | `mountPath`           | Where the workspace is mounted in Go containers.              |
 
@@ -91,13 +94,15 @@ roots it finds. `module` returns the module containing a path; pass
 
 `modules` is a collection keyed by module root, so it adds a `go-module`
 dimension. Each module's tests are a collection too, keyed by test function
-name, which adds `go-test`. Checks and generators select on both, and a
-check's name is a flag too:
+name, which adds `go-test`, and so are its main packages, keyed by package
+directory, which adds `go-binary`. Checks and generators select on all three,
+and a check's name is a flag too:
 
 ```console
 $ dagger list go-tests --go-module=sdk/go
 $ dagger check --go --test --go-module=sdk/go --go-module=cmd/tool
 $ dagger check --go --test --go-module=sdk/go --go-test=TestConnect
+$ dagger check --go --build --go-binary=cmd/dagger --go-binary=cmd/engine
 $ dagger generate --go --go-module=sdk/go
 $ dagger check -l --all --go -f=cli     # one line per test, as flags to reuse
 ```
@@ -125,6 +130,37 @@ nothing. A module outside the `test` selection reports no tests.
 than checks, so that `dagger check` does not run the same tests twice. The
 batch `test` runs every selected module even after one fails, then lists each
 failing module by path.
+
+#### Binaries
+
+`binaries` lists a module's main packages by directory relative to the module
+root, e.g. `cmd/dagger`, or `.` for the root package. Each is a `GoBinary` with
+a `name`, a `build` check and the compiled `file`. The `GoBinaries` batch
+`build` compiles the selected packages with one `go build`, so shared
+dependencies compile once, and its `directory` holds one binary per package.
+A failed build names the module.
+
+A binary is named as `go build` names it: after the last element of the
+package's import path, or the one before when that is a major version such as
+`v2`. The root package takes its name from the module path in `go.mod`. Keys
+are directories rather than names because names can collide: `cmd/foo` and
+`tools/foo` both build `foo`. `directory` refuses such a pair and names both
+packages; `build` and `file` do not mind.
+
+A directory is a main package when one of its own non-test `.go` files says
+`package main`, so listing them runs no container. Files with an `ignore` build
+tag, usually `go generate` scripts, are left out, as are `testdata`, nested
+modules and names starting with `.` or `_`. Other build constraints are not
+evaluated: a package whose files are all for another platform is listed, and
+building it fails.
+
+`build` selects packages by module-relative directory with the
+[Scoping](#scoping) rules, and applies in every module: `["cmd/**",
+"!cmd/internal"]` keeps `cmd` and its subdirectories except `cmd/internal`. A
+module none of whose packages is selected has no binaries.
+
+Binaries are built for the engine's platform. `GOOS` and `GOARCH` are not a
+dimension yet.
 
 #### Generate
 
