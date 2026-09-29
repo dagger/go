@@ -1,0 +1,5 @@
+version: "2"
+# above.go leaves an error unchecked, so it passes only under this file.
+linters:
+  disable:
+    - errcheck

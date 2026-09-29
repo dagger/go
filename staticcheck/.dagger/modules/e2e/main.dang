@@ -6,6 +6,12 @@ on purpose -- a lint diagnostic, a failing test -- and the repository's shared
 fixture trees are the ones `go`'s batch test runs.
 """
 type E2e {
+  let testdataPath: String! = "staticcheck/testdata"
+  let cleanPath: String! = "staticcheck/testdata/clean"
+  let configuredPath: String! = "staticcheck/testdata/configured"
+  let failPath: String! = "staticcheck/testdata/lint-fail"
+  let testFailPath: String! = "staticcheck/testdata/test-fail"
+
   let assert(condition: Boolean!, message: String!): Void {
     if (condition == false) { raise message }
     null
@@ -25,73 +31,81 @@ type E2e {
   }
 
   """
-  Discovery finds every module root, snaps a lookup to its enclosing
-  module, and keeps its paths workspace-root-relative from any cwd.
+  Discovery roots a project at each staticcheck.conf that covers Go code,
+  snaps a lookup to its enclosing project, and keeps its paths
+  workspace-root-relative from any cwd.
   """
   discoveryCheck(ws: Workspace!): Void @check {
     let tool = staticcheck
-    let paths = tool.modules(ws).keys
-    assert(paths.contains("staticcheck/testdata/clean"), "missing clean module")
-    assert(paths.contains("staticcheck/testdata/clean/nested"), "missing nested module")
-    assert(paths.contains(".") == false, "invented a root module")
-    let below = tool.modules(ws.withWorkdir("staticcheck/testdata/clean")).keys
-    assert(below.length == 2, "discovery from a module root escaped its subtree")
-    let inside = ws.withWorkdir("staticcheck/testdata/clean/assets")
+    let paths = tool.projects(ws).keys
+    assert(paths.contains(testdataPath), "missing the project above the clean modules")
+    assert(paths.contains(configuredPath), "missing the project above its module")
+    assert(paths.contains(failPath), "missing the failing project")
+    assert(paths.contains(cleanPath) == false, "a module without configuration became a project")
+    assert(paths.contains(".") == false, "invented a root project")
+
+    let covered = tool.project(ws, testdataPath).modules(ws)
+    assert(covered.contains(cleanPath), "missing clean module")
+    assert(covered.contains(cleanPath + "/nested"), "missing nested module")
+    assert(covered.contains(configuredPath + "/project") == false, "a module claimed by its own configuration was linted twice")
+    assert(covered.contains(failPath) == false, "a failing project leaked into its parent")
+    let configured = tool.project(ws, configuredPath).modules(ws)
     assert(
-      tool.modules(inside).keys.contains("staticcheck/testdata/clean"),
-      "discovery inside a module missed its enclosing root",
+      configured.length == 1 and configured.contains(configuredPath + "/project"),
+      "a configuration above its module did not cover it",
     )
-    run(tool.modules(inside).batch.lint(inside))
+
+    let below = tool.projects(ws.withWorkdir(cleanPath)).keys
+    assert(below.length == 1 and below.contains(testdataPath), "discovery inside a project missed its enclosing root")
+    let inside = ws.withWorkdir(cleanPath + "/assets")
+    run(tool.projects(inside).batch.lint(inside))
     assert(
-      tool.module(ws, "staticcheck/testdata/clean/assets").path == "staticcheck/testdata/clean",
+      tool.project(ws, cleanPath + "/assets").path == testdataPath,
+      "lookup did not resolve the enclosing project",
+    )
+    assert(
+      tool.module(ws, cleanPath + "/assets").path == cleanPath,
       "lookup did not resolve the enclosing module",
     )
     let missing = {
-      tool.module(ws, ".").path
+      tool.project(ws, ".").path
     } rescue {
       err: Error => err.message
     }
-    assert(missing.contains("no Go module found"), "missing module did not fail clearly")
+    assert(missing.contains("no project found"), "missing project did not fail clearly")
     null
   }
 
   """
-  The batch check over the clean fixture modules passes, and a subset checks
+  The batch check over the clean fixture projects passes, and a subset checks
   only its own keys.
   """
   batchCheck(ws: Workspace!): Void @check {
     run(
-      staticcheck(lint: [
-        "staticcheck/testdata/clean",
-        "staticcheck/testdata/configured",
-        "staticcheck/testdata/replaced",
-        "staticcheck/testdata/cgo",
-      ]).modules(ws).batch.lint(ws),
+      staticcheck(lint: [testdataPath, "!" + failPath, "!" + testFailPath]).projects(ws).batch.lint(ws),
     )
 
     # The failing fixtures are in the collection but outside the subset.
-    let mods = staticcheck.modules(ws)
-    assert(mods.keys.contains("staticcheck/testdata/lint-fail"), "failing fixture was not discovered")
-    run(
-      mods.subset(keys: ["staticcheck/testdata/clean", "staticcheck/testdata/replaced"]).batch.lint(ws),
-    )
+    let projects = staticcheck.projects(ws)
+    assert(projects.keys.contains(failPath), "failing fixture was not discovered")
+    run(projects.subset(keys: [testdataPath, configuredPath]).batch.lint(ws))
     null
   }
 
   """
-  A diagnostic fails the module's own check and the batch alike, including
+  A diagnostic fails the project's own check and the batch alike, including
   one found in a test file.
   """
   lintFailureCheck(ws: Workspace!): Void @check {
     let failure = {
-      run(staticcheck.module(ws, "staticcheck/testdata/lint-fail").lint(ws))
+      run(staticcheck.project(ws, failPath).lint(ws))
       "unexpected success"
     } rescue {
       err: Error => err.message
     }
     assert(failure.contains("exit code"), "Staticcheck did not reject the broken source: " + failure)
     let testFailure = {
-      run(staticcheck.module(ws, "staticcheck/testdata/test-fail").lint(ws))
+      run(staticcheck.project(ws, testFailPath).lint(ws))
       "unexpected success"
     } rescue {
       err: Error => err.message
@@ -99,13 +113,13 @@ type E2e {
     assert(testFailure.contains("exit code"), "Staticcheck did not analyze test files: " + testFailure)
     let batchFailure = {
       run(
-        staticcheck.modules(ws).subset(keys: ["staticcheck/testdata/clean", "staticcheck/testdata/lint-fail"]).batch.lint(ws),
+        staticcheck.projects(ws).subset(keys: [configuredPath, failPath]).batch.lint(ws),
       )
       "unexpected success"
     } rescue {
       err: Error => err.message
     }
-    assert(batchFailure.contains("exit code"), "batch lint did not propagate a module failure: " + batchFailure)
+    assert(batchFailure.contains("exit code"), "batch lint did not propagate a project failure: " + batchFailure)
     null
   }
 
@@ -114,39 +128,39 @@ type E2e {
   older beta engines deliver, and an exclude always wins.
   """
   selectionCheck(ws: Workspace!): Void @check {
-    let excluded = staticcheck(lint: ["!staticcheck/testdata/lint-fail", "staticcheck/testdata/**"])
-    assert(excluded.module(ws, "staticcheck/testdata/lint-fail").skipLint, "exclusion did not win")
+    let excluded = staticcheck(lint: ["!" + failPath, testdataPath + "/**"])
+    assert(excluded.project(ws, failPath).skipLint, "exclusion did not win")
     assert(
-      excluded.module(ws, "staticcheck/testdata/clean/nested").skipLint == false,
-      "subtree selector missed nested module",
+      excluded.project(ws, configuredPath).skipLint == false,
+      "subtree selector missed nested project",
     )
-    let excludeOnly = staticcheck(lint: ["!staticcheck/testdata/lint-fail", "!staticcheck/testdata/test-fail"])
+    let excludeOnly = staticcheck(lint: ["!" + failPath, "!" + testFailPath])
     assert(
-      excludeOnly.module(ws, "staticcheck/testdata/clean").skipLint == false,
-      "exclude-only selection excluded clean module",
+      excludeOnly.project(ws, testdataPath).skipLint == false,
+      "exclude-only selection excluded clean project",
     )
     assert(
-      excludeOnly.modules(ws, includeSkipped: false).keys.contains("staticcheck/testdata/lint-fail") == false,
-      "filtered discovery included excluded module",
+      excludeOnly.projects(ws, includeSkipped: false).keys.contains(failPath) == false,
+      "filtered discovery included excluded project",
     )
-    run(excluded.module(ws, "staticcheck/testdata/lint-fail").lint(ws))
-    run(staticcheck(lint: ["!**"]).modules(ws).batch.lint(ws))
+    run(excluded.project(ws, failPath).lint(ws))
+    run(staticcheck(lint: ["!**"]).projects(ws).batch.lint(ws))
     run(
-      staticcheck(lint: ["[\"!staticcheck/testdata/lint-fail\"", "\"!staticcheck/testdata/test-fail\"]"])
-        .module(ws, "staticcheck/testdata/lint-fail")
+      staticcheck(lint: ["[\"!" + failPath + "\"", "\"!" + testFailPath + "\"]"])
+        .project(ws, failPath)
         .lint(ws),
     )
     assert(
-      staticcheck(lint: []).module(ws, "staticcheck/testdata/clean").skipLint == false,
+      staticcheck(lint: []).project(ws, testdataPath).skipLint == false,
       "empty selectors did not select all",
     )
     assert(
-      staticcheck(lint: ["staticcheck/testdata/clean"]).module(
+      staticcheck(lint: [configuredPath]).project(
         ws,
-        "staticcheck/testdata/cleaner",
+        configuredPath + "-other",
         findUp: false,
       ).skipLint,
-      "path prefix crossed module boundary",
+      "path prefix crossed project boundary",
     )
     null
   }
@@ -175,7 +189,11 @@ type E2e {
       src.glob("staticcheck/testdata/clean/nested/assets/**").length == 0,
       "nested module embed leaked into parent source",
     )
-    run(mod.lint(ws))
+    run(
+      staticcheck(includeExtraFiles: ["staticcheck/testdata/extra.txt"])
+        .project(ws, "staticcheck/testdata/replaced")
+        .lint(ws),
+    )
     null
   }
 
@@ -208,7 +226,7 @@ type E2e {
       pinned.base(ws).withExec(["go", "version"]).stdout.contains("go1.26"),
       "goVersion did not reach the container",
     )
-    run(pinned.lint(ws))
+    run(staticcheck(goVersion: "1.26").project(ws, configuredPath).lint(ws))
     null
   }
 
@@ -233,7 +251,7 @@ type E2e {
       mod.base(ws).withExec(["sh", "-c", "command -v staticcheck"]).stdout.contains("/usr/local/bin/staticcheck"),
       "a base without Staticcheck did not get the configured release",
     )
-    run(mod.lint(ws))
+    run(tool.project(ws, configuredPath).lint(ws))
 
     # A base that brings its own build keeps it: a future instrumented build
     # is installed this way, and installing over it would throw it away.
@@ -244,7 +262,7 @@ type E2e {
     )
     let failure = {
       run(
-        staticcheck(base: own).module(ws, "staticcheck/testdata/clean").lint(ws),
+        staticcheck(base: own).project(ws, configuredPath).lint(ws),
       )
       "unexpected success"
     } rescue {
@@ -254,7 +272,7 @@ type E2e {
 
     # version says what to install, so it composes with base.
     run(
-      staticcheck(version: "v0.8.1", base: plain).module(ws, "staticcheck/testdata/clean").lint(ws),
+      staticcheck(version: "v0.8.1", base: plain).project(ws, configuredPath).lint(ws),
     )
 
     # goVersion is ignored rather than refused: the base already carries a
@@ -273,7 +291,7 @@ type E2e {
       ignoredMod.base(ws).withExec(["go", "version"]).stdout.contains("go1.26"),
       "the ignored goVersion reached the container anyway",
     )
-    run(ignoredMod.lint(ws))
+    run(ignored.project(ws, configuredPath).lint(ws))
     null
   }
 }
