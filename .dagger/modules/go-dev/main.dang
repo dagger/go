@@ -301,8 +301,9 @@ type GoDev {
   """
   A module's main packages form a collection keyed by package directory. The
   search skips libraries, tests, ignored generators, testdata and nested
-  modules; binaries are named as go build names them; a batch builds only its
-  own packages; and build patterns narrow the keys.
+  modules; binaries are named as go build names them; and build patterns
+  narrow the keys. Each binary's platforms build for the engine's platform
+  unless some are selected, and then for exactly those.
   """
   binariesCollectionCheck(ws: Workspace!): Void @check {
     let onDisk = go(version: "1.26.1").module(ws, generatedFixturePath).binaries(ws).keys
@@ -318,6 +319,7 @@ type GoDev {
         .withNewFile("main.go", goMain("root"))
         .withNewFile("cmd/hello/main.go", goMain("hello"))
         .withNewFile("cmd/hello/main_test.go", "package main\n")
+        .withNewFile("cmd/stamp/main.go", "package main\n\nimport \"fmt\"\n\nvar message = \"unstamped\"\n\nfunc main() { fmt.Println(message) }\n")
         .withNewFile("cmd/tool/v2/main.go", goMain("tool"))
         .withNewFile("tools/hello/main.go", goMain("tools hello"))
         .withNewFile("broken/main.go", "package main\n\nfunc main() { undefined() }\n")
@@ -332,16 +334,17 @@ type GoDev {
     let mod = go(version: "1.26.1").module(caller, root, findUp: false)
     let bins = mod.binaries(caller)
     assert(
-      bins.keys == ["broken", "cmd/hello", "cmd/tool/v2", ".", "tools/hello"],
+      bins.keys == ["broken", "cmd/hello", "cmd/stamp", "cmd/tool/v2", ".", "tools/hello"],
       "binary discovery found: " + bins.keys.join(", "),
     )
     assert(bins.get(key: ".").name == "binaries", "the root package was not named from its module path")
     assert(bins.get(key: "cmd/tool/v2").name == "tool", "a major version element named the binary")
     assert(bins.get(key: "cmd/hello").name == "hello", "a package was not named by its directory")
 
+    let host = `${defaultPlatform}`.split("/").takeFirst(2).join("/")
     let good = bins.subset(keys: ["cmd/hello", "cmd/tool/v2", "."])
-    run(good.batch.build(caller))
-    run(bins.get(key: "cmd/hello").build(caller))
+    run(bins.get(key: "cmd/hello").platforms.batch.build(caller))
+    run(bins.get(key: "cmd/hello").platforms.get(key: host).build(caller))
     let built = good.batch.directory(caller)
     assert(
       built.entries == ["binaries", "hello", "tool"],
@@ -365,17 +368,12 @@ type GoDev {
       "a name clash did not name both packages: " + clash,
     )
 
-    let broken = {
-      run(
-        bins.subset(keys: ["broken", "cmd/hello"]).batch.build(caller),
-      )
-      "no failure"
-    } rescue {
+    let broken = { run(bins.get(key: "broken").platforms.batch.build(caller)); "no failure" } rescue {
       err: Error => err.message
     }
     assert(
-      broken.contains("Go binaries in " + root + ":"),
-      "a failed build did not name the module: " + broken,
+      broken.contains("Go binaries in " + root + " for " + host + ":"),
+      "a failed build did not name the module and platform: " + broken,
     )
 
     let selected = go(version: "1.26.1", build: ["cmd/**", "!cmd/tool"]).module(
@@ -383,10 +381,64 @@ type GoDev {
       root,
       findUp: false,
     ).binaries(caller).keys
-    assert(selected == ["cmd/hello"], "build patterns selected: " + selected.join(", "))
+    assert(selected == ["cmd/hello", "cmd/stamp"], "build patterns selected: " + selected.join(", "))
     let none = go(version: "1.26.1", build: ["!**"]).module(caller, root, findUp: false).binaries(caller)
     assert(none.keys.length == 0, "an empty build selection kept: " + none.keys.join(", "))
-    run(none.batch.build(caller))
+
+    # buildFlags reach go build as separate arguments, so a value may hold
+    # spaces, which GOFLAGS cannot carry.
+    let stamped = go(version: "1.26.1", buildFlags: ["-trimpath", "-ldflags=-s -w -X main.message=stamped"])
+      .module(caller, root, findUp: false)
+      .binaries(caller)
+      .subset(keys: ["cmd/stamp"])
+    run(stamped.get(key: "cmd/stamp").platforms.batch.build(caller))
+    let stampedSaid = mod
+      .base(caller)
+      .withFile("/usr/local/bin/stamp", stamped.get(key: "cmd/stamp").file(caller))
+      .withExec(["stamp"])
+      .stdout
+    assert(stampedSaid == "stamped\n", "buildFlags did not reach the file build: " + stampedSaid)
+    let fromDirectory = mod
+      .base(caller)
+      .withDirectory("/opt/bin", stamped.batch.directory(caller))
+      .withExec(["/opt/bin/stamp"])
+      .stdout
+    assert(fromDirectory == "stamped\n", "buildFlags did not reach the directory build: " + fromDirectory)
+
+    # Every platform Go supports is a key. Naming none builds for the engine's
+    # platform alone; naming some builds exactly those, cross-compiled.
+    let platforms = bins.get(key: "cmd/hello").platforms
+    assert(
+      platforms.keys.contains("windows/amd64") and platforms.keys.contains(host),
+      "platform keys were not Go's platforms: " + platforms.keys.join(", "),
+    )
+    let hostOnly = platforms.batch.directory(caller).entries
+    assert(
+      hostOnly == [host.split("/").join("-") + "/"],
+      "a run naming no platform built for: " + hostOnly.join(", "),
+    )
+    let cross = platforms.subset(keys: ["linux/amd64", "windows/amd64"])
+    run(cross.batch.build(caller))
+    let crossBuilt = cross.batch.directory(caller)
+    assert(
+      crossBuilt.entries == ["linux-amd64/", "windows-amd64/"],
+      "a platform selection built for: " + crossBuilt.entries.join(", "),
+    )
+    let windows = cross.get(key: "windows/amd64")
+    assert(windows.fileName == "hello.exe", "a Windows binary was named " + windows.fileName)
+    assert(
+      crossBuilt.file("windows-amd64/hello.exe").size > 0,
+      "the directory did not hold the Windows binary under its .exe name",
+    )
+    let buildInfo = mod
+      .base(caller)
+      .withFile("/tmp/hello.exe", windows.file(caller))
+      .withExec(["go", "version", "-m", "/tmp/hello.exe"])
+      .stdout
+    assert(
+      buildInfo.contains("GOOS=windows") and buildInfo.contains("GOARCH=amd64"),
+      "the Windows binary was not cross-compiled: " + buildInfo,
+    )
     null
   }
 

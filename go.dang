@@ -41,6 +41,10 @@ type Go {
     """
     build: [String!]! = ["**"],
     """
+    Extra flags for go build only, e.g. ["-trimpath", "-ldflags=-s -w"].
+    """
+    buildFlags: [String!]! = [],
+    """
     GOFLAGS for every Go container, e.g. "-tags=extended".
     """
     goflags: String = null,
@@ -66,6 +70,7 @@ type Go {
       self.test = test
       self.generate = generate
       self.build = build
+      self.buildFlags = buildFlags
       self.goflags = goflags
       self.mountPath = mountPath
       self
@@ -96,6 +101,11 @@ type Go {
   Main packages to build, as module-relative globs. "!" excludes.
   """
   build: [String!]! = ["**"]
+
+  """
+  Extra flags for go build only.
+  """
+  buildFlags: [String!]! = []
 
   """
   GOFLAGS for every Go container.
@@ -191,6 +201,7 @@ type Go {
       testPatterns: test,
       generatePatterns: generate,
       buildPatterns: build,
+      buildFlags: buildFlags,
       goflags: goflags,
       mountPath: mount,
     )
@@ -300,6 +311,11 @@ type GoModule {
   Module-relative globs selecting which main packages to build.
   """
   let buildPatterns: [String!]!
+
+  """
+  Extra flags for go build, after the build subcommand and before the packages.
+  """
+  let buildFlags: [String!]!
 
   """
   Value of the GOFLAGS environment variable in this module's Go containers.
@@ -727,25 +743,32 @@ type GoModule {
   }
 
   """
-  Build container with this module's source in place, working in the module.
+  Build container with this module's source in place, working in the module,
+  targeting a GOOS/GOARCH platform. The container itself stays native: Go
+  cross-compiles, so nothing is emulated.
   """
-  let buildEnv(ws: Workspace!): Container! {
-    base(ws).withDirectory(".", source(ws)).withWorkdir(path)
+  let buildEnv(ws: Workspace!, platform: String!): Container! {
+    let target = platform.split("/")
+    base(ws)
+      .withEnvVariable("GOOS", target.takeFirst(1).join(""))
+      .withEnvVariable("GOARCH", target.takeLast(1).join(""))
+      .withDirectory(".", source(ws))
+      .withWorkdir(path)
   }
 
   """
   Compile the given main packages with one go build, discarding the binaries,
   and name this module when it fails.
   """
-  let buildPackages(ws: Workspace!, pkgs: [String!]!): Void {
+  let buildPackages(ws: Workspace!, platform: String!, pkgs: [String!]!): Void {
     if (pkgs.length > 0) {
       # go build discards what it builds for several packages, but writes a
       # single package's binary unless told otherwise.
       let output = if (pkgs.length == 1) { ["-o", "/dev/null"] } else { [] }
-      buildEnv(ws)
-        .withExec(["go", "build"] + output + pkgs.map { pkg => packageArg(pkg) })
+      buildEnv(ws, platform)
+        .withExec(["go", "build"] + buildFlags + output + pkgs.map { pkg => packageArg(pkg) })
         .sync rescue {
-        err: Error => raise "Go binaries in " + path + ": " + err.message
+        err: Error => raise "Go binaries in " + path + " for " + platform + ": " + err.message
       }
     }
     null
@@ -754,22 +777,32 @@ type GoModule {
   """
   The binary for one main package, as go build names it.
   """
-  let buildBinary(ws: Workspace!, pkg: String!, name: String!): File! {
-    buildEnv(ws)
-      .withExec(["go", "build", "-o", "/out/" + name, packageArg(pkg)])
+  let buildBinary(ws: Workspace!, platform: String!, pkg: String!, name: String!): File! {
+    buildEnv(ws, platform)
+      .withExec(["go", "build"] + buildFlags + ["-o", "/out/" + name, packageArg(pkg)])
       .file("/out/" + name)
+  }
+
+  """
+  One directory per platform, e.g. "linux-arm64/", each holding that
+  platform's binary.
+  """
+  let platformBinaries(ws: Workspace!, targets: [GoPlatform!]!): Directory! {
+    targets.reduce(directory) { out, target =>
+      out.withFile(target.name.split("/").join("-") + "/" + target.fileName, target.file(ws))
+    }
   }
 
   """
   The binaries for several main packages from one go build, each file named as
   go build names it. The caller rules out two packages with the same name.
   """
-  let buildBinaries(ws: Workspace!, pkgs: [String!]!): Directory! {
+  let buildBinaries(ws: Workspace!, platform: String!, pkgs: [String!]!): Directory! {
     if (pkgs.length == 0) {
       directory
     } else {
-      buildEnv(ws)
-        .withExec(["go", "build", "-o", "/out/"] + pkgs.map { pkg => packageArg(pkg) })
+      buildEnv(ws, platform)
+        .withExec(["go", "build"] + buildFlags + ["-o", "/out/"] + pkgs.map { pkg => packageArg(pkg) })
         .directory("/out")
     }
   }
@@ -915,14 +948,7 @@ type GoBinaries @collection {
   }
 
   """
-  Build the selected binaries in this module.
-  """
-  build(ws: Workspace!): Void @check {
-    module.buildPackages(ws, packages)
-  }
-
-  """
-  The selected binaries, one file each, named as go build names them.
+  The selected binaries for the engine's platform, one file each.
   """
   directory(ws: Workspace!): Directory! {
     let names = packages.map { pkg => execName(pkg) }
@@ -934,7 +960,7 @@ type GoBinaries @collection {
         pkg + " builds " + execName(pkg)
       }.join(", ")
     }
-    module.buildBinaries(ws, packages)
+    module.buildBinaries(ws, gomod.hostPlatform, packages)
   }
 }
 
@@ -955,17 +981,121 @@ type GoBinary {
   let module: GoModule!
 
   """
-  The compiled binary.
+  The binary compiled for the engine's platform.
   """
   file(ws: Workspace!): File! {
-    module.buildBinary(ws, package, name)
+    module.buildBinary(ws, gomod.hostPlatform, package, name)
   }
 
   """
-  Build this binary.
+  Platforms this binary can be built for, keyed by GOOS/GOARCH.
+  """
+  platforms: GoPlatforms! {
+    GoPlatforms(names: gomod.goPlatforms, package: package, binaryName: name, module: module)
+  }
+}
+
+"""
+Platforms a Go binary can be built for, keyed by GOOS/GOARCH.
+"""
+type GoPlatforms @collection {
+  """
+  GOOS/GOARCH pairs, e.g. "linux/arm64".
+  """
+  names: [String!]! @keys
+
+  """
+  Platforms selected in or out since the collection was discovered.
+  """
+  delta: CollectionDelta
+
+  let package: String!
+  let binaryName: String!
+  let module: GoModule!
+
+  """
+  The platform with this GOOS/GOARCH.
+  """
+  platform(name: String!): GoPlatform! @get {
+    GoPlatform(name: name, package: package, binaryName: binaryName, module: module)
+  }
+
+  # The platforms a batch works on. Every platform Go supports is a key, and
+  # naming none selects them all, so an unnarrowed collection means no
+  # platform was asked for: the batch then targets the engine's own. Without a
+  # delta, the keys are taken as asked for.
+  let targets: [String!]! {
+    let whole = if (delta == null) {
+      false
+    } else {
+      delta.addedKeys.length == 0 and delta.removedKeys.length == 0
+    }
+    if (whole) { names.filter { name => name == gomod.hostPlatform } } else { names }
+  }
+
+  """
+  Build this binary for the selected platforms, or the engine's when none is.
   """
   build(ws: Workspace!): Void @check {
-    module.buildPackages(ws, [package])
+    # A selection over a list evaluates its elements concurrently.
+    let failures = targets.map { name => platform(name) }.{{name, failure: buildFailure(ws)}}
+      .filter { result => result.failure != null }
+    if (failures.length > 0) {
+      raise "Go binary " + module.path + " " + package + " failed to build:\n" + failures.map { result =>
+        "- " + result.name + ": " + (result.failure ?? "")
+      }.join("\n")
+    }
+    null
+  }
+
+  """
+  This binary for the selected platforms, or the engine's when none is, in
+  one directory per platform, e.g. "linux-arm64/".
+  """
+  directory(ws: Workspace!): Directory! {
+    module.platformBinaries(ws, targets.map { name => platform(name) })
+  }
+}
+
+"""
+A platform a Go binary can be built for.
+"""
+type GoPlatform {
+  """
+  GOOS/GOARCH, e.g. "linux/arm64".
+  """
+  name: String!
+
+  let package: String!
+  let binaryName: String!
+  let module: GoModule!
+
+  """
+  Binary file name for this platform: ".exe" is added for Windows.
+  """
+  fileName: String! {
+    if (name.hasPrefix("windows/")) { binaryName + ".exe" } else { binaryName }
+  }
+
+  """
+  The binary compiled for this platform.
+  """
+  file(ws: Workspace!): File! {
+    module.buildBinary(ws, name, package, fileName)
+  }
+
+  """
+  Build this binary for this platform.
+  """
+  build(ws: Workspace!): Void @check {
+    module.buildPackages(ws, name, [package])
+  }
+
+  # Why building for this platform failed, or null.
+  let buildFailure(ws: Workspace!): String {
+    { build(ws); null } rescue {
+      err: Error => err.message
+    }
   }
 }
 
