@@ -236,6 +236,13 @@ container; when it changes, workspace files carry over so later commands still
 see earlier output. Without the directive, the directory uses the module's own
 base container.
 
+Tests can select a container for each test package with `//go:test:container`.
+It uses the same workspace container addresses and image references. All Go
+files in one package must agree. Packages run in lexical order when any test
+package selects a container. Consecutive packages with the same value share
+container state; changes carry workspace files forward. Packages without the
+directive use the module's configured base.
+
 A package's own `generate` fails when the scan could not read its module,
 naming the file, while the batch `generate` skips that module (see below).
 

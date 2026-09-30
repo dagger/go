@@ -1176,6 +1176,198 @@ type GoDev {
       .withServiceBinding("generator-input", service)
   }
 
+  """
+  Test container with a mounted file and service for Go tests.
+  """
+  testEnv: Container! {
+    let service = container
+      .from("busybox:1.37.0")
+      .withExposedPort(8080)
+      .withNewFile("/www/value", "test service retained\n")
+      .asService(args: ["httpd", "-f", "-p", "8080", "-h", "/www"])
+    container
+      .from("golang:1.26.1-alpine")
+      .withEnvVariable("TESTER_BASE", "workspace")
+      .withNewFile("/tester-config", "mounted\n")
+      .withServiceBinding("tester-input", service)
+  }
+
+  """
+  Test package containers resolve from the workspace and carry test inputs.
+  Consecutive package directories share container state; container changes keep
+  workspace files so later tests can read earlier output.
+  """
+  testContainerCheck(ws: Workspace!): Void @check {
+    let root = "fixtures/test-containers"
+    let fixture = directory
+      .withNewFile("go.mod", "module example.com/test-containers\n\ngo 1.26.1\n")
+      .withNewFile("input.txt", "included test input\n")
+      .withNewFile("selected_test.go", ```go
+        package fixture
+        import (
+          "io"
+          "net/http"
+          "os"
+          "testing"
+        )
+        //go:test:container dag://go-dev/test-env
+        //go:test:include input.txt
+        func TestSelectedContainer(t *testing.T) {
+          if os.Getenv("TESTER_BASE") != "workspace" || os.Getenv("GOFLAGS") != "-tags=testcontainer" { t.Fatal("selected container lost its environment") }
+          if os.Getenv("GOCACHE") != "/root/.cache/go-build" || os.Getenv("GOMODCACHE") != "/go/pkg/mod" { t.Fatal("selected container lost Go caches") }
+          config, err := os.ReadFile("/tester-config")
+          if err != nil || string(config) != "mounted\n" { t.Fatalf("selected container lost mounted file: %q, %v", config, err) }
+          input, err := os.ReadFile("input.txt")
+          if err != nil || string(input) != "included test input\n" { t.Fatalf("test include was not mounted: %q, %v", input, err) }
+          response, err := http.Get("http://tester-input:8080/value")
+          if err != nil { t.Fatal(err) }
+          defer response.Body.Close()
+          body, err := io.ReadAll(response.Body)
+          if err != nil || string(body) != "test service retained\n" { t.Fatalf("selected container lost service: %q, %v", body, err) }
+          if err := os.WriteFile("root-output.txt", []byte("root output\n"), 0644); err != nil { t.Fatal(err) }
+          if err := os.WriteFile("/container-test-state", []byte("shared\n"), 0644); err != nil { t.Fatal(err) }
+        }
+      ``` + "\n")
+      .withNewFile("0-shared/shared_test.go", ```go
+        package shared
+        import (
+          "os"
+          "testing"
+        )
+        //go:test:container dag://go-dev/test-env
+        func TestSharedContainer(t *testing.T) {
+          state, err := os.ReadFile("/container-test-state")
+          if err != nil || string(state) != "shared\n" { t.Fatalf("consecutive packages did not share state: %q, %v", state, err) }
+          output, err := os.ReadFile("../root-output.txt")
+          if err != nil || string(output) != "root output\n" { t.Fatalf("consecutive packages lost workspace output: %q, %v", output, err) }
+        }
+      ``` + "\n")
+      .withNewFile("a-default/default_test.go", ```go
+        package defaultbase
+        import (
+          "os"
+          "testing"
+        )
+        func TestDefaultContainer(t *testing.T) {
+          if os.Getenv("TESTER_BASE") != "default" || os.Getenv("GOFLAGS") != "-tags=testcontainer" { t.Fatal("package did not use configured base") }
+          if _, err := os.Stat("/tester-config"); !os.IsNotExist(err) { t.Fatal("workspace test container leaked into default base") }
+          output, err := os.ReadFile("../root-output.txt")
+          if err != nil || string(output) != "root output\n" { t.Fatalf("container change lost workspace output: %q, %v", output, err) }
+        }
+      ``` + "\n")
+      .withNewFile("b-image/image_test.go", ```go
+        package image
+        import (
+          "os"
+          "testing"
+        )
+        //go:test:container docker.io/library/golang:1.26.1-alpine
+        func TestImageContainer(t *testing.T) {
+          if os.Getenv("TESTER_BASE") != "" || os.Getenv("GOFLAGS") != "-tags=testcontainer" { t.Fatal("image did not use the selected container") }
+          if _, err := os.Stat("/tester-config"); !os.IsNotExist(err) { t.Fatal("workspace test container leaked into image") }
+          output, err := os.ReadFile("../root-output.txt")
+          if err != nil || string(output) != "root output\n" { t.Fatalf("image change lost workspace output: %q, %v", output, err) }
+        }
+      ``` + "\n")
+      .withNewFile("c-wired/wired_test.go", ```go
+        package wired
+        import (
+          "io"
+          "net/http"
+          "os"
+          "testing"
+        )
+        //go:test:container dag://go-dev/test-env
+        func TestWiredContainer(t *testing.T) {
+          if os.Getenv("TESTER_BASE") != "workspace" { t.Fatal("workspace test container did not resolve") }
+          response, err := http.Get("http://tester-input:8080/value")
+          if err != nil { t.Fatal(err) }
+          defer response.Body.Close()
+          body, err := io.ReadAll(response.Body)
+          if err != nil || string(body) != "test service retained\n" { t.Fatalf("workspace service binding was lost: %q, %v", body, err) }
+          output, err := os.ReadFile("../root-output.txt")
+          if err != nil || string(output) != "root output\n" { t.Fatalf("container change lost workspace output: %q, %v", output, err) }
+        }
+      ``` + "\n")
+    let caller = ws.withDirectory(root, fixture)
+    let module = go(
+      base: container.from("golang:1.26.1-alpine").withEnvVariable(
+        "TESTER_BASE",
+        "default",
+      ),
+      test: [root],
+      goflags: "-tags=testcontainer",
+    ).module(caller, root, findUp: false)
+    let failure = {
+      module.test(caller)
+      ""
+    } rescue {
+      err: Error => err.message
+    }
+    assert(failure == "", "test container directive failed: " + failure)
+    let selectedRoot = "testdata/go-module-test-container"
+    run(
+      go(version: "1.26.1", test: [selectedRoot])
+        .module(ws, selectedRoot, findUp: false)
+        .packages(ws)
+        .get(key: ".")
+        .tests(ws)
+        .get(key: "TestSelectedContainer")
+        .test(ws),
+    )
+    null
+  }
+
+  """
+  Missing artifacts, wrong artifact types and conflicting test container
+  directives report their cause.
+  """
+  testContainerErrorsCheck(ws: Workspace!): Void @check {
+    let root = "fixtures/test-container-errors"
+    let fixture = directory
+      .withNewFile("go.mod", "module example.com/test-container-errors\n\ngo 1.26.1\n")
+      .withNewFile("main_test.go", "package fixture\nimport \"testing\"\n//go:test:container dag://go-dev/test-env\nfunc TestValue(t *testing.T) {}\n")
+      .withNewFile("conflict_test.go", "package fixture\n//go:test:container docker.io/library/golang:1.26.1-alpine\n")
+    let conflictModule = go(version: "1.26.1", test: [root]).module(
+      ws.withDirectory(root, fixture),
+      root,
+      findUp: false,
+    )
+    let conflict = {
+      conflictModule.test(ws.withDirectory(root, fixture))
+      "unexpected success"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(
+      conflict.contains("conflicting //go:test:container values") and conflict.contains(root),
+      "test container conflict was not named: " + conflict,
+    )
+
+    ["dag://missing-module/container", "dag://go-dev/container-directory"].map { value =>
+      let caller = ws.withDirectory(
+        root,
+        fixture
+          .withoutFile("conflict_test.go")
+          .withNewFile("main_test.go", "package fixture\nimport \"testing\"\n//go:test:container " + value + "\nfunc TestValue(t *testing.T) {}\n"),
+      )
+      let module = go(version: "1.26.1", test: [root]).module(caller, root, findUp: false)
+      let failure = {
+        module.test(caller)
+        "unexpected success"
+      } rescue {
+        err: Error => err.message
+      }
+      assert(failure != "unexpected success" and failure.contains(value), "test container resolution error was not reported: " + failure)
+      if (value == "dag://go-dev/container-directory") {
+        assert(failure.contains("artifact is a Directory, not a Container"), "wrong test artifact type was not reported: " + failure)
+      } else {
+        assert(failure.contains("no artifact matches"), "missing test artifact was not reported: " + failure)
+      }
+    }
+    null
+  }
+
   containerDirectory: Directory! { directory }
 
   """

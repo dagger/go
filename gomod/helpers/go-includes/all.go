@@ -18,7 +18,7 @@ import (
 func runAll(cliArgs []string) error {
 	flags := flag.NewFlagSet("go-includes --all", flag.ExitOnError)
 	flags.Bool("all", false, "compute includes for every module")
-	test := flags.Bool("test", false, "also follow //go:test:include directives")
+	test := flags.Bool("test", false, "also follow //go:test:include and //go:test:container directives")
 	generate := flags.Bool("generate", false, "also follow //go:generate:include directives and go:generate go -C modules")
 	root := flags.String("root", ".", "workspace root to scan")
 	outputDir := flags.String("output-dir", "", "directory to write one file of include patterns per module to")
@@ -84,6 +84,13 @@ func (index *localIndex) writeAllDir(dir string, test, generate bool) error {
 			// empty string so a reader never has to tell absent from empty.
 			for _, generateDir := range scan.generateDirs {
 				files[moduleOutputFile(generateDir, ".generatecontainer")] = scan.generateContainers[generateDir]
+			}
+		}
+		if test {
+			// Write an empty value too: every test package has either its
+			// selected container or the default module container.
+			for _, testDir := range scan.testDirs {
+				files[moduleOutputFile(testDir, ".testcontainer")] = scan.testContainers[testDir]
 			}
 		}
 		for name, contents := range files {
@@ -219,6 +226,7 @@ type moduleScan struct {
 	testDirs           []string
 	generateDirs       []string
 	generateContainers map[string]string
+	testContainers     map[string]string
 	failure            string
 }
 
@@ -241,11 +249,19 @@ func (index *localIndex) scanModule(moduleRoot string, test, generate bool) modu
 			return moduleScan{failure: err.Error() + "\n"}
 		}
 	}
+	var testContainers map[string]string
+	if test {
+		testContainers, err = index.testContainersFor(moduleRoot)
+		if err != nil {
+			return moduleScan{failure: err.Error() + "\n"}
+		}
+	}
 	return moduleScan{
 		includes:           includes,
 		testDirs:           index.testDirectoriesFor(moduleRoot),
 		generateDirs:       generateDirs,
 		generateContainers: generateContainers,
+		testContainers:     testContainers,
 	}
 }
 

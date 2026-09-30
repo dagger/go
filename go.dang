@@ -897,8 +897,15 @@ type GoModule {
   place, before any test command runs.
   """
   let testEnv(ws: Workspace!): Container! {
+    testEnvWithBase(ws, base(ws))
+  }
+
+  """
+  Test container with this module's inputs and otelgotest, on a selected base.
+  """
+  let testEnvWithBase(ws: Workspace!, selectedBase: Container!): Container! {
     gomod
-      .withTool(base(ws), "otelgotest", testRunner)
+      .withTool(selectedBase, "otelgotest", testRunner)
       .withDirectory(".", source(ws, test: true))
       .withDirectory(".", testData(ws))
       # Nested Dagger clients find the workspace boundary by walking up to .git.
@@ -909,9 +916,80 @@ type GoModule {
   Container that has run this module's tests.
   """
   let testExec(ws: Workspace!): Container! {
-    testEnv(ws)
-      .withWorkdir(path)
-      .withExec(["otelgotest", "./..."], experimentalPrivilegedNesting: true)
+    let dirs = lib.at(path).testDirectories(ws).map { dir =>
+      if (path == ".") { dir } else if (dir == path) { "." } else {
+        dir.trimPrefix(path + "/")
+      }
+    }
+    let selected = dirs.map { dir => testContainer(ws, dir) }
+    if (selected.any { value => value != "" }) {
+      dirs.reduce(GoTesting(container: base(ws), value: "", initialized: false)) { state, dir =>
+        let value = testContainer(ws, dir)
+        let ctr = if (state.initialized and value == state.value) {
+          state.container
+        } else {
+          let selectedBase = if (value == "") {
+            base(ws)
+          } else {
+            prepareBase(
+              gomod.withGoCaches(ws.resolve(value).container.withoutEntrypoint),
+            )
+          }
+          let fresh = testEnvWithBase(ws, selectedBase)
+          if (state.initialized) {
+            fresh.withDirectory(mountPath, state.container.directory(mountPath))
+          } else {
+            fresh
+          }
+        }
+        GoTesting(
+          value: value,
+          container: runTestDirectory(ws, ctr, dir),
+          initialized: true,
+        )
+      }.container
+    } else {
+      testEnv(ws)
+        .withWorkdir(path)
+        .withExec(["otelgotest", "./..."], experimentalPrivilegedNesting: true)
+    }
+  }
+
+  """
+  Container value selected by a test directory, or empty for the module base.
+  """
+  let testContainer(ws: Workspace!, dir: String!): String! {
+    lib.at(path).testContainer(ws, packagePath(dir))
+  }
+
+  """
+  Run one package's tests in the selected container.
+  """
+  let runTestDirectory(ws: Workspace!, ctr: Container!, dir: String!): Container! {
+    let after = ctr
+      .withWorkdir(mountPath + "/" + path)
+      .withExec(["otelgotest", packageArg(dir)], experimentalPrivilegedNesting: true)
+    after.sync rescue {
+      err: Error => raise "Go tests in " + packagePath(dir) + ": " + err.message
+    }
+    after.withWorkdir(mountPath + "/" + path)
+  }
+
+  """
+  Test container selected by one package, with module source mounted.
+  """
+  let testEnvForDirectory(ws: Workspace!, dir: String!): Container! {
+    let value = testContainer(ws, dir)
+    if (value == "") {
+      testEnv(ws)
+    } else {
+      testEnvWithBase(
+        ws,
+        prepareBase(
+          gomod.withGoCaches(ws.resolve(value).container.withoutEntrypoint),
+        ),
+      )
+    }
   }
 
   """
@@ -920,7 +998,7 @@ type GoModule {
   """
   let runTests(ws: Workspace!, dir: String!, names: [String!]!): Void {
     let run = if (names.length == 0) { [] } else { ["-run", "^(" + names.join("|") + ")$"] }
-    testEnv(ws)
+    testEnvForDirectory(ws, dir)
       .withWorkdir(path)
       .withExec(["otelgotest"] + run + [packageArg(dir)], experimentalPrivilegedNesting: true)
       .sync rescue {
@@ -1173,4 +1251,11 @@ type GoTest {
 type GoGeneration {
   let container: Container!
   let value: String!
+}
+
+# Carry test container state across adjacent package directories.
+type GoTesting {
+  let container: Container!
+  let value: String!
+  let initialized: Boolean!
 }

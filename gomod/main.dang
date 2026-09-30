@@ -647,8 +647,8 @@ type GoMod {
   and local go.mod replaces reachable from this module's include graph.
 
   With neither flag, only go:embed directives and local replaces are followed.
-  `test` also follows go:test:include, `generate` also follows
-  go:generate:include and the modules that go:generate `go -C` reaches.
+  `test` also follows go:test:include and go:test:container, `generate` also
+  follows go:generate:include and the modules that go:generate `go -C` reaches.
   """
   includeDiscovered(
     ws: Workspace!,
@@ -677,6 +677,18 @@ type GoMod {
   """
   testDirectories(ws: Workspace!): [String!]! {
     scanFile(ws, true, false, ".testdirs")
+  }
+
+  """
+  The container a test directory asks for with //go:test:container, or "" when
+  it asks for none. The caller resolves the value against its own workspace.
+  """
+  testContainer(ws: Workspace!, directory: String!): String! {
+    gomod
+      .scan(ws, test: true)
+      .file(stemFor(directory) + ".testcontainer")
+      .contents
+      .trimSpace
   }
 
   """
