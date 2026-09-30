@@ -13,14 +13,18 @@ entrypoint = true
 # Each tool's suite is installed under a <tool>-checks key, so one `dagger
 # check` runs all four and prefixes each check with the tool it belongs to.
 # The key is what prefixes; "e2e" would kebab-case into "e-2-e".
+#
+# The "./" is required. A source that holds a "." but does not start with one
+# may be a hostname to Dagger, so it is not rewritten into the repository when
+# the workspace is loaded from git, as in CI, and fails to load there.
 [modules.gomod-checks]
-source = "gomod/.dagger/modules/e2e"
+source = "./gomod/.dagger/modules/e2e"
 
 [modules.golangci-lint-checks]
-source = "golangci-lint/.dagger/modules/e2e"
+source = "./golangci-lint/.dagger/modules/e2e"
 
 [modules.staticcheck-checks]
-source = "staticcheck/.dagger/modules/e2e"
+source = "./staticcheck/.dagger/modules/e2e"
 
 [sdks.dang]
 module = "dang-sdk"
