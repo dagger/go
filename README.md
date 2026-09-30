@@ -229,8 +229,8 @@ generators need a different order.
 
 A directory can pick the container its generators run in with
 `//go:generate:container`, resolved with the caller's `Workspace.resolve` — a
-workspace container by name, such as `generate-env`, or an image reference such
-as `docker.io/library/golang:1.26.1-alpine`. Conflicting values in one
+workspace container address, such as `dag://example/generate-env`, or an image
+reference such as `docker.io/library/golang:1.26.1-alpine`. Conflicting values in one
 directory are errors. Consecutive directories naming the same one share a
 container; when it changes, workspace files carry over so later commands still
 see earlier output. Without the directive, the directory uses the module's own
@@ -451,21 +451,20 @@ One command runs all four suites:
 dagger check
 ```
 
-The root `dagger.toml` installs `go`'s suite as the entrypoint and each other
-suite under a `<tool>-checks` key, which prefixes its checks. Every module needs
-v1.0.0-beta.15 or later, the first release with collections and the
-`Workspace.resolve` that `//go:generate:container` uses.
-
-One suite, or one check, at a time:
+Use Dagger v1.0.0-beta.15. All suites run directly on the released engine.
+Run one suite or check while iterating:
 
 ```sh
-dagger check -m .dagger/modules/go-dev            # the root go module
-dagger check -m gomod/.dagger/modules/e2e         # the shared library
-dagger check -m golangci-lint/.dagger/modules/e2e
-dagger check -m staticcheck/.dagger/modules/e2e
+dagger check "dag://go-dev/**"                  # the root go module
+dagger check "dag://gomod-checks/**"            # the shared library
+dagger check "dag://golangci-lint-checks/**"
+dagger check "dag://staticcheck-checks/**"
 
-dagger check -m gomod/.dagger/modules/e2e scan-check   # or one check by name
+dagger check dag://gomod-checks/scan-check       # or one check by name
 ```
+
+`dagger shell playground` opens a container with an example repository at
+`/example`; run `dagger generate` there to try the container directive.
 
 `testdata/` and `fixtures/` hold the modules the suites run against. Several of
 them fail on purpose — a failing test, a lint diagnostic, a module with no

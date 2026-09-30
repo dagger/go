@@ -26,23 +26,25 @@ non-root type and because the type is that tool's public API.
 
 When changing a module, always make sure the tests are up to date.
 
-To run tests: `dagger check` runs all four suites, because each is installed in
-the root `dagger.toml`, with go-dev as the entrypoint. Every module needs
-v1.0.0-beta.15 or later.
+To run tests: use Dagger v1.0.0-beta.15. `dagger check` runs all four suites
+directly. No dev engine build is needed.
 
 One suite, or one check, at a time:
 
 ```sh
-dagger check -m .dagger/modules/go-dev            # the root go module
-dagger check -m gomod/.dagger/modules/e2e         # the shared library
-dagger check -m golangci-lint/.dagger/modules/e2e
-dagger check -m staticcheck/.dagger/modules/e2e
+dagger check "dag://go-dev/**"                  # the root go module
+dagger check "dag://gomod-checks/**"            # the shared library
+dagger check "dag://golangci-lint-checks/**"
+dagger check "dag://staticcheck-checks/**"
 
-dagger check gomod-checks:scan-check
+dagger check dag://gomod-checks/scan-check
 ```
 
 A new suite is installed under a `<tool>-checks` key: the key is what prefixes
 its checks, and `e2e` would kebab-case into `e-2-e`.
+
+To try the container directive: `dagger shell playground`
+The shell starts in `/example`. Run `dagger generate` there.
 
 To format: `dang fmt -w go.dang gomod/main.dang golangci-lint/main.dang
 staticcheck/main.dang .dagger/modules/go-dev/main.dang
