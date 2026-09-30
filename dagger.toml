@@ -6,9 +6,21 @@
 [modules.dang-sdk]
 source = "github.com/dagger/dang-sdk@collections"
 
-[modules.engine-e2e]
-source = ".dagger/modules/engine-e2e"
+[modules.go-dev]
+source = ".dagger/modules/go-dev"
 entrypoint = true
+
+# Each tool's suite is installed under a <tool>-checks key, so one `dagger
+# check` runs all four and prefixes each check with the tool it belongs to.
+# The key is what prefixes; "e2e" would kebab-case into "e-2-e".
+[modules.gomod-checks]
+source = "gomod/.dagger/modules/e2e"
+
+[modules.golangci-lint-checks]
+source = "golangci-lint/.dagger/modules/e2e"
+
+[modules.staticcheck-checks]
+source = "staticcheck/.dagger/modules/e2e"
 
 [sdks.dang]
 module = "dang-sdk"
@@ -16,6 +28,7 @@ module = "dang-sdk"
 [sdks.dang.scopes."."]
 is-module = true
 name = "go"
+clients = ["./gomod"]
 
 [sdks.dang.scopes."gomod"]
 is-module = true
@@ -24,19 +37,24 @@ name = "gomod"
 [sdks.dang.scopes."gomod/.dagger/modules/e2e"]
 is-module = true
 name = "e2e"
+clients = ["./gomod"]
 
 [sdks.dang.scopes."golangci-lint"]
 is-module = true
 name = "golangci-lint"
+clients = ["./gomod"]
 
 [sdks.dang.scopes."golangci-lint/.dagger/modules/e2e"]
 is-module = true
 name = "e2e"
+clients = ["./golangci-lint"]
 
 [sdks.dang.scopes."staticcheck"]
 is-module = true
 name = "staticcheck"
+clients = ["./gomod"]
 
 [sdks.dang.scopes."staticcheck/.dagger/modules/e2e"]
 is-module = true
 name = "e2e"
+clients = ["./staticcheck"]

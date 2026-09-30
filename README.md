@@ -443,25 +443,21 @@ One command runs all four suites:
 dagger check
 ```
 
-That builds a dev engine from dagger/dagger and runs them inside it, because
-`//go:generate:container` needs `Workspace.resolve`, which no released engine
-has yet. The engine commit is pinned in `.dagger/modules/engine-e2e/`, and the
-suites it runs are listed in that module's `workspace.toml`.
+The root `dagger.toml` installs `go`'s suite as the entrypoint and each other
+suite under a `<tool>-checks` key, which prefixes its checks. Every module needs
+v1.0.0-beta.15 or later, the first release with collections and the
+`Workspace.resolve` that `//go:generate:container` uses.
 
-Every module needs v1.0.0-beta.15 or later for collections; until that is
-released, use a dev engine build. The three suites that do not need the pinned
-dev engine also run against one directly, which is far quicker while iterating:
+One suite, or one check, at a time:
 
 ```sh
+dagger check -m .dagger/modules/go-dev            # the root go module
 dagger check -m gomod/.dagger/modules/e2e         # the shared library
 dagger check -m golangci-lint/.dagger/modules/e2e
 dagger check -m staticcheck/.dagger/modules/e2e
 
 dagger check -m gomod/.dagger/modules/e2e scan-check   # or one check by name
 ```
-
-`dagger shell playground` opens the dev engine with an example repository at
-`/example`; run `dagger generate` there to try the container directive.
 
 `testdata/` and `fixtures/` hold the modules the suites run against. Several of
 them fail on purpose — a failing test, a lint diagnostic, a module with no
