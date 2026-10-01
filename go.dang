@@ -157,7 +157,7 @@ type Go {
   let lib: Gomod! { gomod(includeExtraFiles: includeExtraFiles) }
 
   """
-  Go modules at or below the working directory, keyed by module root.
+  Go modules at or below the working directory.
   """
   modules(
     ws: Workspace!,
@@ -165,19 +165,44 @@ type Go {
     exclude: [String!]! = [],
     includeSkipTest: Boolean! = true,
     includeSkipGenerate: Boolean! = true,
-  ): GoModules! {
-    GoModules(
-      paths: lib
-        .modules(ws, include: include, exclude: exclude).{{path}}
-        .map { found => goModule(ws, found.path) }
-        .filter { mod =>
-          (includeSkipTest or mod.skipTest == false)
-            and (includeSkipGenerate or mod.skipGenerate(ws) == false)
-        }
-        .map { mod => mod.path },
+  ): [GoModule!]! {
+    # A list rather than a collection: modules decide how a package is mounted
+    # and which toolchain it gets, but they are not something to select.
+    lib
+      .modules(ws, include: include, exclude: exclude).{{path}}
+      .map { found => goModule(ws, found.path) }
+      .filter { mod =>
+        (includeSkipTest or mod.skipTest == false)
+          and (includeSkipGenerate or mod.skipGenerate(ws) == false)
+      }
+  }
+
+  """
+  Go packages at or below the working directory, keyed by directory.
+  """
+  packages(ws: Workspace!): GoPackages! {
+    let empty: [String!]! = []
+    GoPackages(
+      paths: sorted(
+        modules(ws).reduce(empty) { all, mod => all + mod.packagePaths(ws) },
+      ),
       mountPath: workspaceMountPath(ws),
       tool: self,
     )
+  }
+
+  # The module holding a package. A package holds no module of its own, so
+  # that the collection needs no workspace.
+  let packageModule(ws: Workspace!, pkgPath: String!, mount: String!): GoModule! {
+    goModuleAt(lib.module(ws, pkgPath).path, mount)
+  }
+
+  # Byte-order sort, as Go's sort.Strings.
+  let sorted(items: [String!]!): [String!]! {
+    let empty: [String!]! = []
+    items.reduce(empty) { acc, item =>
+      acc.takeWhile { x => x <= item } + [item] + acc.dropWhile { x => x <= item }
+    }
   }
 
   """
@@ -213,65 +238,229 @@ type Go {
 # See dagger/dagger#13476.
 
 """
-Go modules in a workspace, keyed by module root.
+Go packages in a workspace, keyed by directory.
 """
-type GoModules @collection {
+type GoPackages @collection {
   """
-  Module root paths.
+  Package directories, relative to the workspace.
   """
   paths: [String!]! @keys
 
   # Held instead of the workspace, which would stop the collection caching.
   let mountPath: String!
 
-  """
-  Settings every module is built with.
-  """
   let tool: Go!
 
   """
-  The Go module rooted at path.
+  The package in this directory.
   """
-  module(path: String!): GoModule! @get {
-    tool.goModuleAt(path, mountPath)
+  package(path: String!): GoPackage! @get {
+    GoPackage(path: path, mountPath: mountPath, tool: tool)
+  }
+
+  # The modules holding the selected packages, each once.
+  let modules(ws: Workspace!): [GoModule!]! {
+    paths
+      .map { p => tool.lib.module(ws, p).path }
+      .uniq
+      .map { modPath => tool.goModuleAt(modPath, mountPath) }
+  }
+
+  # The selected packages in one module.
+  let inModule(ws: Workspace!, mod: GoModule!): [String!]! {
+    paths.filter { p => tool.lib.module(ws, p).path == mod.path }
   }
 
   """
-  Run tests in the selected Go modules.
+  Binaries of the selected main packages for the engine's platform, one file
+  each.
   """
-  test(ws: Workspace!): Void {
-    # A selection over a list evaluates its elements concurrently, so all
-    # module test commands run in parallel.
-    let failures = paths.map { p => module(p) }.{{path, failure: testFailure(ws)}}
-      .filter { result => result.failure != null }
-    if (failures.length > 0) {
-      raise "Go module tests failed:\n" + failures.map { result =>
-        "- " + result.path + ": " + (result.failure ?? "")
-      }.join("\n")
+  binary(ws: Workspace!): Directory! {
+    let mods = modules(ws)
+    let empty: [String!]! = []
+    let mains = mods.reduce(empty) { all, mod =>
+      all + mod.mainPackages(ws, inModule(
+        ws,
+        mod,
+      ))
     }
-    null
+    let names = mains.map { p => hostName(ws, p) }
+    let clashes = mains.filter { p =>
+      let name = hostName(ws, p)
+      names.filter { other => other == name }.length > 1
+    }
+    if (clashes.length > 0) {
+      raise "Go packages build binaries with the same name: " + clashes.map { p =>
+        p + " builds " + hostName(ws, p)
+      }.join(", ")
+    }
+    # One go build per module, merged into one directory.
+    mods.reduce(directory) { out, mod =>
+      out.withDirectory(
+        ".",
+        mod.binaryFiles(ws, gomod.hostPlatform, inModule(ws, mod)),
+      )
+    }
+  }
+
+  let hostName(ws: Workspace!, pkgPath: String!): String! {
+    tool.packageModule(ws, pkgPath, mountPath).binaryFileName(ws, pkgPath, gomod.hostPlatform)
   }
 
   """
-  Run go generate in the selected Go modules.
+  Run go generate in the selected packages.
   """
   generate(ws: Workspace!): Changeset! @generate {
-    let mods = paths.map { p => module(p) }.filter { mod =>
-      mod.skipGenerate(ws) == false
+    # Packages run together per module, in lexical order, each seeing the
+    # output of the ones before it: with every package selected, this is
+    # go generate ./... for that module.
+    let mods = modules(ws).filter { mod =>
+      mod.skipGenerate(ws) == false and mod.generateDirsIn(ws, inModule(ws, mod)).length > 0
     }
-
-    # Snapshot each selected module before generation, using the same source
-    # boundary that its generate container will receive.
     let before = mods.reduce(directory) { before, mod =>
-      before.withDirectory(mod.path, mod.source(ws, generate: true).directory(mod.path))
+      before.withDirectory(mod.path, mod.generateSource(ws))
     }
-
-    # Merge each generated module tree back into that snapshot, then diff once
-    # so callers get one changeset for all the selected modules.
     let after = mods.reduce(before) { after, mod =>
-      after.withDirectory(mod.path, mod.generateExec(ws).directory("."))
+      after.withDirectory(
+        mod.path,
+        mod.generatedTree(ws, mod.generateDirsIn(ws, inModule(ws, mod))),
+      )
     }
     after.changes(before)
+  }
+}
+
+"""
+A Go package.
+"""
+type GoPackage {
+  """
+  Package directory, relative to the workspace.
+  """
+  path: String!
+
+  let mountPath: String!
+
+  let tool: Go!
+
+  let module(ws: Workspace!): GoModule! {
+    tool.packageModule(ws, path, mountPath)
+  }
+
+  """
+  Tests in this package, keyed by name.
+  """
+  tests(ws: Workspace!): GoTests! {
+    let mod = module(ws)
+    let dir = mod.relativeDir(path)
+    GoTests(names: mod.testNames(ws, dir), directory: dir, module: mod)
+  }
+
+  """
+  This package's binary for the engine's platform. It must be a main package.
+  """
+  binary(ws: Workspace!): File! {
+    module(ws).binaryFile(ws, gomod.hostPlatform, path)
+  }
+
+  """
+  Platforms this package can be built for, keyed by GOOS/GOARCH.
+  """
+  platforms: GoPlatforms! {
+    GoPlatforms(names: gomod.goPlatforms, path: path, mountPath: mountPath, tool: tool)
+  }
+
+  """
+  Run go generate in this package.
+  """
+  generate(ws: Workspace!): Changeset! @generate {
+    let mod = module(ws)
+    let failure = mod.scanFailure(ws)
+    if (failure != null) {
+      raise failure
+    }
+    let dirs = mod.generateDirsIn(ws, [path])
+    if (dirs.length == 0) {
+      directory.changes(directory)
+    } else {
+      let before = directory.withDirectory(mod.path, mod.generateSource(ws))
+      let after = before.withDirectory(mod.path, mod.generatedTree(ws, dirs))
+      after.changes(before)
+    }
+  }
+}
+
+"""
+Platforms a Go package can be built for, keyed by GOOS/GOARCH.
+"""
+type GoPlatforms @collection {
+  """
+  GOOS/GOARCH pairs, e.g. "linux/arm64".
+  """
+  names: [String!]! @keys
+
+  """
+  Platforms selected in or out since the collection was discovered.
+  """
+  delta: CollectionDelta
+
+  let path: String!
+  let mountPath: String!
+  let tool: Go!
+
+  """
+  The platform with this GOOS/GOARCH.
+  """
+  platform(name: String!): GoPlatform! @get {
+    GoPlatform(name: name, path: path, mountPath: mountPath, tool: tool)
+  }
+
+  # The platforms a batch builds for. Every platform Go supports is a key, and
+  # naming none selects them all, so an unnarrowed collection means no
+  # platform was asked for: the batch then builds for the engine's own.
+  # Without a delta, the keys are taken as asked for.
+  let targets: [String!]! {
+    let whole = if (delta == null) {
+      false
+    } else {
+      delta.addedKeys.length == 0 and delta.removedKeys.length == 0
+    }
+    if (whole) { names.filter { name => name == gomod.hostPlatform } } else { names }
+  }
+
+  """
+  This package's binary for the selected platforms, or the engine's when none
+  is, one directory per platform, e.g. "linux-arm64/".
+  """
+  binary(ws: Workspace!): Directory! {
+    let mod = tool.packageModule(ws, path, mountPath)
+    targets.reduce(directory) { out, target =>
+      out.withFile(
+        target.split("/").join("-") + "/" + mod.binaryFileName(ws, path, target),
+        mod.binaryFile(ws, target, path),
+      )
+    }
+  }
+}
+
+"""
+A platform a Go package can be built for.
+"""
+type GoPlatform {
+  """
+  GOOS/GOARCH, e.g. "linux/arm64".
+  """
+  name: String!
+
+  let path: String!
+  let mountPath: String!
+  let tool: Go!
+
+  """
+  This package's binary for this platform.
+  """
+  binary(ws: Workspace!): File! {
+    tool.packageModule(ws, path, mountPath).binaryFile(ws, name, path)
   }
 }
 
@@ -377,11 +566,16 @@ type GoModule {
   Directories go generate runs in, in lexical order.
   """
   generateDirectories(ws: Workspace!): [String!]! {
+    selectGenerate(ws, discoveredGenerateDirectories(ws))
+  }
+
+  # The workspace directories among dirs that the generate setting selects.
+  let selectGenerate(ws: Workspace!, dirs: [String!]!): [String!]! {
     let included = generatePatterns.filter { p => p.hasPrefix("!") == false }
     let excluded = generatePatterns.filter { p => p.hasPrefix("!") }.map { p => p.trimPrefix("!") }
     let includeDirs = matchingGenerateDirectories(ws, included)
     let excludeDirs = matchingGenerateDirectories(ws, excluded)
-    discoveredGenerateDirectories(ws).filter { dir =>
+    dirs.filter { dir =>
       (included.length == 0 or includeDirs.any { match => match == dir })
         and excludeDirs.any { match => match == dir } == false
     }
@@ -490,21 +684,47 @@ type GoModule {
     if (goflags == null) { ctr } else { ctr.withEnvVariable("GOFLAGS", goflags) }
   }
 
-  """
-  Packages in this module with test files, keyed by directory. Empty when tests
-  are skipped.
-  """
-  packages(ws: Workspace!): GoPackages! {
-    GoPackages(
-      directories: testFiles(ws).map { file => packageDirectory(file) }.uniq,
-      module: self,
-    )
+  # Workspace paths of this module's packages that have something to do: tests
+  # to run, a main package to build, or go:generate commands to run. Each is
+  # found by searching the source, so listing packages runs no container.
+  let packagePaths(ws: Workspace!): [String!]! {
+    # The module's files are listed once and shared: listing them is the
+    # costly part, and every kind of package is found among them.
+    let files = lib.at(path).ownFiles(ws, "*.go")
+    let empty: [String!]! = []
+    let testDirs = if (skipTest) {
+      empty
+    } else {
+      let withTests = testMatches(ws).map { match => match.filePath.trimPrefix("/").trimPrefix("./") }
+      files.filter { f => f.hasSuffix("_test.go") and withTests.contains(f) }.map { f => packageDirectory(f) }
+    }
+    let dirs = testDirs + binaryPackagesIn(ws, files) + generatePackagesIn(ws, files)
+    dirs.uniq.map { dir => packagePath(dir) }
   }
 
-  # This module's own test files, in byte order, or none when tests are skipped.
-  let testFiles(ws: Workspace!): [String!]! {
+  # Module-relative directories holding a go:generate command and selected by
+  # the generate setting. A go:generate:include or :container annotation alone
+  # is not a command.
+  let generatePackagesIn(ws: Workspace!, files: [String!]!): [String!]! {
     let empty: [String!]! = []
-    if (skipTest) { empty } else { lib.at(path).ownFiles(ws, "*_test.go") }
+    if (files.length == 0) {
+      empty
+    } else {
+      let found = markedFiles(ws, "generate")
+      let dirs = files.filter { f => found.contains(f) }.map { f => packagePath(packageDirectory(f)) }.uniq
+      selectGenerate(ws, dirs).map { dir => relativeDir(dir) }
+    }
+  }
+
+  # A workspace path inside this module, made module-relative.
+  let relativeDir(pkgPath: String!): String! {
+    if (pkgPath == path) {
+      "."
+    } else if (path == ".") {
+      pkgPath
+    } else {
+      pkgPath.trimPrefix(path + "/")
+    }
   }
 
   # Test, fuzz and example names in one package directory, found by searching
@@ -515,7 +735,19 @@ type GoModule {
   # stable.
   let testNames(ws: Workspace!, dir: String!): [String!]! {
     let empty: [String!]! = []
-    let files = testFiles(ws).filter { file => packageDirectory(file) == dir }
+    # Only the package's own directory is listed: a package is never a nested
+    # module's root or under testdata, so its files are all this module's.
+    let pkgPath = packagePath(dir)
+    let files = if (skipTest) {
+      empty
+    } else {
+      sorted(
+        ws
+          .glob(if (pkgPath == ".") { "*_test.go" } else { pkgPath + "/*_test.go" })
+          .filter { file => file.hasSuffix("/") == false }
+          .map { file => file.trimPrefix("/").trimPrefix("./") },
+      )
+    }
     if (files.length == 0) {
       empty
     } else {
@@ -523,11 +755,7 @@ type GoModule {
       # below. The search is the same for every package, so it runs once.
       # Searching a subdirectory or the files by name would be narrower, but
       # fails on a workspace built with withDirectory.
-      let matches = ws.search(
-        paths: [if (path == ".") { "/" } else { "/" + path }],
-        globs: ["*_test.go"],
-        pattern: `^func (Test([^a-z(]\w*)?\(\s*\w+\s+\*testing\.T\s*\)|Fuzz([^a-z(]\w*)?\(\s*\w+\s+\*testing\.F\s*\)|Example([^a-z(]\w*)?\(\s*\))`,
-      ).{{filePath, matchedLines}}
+      let matches = testMatches(ws)
       files
         .reduce(empty) { names, file =>
           names + matches
@@ -537,6 +765,23 @@ type GoModule {
             }
         }
         .uniq
+    }
+  }
+
+  # Test, fuzz and example function lines in this module's tree.
+  let testMatches(ws: Workspace!): [{{filePath: String!, matchedLines: String!}}!]! {
+    ws.search(
+      paths: [if (path == ".") { "/" } else { "/" + path }],
+      globs: ["*_test.go"],
+      pattern: `^func (Test([^a-z(]\w*)?\(\s*\w+\s+\*testing\.T\s*\)|Fuzz([^a-z(]\w*)?\(\s*\w+\s+\*testing\.F\s*\)|Example([^a-z(]\w*)?\(\s*\))`,
+    ).{{filePath, matchedLines}}
+  }
+
+  # Byte-order sort, as Go's sort.Strings.
+  let sorted(items: [String!]!): [String!]! {
+    let empty: [String!]! = []
+    items.reduce(empty) { acc, item =>
+      acc.takeWhile { x => x <= item } + [item] + acc.dropWhile { x => x <= item }
     }
   }
 
@@ -573,28 +818,42 @@ type GoModule {
   """
   Run go generate in this module.
   """
-  generate(ws: Workspace!): Changeset! @generate {
+  generate(ws: Workspace!): Changeset! {
     let failure = scanFailure(ws)
     if (failure != null) {
       raise failure
     } else if (skipGenerate(ws)) {
       directory.changes(directory)
     } else {
-      let before = directory.withDirectory(
-        path,
-        source(ws, generate: true).directory(path),
-      )
-      let after = before.withDirectory(path, generateExec(ws).directory("."))
+      let before = directory.withDirectory(path, generateSource(ws))
+      let after = before.withDirectory(path, generatedTree(ws, generateDirectories(ws)))
       after.changes(before)
     }
   }
 
+  # The generate directories among the given workspace package paths, in
+  # lexical order.
+  let generateDirsIn(ws: Workspace!, pkgPaths: [String!]!): [String!]! {
+    generateDirectories(ws).filter { dir => pkgPaths.contains(dir) }
+  }
+
+  # This module's tree as its generate container receives it.
+  let generateSource(ws: Workspace!): Directory! {
+    source(ws, generate: true).directory(path)
+  }
+
+  # This module's tree after go generate has run in dirs, in order.
+  let generatedTree(ws: Workspace!, dirs: [String!]!): Directory! {
+    generateExec(ws, dirs).directory(".")
+  }
+
   """
-  Container state after running go generate in this module.
+  Container state after running go generate in dirs, in order, each seeing the
+  output of the ones before it.
   """
-  let generateExec(ws: Workspace!): Container! {
+  let generateExec(ws: Workspace!, dirs: [String!]!): Container! {
     let initial = base(ws).withDirectory(".", source(ws, generate: true))
-    generateDirectories(ws).reduce(GoGeneration(container: initial, value: "")) { state, dir =>
+    dirs.reduce(GoGeneration(container: initial, value: "")) { state, dir =>
       let value = lib.at(path).generateContainer(ws, dir)
       let ctr = if (value == state.value) {
         state.container
@@ -670,26 +929,24 @@ type GoModule {
     null
   }
 
-  """
-  Main packages in this module, keyed by package directory.
-  """
-  binaries(ws: Workspace!): GoBinaries! {
-    GoBinaries(packages: binaryPackages(ws), importPath: importPath(ws), module: self)
-  }
-
   # Main packages are found by searching the source, like test names, so
   # listing them runs no container. A directory is one when one of its own
   # non-test files says "package main" without an ignore build tag, which is
   # how go:generate scripts are kept out of the build. Other build constraints
   # are not evaluated: the build reports what the search got wrong.
   let binaryPackages(ws: Workspace!): [String!]! {
+    binaryPackagesIn(ws, lib.at(path).ownFiles(ws, "*.go"))
+  }
+
+  # binaryPackages among this module's own files, listed by the caller.
+  let binaryPackagesIn(ws: Workspace!, ownFiles: [String!]!): [String!]! {
     let empty: [String!]! = []
-    let files = lib.at(path).ownFiles(ws, "*.go").filter { f => f.hasSuffix("_test.go") == false }
+    let files = ownFiles.filter { f => f.hasSuffix("_test.go") == false }
     if (files.length == 0) {
       empty
     } else {
-      let mains = searchFiles(ws, `^package main\s*(//.*)?$`)
-      let ignored = searchFiles(ws, `^//(go:build| \+build) ignore\s*$`)
+      let mains = markedFiles(ws, "main")
+      let ignored = markedFiles(ws, "ignore")
       files
         .filter { f => mains.contains(f) and ignored.contains(f) == false }
         .map { f => packageDirectory(f) }
@@ -698,15 +955,29 @@ type GoModule {
     }
   }
 
-  # Workspace-root paths of the Go files in this module's tree with a line
-  # matching pattern. The caller narrows them to the module's own files.
-  let searchFiles(ws: Workspace!, pattern: String!): [String!]! {
-    ws.search(
-      paths: [if (path == ".") { "/" } else { "/" + path }],
-      globs: ["*.go"],
-      pattern: pattern,
-      filesOnly: true,
-    ).{{filePath}}.map { match => match.filePath.trimPrefix("/").trimPrefix("./") }
+  # Workspace-root paths of the Go files in this module's tree with a line of
+  # one kind: "main" for a package main clause, "ignore" for an ignore build
+  # tag, "generate" for a go:generate command. One search finds all three, so
+  # discovering a module's packages searches its tree once. The caller narrows
+  # the files to the module's own.
+  let markedFiles(ws: Workspace!, kind: String!): [String!]! {
+    ws
+      .search(
+        paths: [if (path == ".") { "/" } else { "/" + path }],
+        globs: ["*.go"],
+        pattern: `^(package main\s*(//.*)?|//(go:build| \+build) ignore\s*|//go:generate\s.*)$`,
+      ).{{filePath, matchedLines}}
+      .filter { match =>
+        if (kind == "main") {
+          match.matchedLines.hasPrefix("package main")
+        } else if (kind == "generate") {
+          match.matchedLines.hasPrefix("//go:generate")
+        } else {
+          match.matchedLines.hasPrefix("//go:build") or match.matchedLines.hasPrefix("// +build")
+        }
+      }
+      .map { match => match.filePath.trimPrefix("/").trimPrefix("./") }
+      .uniq
   }
 
   # The module-relative directory of a workspace-root file path.
@@ -771,14 +1042,46 @@ type GoModule {
     ctr
   }
 
-  """
-  One directory per platform, e.g. "linux-arm64/", each holding that
-  platform's binary.
-  """
-  let platformBinaries(ws: Workspace!, targets: [GoPlatform!]!): Directory! {
-    targets.reduce(directory) { out, target =>
-      out.withFile(target.name.split("/").join("-") + "/" + target.fileName, target.build(ws))
+  # The workspace package paths among pkgPaths that are main packages selected
+  # by the build setting.
+  let mainPackages(ws: Workspace!, pkgPaths: [String!]!): [String!]! {
+    let mains = binaryPackages(ws)
+    pkgPaths.filter { p => mains.contains(relativeDir(p)) }
+  }
+
+  # The name go build gives a package's binary: the last element of its import
+  # path, or the one before when that is a major version such as "v2", with
+  # ".exe" for Windows.
+  let binaryFileName(ws: Workspace!, pkgPath: String!, platform: String!): String! {
+    let rel = relativeDir(pkgPath)
+    let modPath = importPath(ws)
+    let full = if (rel == ".") { modPath } else { modPath + "/" + rel }
+    let elements = full.split("/")
+    let last = elements.takeLast(1).join("")
+    let name = if (elements.length > 1 and last.replaceMatches(
+      `^v([2-9]|[1-9][0-9]+)$`,
+      with: "",
+    ) == "") {
+      elements.dropLast(1).takeLast(1).join("")
+    } else {
+      last
     }
+    if (platform.hasPrefix("windows/")) { name + ".exe" } else { name }
+  }
+
+  # One package's binary for a platform. Only a main package selected by the
+  # build setting has one.
+  let binaryFile(ws: Workspace!, platform: String!, pkgPath: String!): File! {
+    let rel = relativeDir(pkgPath)
+    if (binaryPackages(ws).contains(rel) == false) {
+      raise "Go package " + pkgPath + " is not a main package selected by build"
+    }
+    buildBinary(ws, platform, rel, binaryFileName(ws, pkgPath, platform))
+  }
+
+  # The binaries of the main packages among pkgPaths, from one go build.
+  let binaryFiles(ws: Workspace!, platform: String!, pkgPaths: [String!]!): Directory! {
+    buildBinaries(ws, platform, mainPackages(ws, pkgPaths).map { p => relativeDir(p) })
   }
 
   """
@@ -796,44 +1099,6 @@ type GoModule {
         "Go binaries in " + path + " for " + platform,
       ).directory("/out")
     }
-  }
-}
-
-"""
-Go packages with tests in a module, keyed by directory.
-"""
-type GoPackages @collection {
-  """
-  Package directories, relative to the module root.
-  """
-  directories: [String!]! @keys
-
-  let module: GoModule!
-
-  """
-  The package in this directory.
-  """
-  package(directory: String!): GoPackage! @get {
-    GoPackage(directory: directory, module: module)
-  }
-}
-
-"""
-A Go package with tests.
-"""
-type GoPackage {
-  """
-  Package directory, relative to the module root.
-  """
-  directory: String!
-
-  let module: GoModule!
-
-  """
-  Tests in this package, keyed by name.
-  """
-  tests(ws: Workspace!): GoTests! {
-    GoTests(names: module.testNames(ws, directory), directory: directory, module: module)
   }
 }
 
@@ -901,163 +1166,6 @@ type GoTest {
   """
   test(ws: Workspace!): Void @check {
     module.runTests(ws, directory, [name])
-  }
-}
-
-"""
-Go main packages in a module, keyed by package directory.
-"""
-type GoBinaries @collection {
-  """
-  Package directories, relative to the module root.
-  """
-  packages: [String!]! @keys
-
-  # The module path from go.mod, held so that naming a binary needs no workspace.
-  let importPath: String!
-
-  let module: GoModule!
-
-  """
-  The main package in this directory.
-  """
-  binary(package: String!): GoBinary! @get {
-    GoBinary(package: package, name: execName(package), module: module)
-  }
-
-  # The name go build gives a package's binary: the last element of its import
-  # path, or the one before when that is a major version such as "v2".
-  let execName(pkg: String!): String! {
-    let full = if (pkg == ".") { importPath } else { importPath + "/" + pkg }
-    let elements = full.split("/")
-    let last = elements.takeLast(1).join("")
-    if (elements.length > 1 and last.replaceMatches(`^v([2-9]|[1-9][0-9]+)$`, with: "") == "") {
-      elements.dropLast(1).takeLast(1).join("")
-    } else {
-      last
-    }
-  }
-
-  """
-  Build the selected binaries for the engine's platform, one file each.
-  """
-  build(ws: Workspace!): Directory! {
-    let names = packages.map { pkg => execName(pkg) }
-    let clashes = packages.filter { pkg =>
-      names.filter { name => name == execName(pkg) }.length > 1
-    }
-    if (clashes.length > 0) {
-      raise "Go binaries in " + module.path + " share a name: " + clashes.map { pkg =>
-        pkg + " builds " + execName(pkg)
-      }.join(", ")
-    }
-    module.buildBinaries(ws, gomod.hostPlatform, packages)
-  }
-}
-
-"""
-A Go main package and the binary it builds.
-"""
-type GoBinary {
-  """
-  Package directory, relative to the module root.
-  """
-  package: String!
-
-  """
-  Binary file name, as go build names it.
-  """
-  name: String!
-
-  let module: GoModule!
-
-  """
-  Build this binary for the engine's platform.
-  """
-  build(ws: Workspace!): File! {
-    module.buildBinary(ws, gomod.hostPlatform, package, name)
-  }
-
-  """
-  Platforms this binary can be built for, keyed by GOOS/GOARCH.
-  """
-  platforms: GoPlatforms! {
-    GoPlatforms(names: gomod.goPlatforms, package: package, binaryName: name, module: module)
-  }
-}
-
-"""
-Platforms a Go binary can be built for, keyed by GOOS/GOARCH.
-"""
-type GoPlatforms @collection {
-  """
-  GOOS/GOARCH pairs, e.g. "linux/arm64".
-  """
-  names: [String!]! @keys
-
-  """
-  Platforms selected in or out since the collection was discovered.
-  """
-  delta: CollectionDelta
-
-  let package: String!
-  let binaryName: String!
-  let module: GoModule!
-
-  """
-  The platform with this GOOS/GOARCH.
-  """
-  platform(name: String!): GoPlatform! @get {
-    GoPlatform(name: name, package: package, binaryName: binaryName, module: module)
-  }
-
-  # The platforms a batch builds for. Every platform Go supports is a key, and
-  # naming none selects them all, so an unnarrowed collection means no
-  # platform was asked for: the batch then builds for the engine's own.
-  # Without a delta, the keys are taken as asked for.
-  let targets: [String!]! {
-    let whole = if (delta == null) {
-      false
-    } else {
-      delta.addedKeys.length == 0 and delta.removedKeys.length == 0
-    }
-    if (whole) { names.filter { name => name == gomod.hostPlatform } } else { names }
-  }
-
-  """
-  Build this binary for the selected platforms, or the engine's when none is,
-  one directory per platform, e.g. "linux-arm64/".
-  """
-  build(ws: Workspace!): Directory! {
-    module.platformBinaries(ws, targets.map { name => platform(name) })
-  }
-}
-
-"""
-A platform a Go binary can be built for.
-"""
-type GoPlatform {
-  """
-  GOOS/GOARCH, e.g. "linux/arm64".
-  """
-  name: String!
-
-  let package: String!
-  let binaryName: String!
-  let module: GoModule!
-
-  """
-  Binary file name for this platform: ".exe" is added for Windows.
-  """
-  fileName: String! {
-    if (name.hasPrefix("windows/")) { binaryName + ".exe" } else { binaryName }
-  }
-
-  """
-  Build this binary for this platform.
-  """
-  build(ws: Workspace!): File! {
-    module.buildBinary(ws, name, package, fileName)
   }
 }
 
