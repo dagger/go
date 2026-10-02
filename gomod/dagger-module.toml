@@ -1,5 +1,5 @@
 name = "gomod"
-engineVersion = "v1.0.0-beta.13"
+engineVersion = "v1.0.0-beta.15"
 
 [runtime]
   source = "dang"

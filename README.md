@@ -10,7 +10,7 @@ that supplier and do not share its release dates, so they are their own modules
 
 ```
 github.com/dagger/go
-├── go.dang           the main module, at the root: test, generate
+├── go.dang           the main module, at the root: test, build, generate
 ├── gomod/            the shared library. No checks.
 ├── golangci-lint/    lint
 ├── staticcheck/      lint
@@ -22,7 +22,7 @@ github.com/dagger/go
 `go` is the root module, so its address is the repository:
 
 ```sh
-dagger install github.com/dagger/go              # test, generate
+dagger install github.com/dagger/go              # test, build, generate
 dagger install github.com/dagger/go/golangci-lint
 dagger install github.com/dagger/go/staticcheck
 ```
@@ -32,9 +32,10 @@ do not install it to get checks.
 
 ## Scoping
 
-Every module discovers **every** Go module in the workspace, so a repository
-with test fixtures or a vendored copy of some source will have those checked
-too. Say which module roots you mean in `dagger.toml`:
+`go` discovers **every** Go module in the workspace, so a repository with test
+fixtures or a vendored copy of some source will have those checked too. The
+linters discover every project — every directory holding their configuration
+file — which a fixture can have too. Say which roots you mean in `dagger.toml`:
 
 ```toml
 [modules.golangci-lint.settings]
@@ -44,7 +45,9 @@ lint = ["**", "!docs"]
 A bare pattern selects, a `"!"`-prefixed pattern excludes, and an exclude wins
 whatever the order. `docs` means `docs` and every module below it; `**` and `*`
 mean all of them; `["!**"]` means none. Other glob shapes are not interpreted.
-`go` spells its two as `test` and `generate` rather than `lint`.
+`go` spells its two as `test` and `generate` rather than `lint`. Its `build`
+setting uses the same rules, but selects main packages by their directory
+within each module rather than module roots.
 
 ## The modules
 
@@ -52,44 +55,241 @@ mean all of them; `["!**"]` means none. Other glob shapes are not interpreted.
 
 | Function              | Description                                                   |
 | --------------------- | ------------------------------------------------------------- |
-| `test-all`            | Test every discovered module (a `@check`).                    |
-| `generate-all`        | Run `go generate` in selected directories (a `@generate`).    |
-| `modules`             | Modules discovered from the workspace.                        |
+| `packages`            | Packages discovered from the workspace, as a collection.      |
+| `modules`             | Modules discovered from the workspace, as a list.             |
 | `module`              | The module containing a workspace path.                       |
 
-On a module: `test`, `generate`, `test-directories`, `skip-test`,
-`skip-generate`, `has-generate-directives`, `generate-directories`, `base`,
-`include`, `include-base`, `include-discovered`, `source`, `test-data`.
+On a package: `tests`, `binary`, `platforms` and `generate`.
 
-Tests run with a nested Dagger engine, so a suite that drives Dagger works. The
-workspace mounts at `/src/<workspace name>` unless `mountPath` says otherwise.
+On a module: `test`, `generate`, `skip-test`, `skip-generate`,
+`has-generate-directives`, `generate-directories`, `base`, `include`,
+`include-base`, `include-discovered`, `source`, `test-data`.
+
+#### Settings
+
+| Setting               | Meaning                                                       |
+| --------------------- | ------------------------------------------------------------- |
+| `version`             | Go version for every module, instead of each one's `go.mod`.  |
+| `base`                | Base image for Go containers.                                 |
+| `includeExtraFiles`   | Extra workspace files to mount, as include patterns.          |
+| `test`                | Module roots to test (see [Scoping](#scoping)).               |
+| `generate`            | Directories to run `go generate` in (see below).              |
+| `build`               | Main packages to build, by module-relative directory.         |
+| `buildFlags`          | Extra flags for `go build` only.                              |
+| `goflags`             | `GOFLAGS` in every Go container.                              |
+| `mountPath`           | Where the workspace is mounted in Go containers.              |
+
+`base` must carry a Go toolchain and any C/C++ dependencies the modules need.
+otelgotest is installed into it unless it already has one. It supplies its own
+toolchain, so `version` is ignored alongside it and recorded in `warnings`.
+
+`goflags` is passed as-is, e.g. `-tags=extended,withdeploy`. Flags that take a
+value must use the `-flag=value` form, as Go requires inside `GOFLAGS`.
+
+`mountPath` defaults to `/src/<workspace name>`, where the name is the last
+segment of the workspace address — usually the repository name — so tests that
+expect it in their working directory keep passing. It must be absolute.
+
+#### Packages
+
+`packages` is the collection to select on. It is keyed by package directory
+relative to the workspace root, e.g. `sdk/go/cmd/dagger`, which adds a
+`go-package` dimension. A directory is a package key when it has something to
+do: tests to run, a `main` package to build, or `go:generate` commands to run.
+Each package's tests are a collection too, keyed by function name, which adds
+`go-test`.
+
+```console
+$ dagger list go-packages -a
+$ dagger check --go --test --go-package=sdk/go
+$ dagger check --go --test --go-test=TestConnect
+$ dagger check --go --test --go-package=sdk/go --go-test=TestConnect
+$ dagger generate --go --go-package=sdk/go/internal/gen
+$ dagger check -l --all --go -f=cli     # one line per test, as flags to reuse
+```
+
+`--test` alone also selects every other module's check named `test`; `--go`
+narrows it to this one. The linters key their collections by project, as
+`--golangci-lint-project` and `--staticcheck-project`. `dagger check --help`
+lists the flags in effect.
+
+Packages are found in the Go modules at or below the workspace cwd, plus the
+enclosing module when the cwd is inside one, so `dagger -W ./sdk/go check`
+scopes every tool to that module without a flag. Modules are not a dimension:
+they decide how a package is mounted and which Go toolchain it gets, and
+`modules` and `module` remain for inspecting that. `include`/`exclude` filter
+the module roots `modules` finds; pass `findUp: false` to `module` when the
+path is already a module root.
+
+#### Tests
+
+Tests run once per selected package, through the `GoTests` batch `test`. With
+every test in the package selected it runs `go test ./pkg`; with some filtered
+out it runs `go test -run` over the selected names. A test name in two packages
+is two keys, so `--go-test` alone selects both and `--go-package` picks one.
+Collections never batch across parent items, so packages run as separate
+execs, not one `go test ./...` per module.
+
+Test names come from searching the package's `_test.go` files for
+`func TestXxx(t *testing.T)`, `func FuzzXxx(f *testing.F)` and
+`func ExampleXxx()`, so listing them runs no container. `TestMain`, `testdata`
+and nested modules are left out. Build constraints are not evaluated: a test
+excluded by one is still listed, and selecting it runs nothing. A module
+outside the `test` selection offers no tests.
+
+`test` on a module is a plain function rather than a check, so that `dagger
+check` does not run the same tests twice.
+
+#### Binaries
+
+`binary` on a package returns its binary for the engine's platform. Only a
+`main` package selected by the `build` setting has one; any other package
+fails, naming itself. The `GoPackages` batch `binary` compiles the selected
+`main` packages with one `go build` per module, skips the rest, and returns one
+directory of binaries.
+
+A binary is named as `go build` names it: after the last element of the
+package's import path, or the one before when that is a major version such as
+`v2`. A module's root package takes its name from the module path in `go.mod`.
+Names can collide, as `cmd/foo` and `tools/foo` both build `foo`: the batch
+`binary` refuses such a pair and names both packages, while a single package's
+`binary` does not mind.
+
+A directory is a `main` package when one of its own non-test `.go` files says
+`package main`, so listing them runs no container. Files with an `ignore` build
+tag, usually `go generate` scripts, are left out, as are `testdata`, nested
+modules and names starting with `.` or `_`. Other build constraints are not
+evaluated: a package whose files are all for another platform is listed, and
+building it fails.
+
+The `build` setting selects `main` packages by module-relative directory with
+the [Scoping](#scoping) rules, and applies in every module: `["cmd/**",
+"!cmd/internal"]` keeps `cmd` and its subdirectories except `cmd/internal`.
+
+`buildFlags` are passed to `go build` as separate arguments, after `goflags`
+has applied through `GOFLAGS`, so a value may contain spaces:
+`["-trimpath", "-ldflags=-s -w -X main.version=dev"]`. Tests and `go generate`
+never see them. Every package in every module gets the same flags.
+
+#### Platforms
+
+A package's `platforms` are keyed by `GOOS/GOARCH`, and every pair the pinned
+Go toolchain supports is a key (`gomod`'s `go-platforms`). Each platform's
+`binary` is the package's binary cross-compiled for it, in the native
+container with `GOOS` and `GOARCH` set; nothing is emulated. Windows binaries
+end in `.exe`.
+
+The `GoPlatforms` batch `binary` returns one subdirectory per platform, e.g.
+`linux-amd64/`, `windows-amd64/`:
+
+- With no platform selected, it builds for the engine's platform only, e.g.
+  `linux/arm64`.
+- With platforms selected, it builds for exactly those.
+
+The batch tells the two apart by its delta: an unnarrowed collection means no
+platform was asked for. So selecting every platform explicitly looks the same
+as selecting none, and builds only the engine's. A single platform's `binary`
+has no such default; it builds for its own key.
+
+`binary` returns artifacts and is not a check. A `main` package that stops compiling is
+caught by `golangci-lint` and `staticcheck`, which type-check every package.
+
+Tests and `go generate` always run natively. cgo is off when cross-compiling
+unless `base` brings a C cross-toolchain; some ports, such as `ios/*`, need
+one. A module whose toolchain predates a port fails with Go's own error.
+
+#### Generate
+
+`generate` patterns are relative to the workspace root, whatever the cwd, and
+use Dagger glob syntax: `*`, `?` and character classes match within a path
+segment, and `**` matches zero or more segments.
+
+- A literal path selects only that directory, even if it is a module root.
+  `.` selects the workspace root only.
+- `internal/**` selects `internal` and everything below it.
+- A `!` prefix excludes, and exclusions always win.
+- An empty list, or one with only exclusions, starts from every directory.
+- The default `["**"]` reaches directories in nested modules.
+
+For example: `["sdk/go/engineconn", "internal/**", "!internal/fixtures/**"]`.
+
+`go generate .` runs in each selected directory that has a generator command;
+`go:generate:include` alone is not one. Each such directory is a package with a
+`generate` generator and its `stale` check.
+
+A package's own `generate` runs alone, against the committed source. The
+`GoPackages` batch `generate` replaces it and runs the selected packages
+together, per module, in lexical path order, each seeing the output of the ones
+before it: with every package selected, that is `go generate ./...` for each
+module. So a generator that reads another package's generated output sees it
+when the two are generated together, and sees the committed version when its
+package is generated alone. Modules run independently and cross-module
+dependencies are not inferred; use an explicit coordinating command when
+generators need a different order.
 
 A directory can pick the container its generators run in with
-`//go:generate:container`, resolved against the caller's workspace — a
-workspace container by name, or an image reference. Consecutive directories
-naming the same one share a container; when it changes, workspace files carry
-over so later commands still see earlier output. Without the directive, the
-directory uses the module's own toolchain.
+`//go:generate:container`, resolved with the caller's `Workspace.resolve` — a
+workspace container by name, such as `generate-env`, or an image reference such
+as `docker.io/library/golang:1.26.1-alpine`. Conflicting values in one
+directory are errors. Consecutive directories naming the same one share a
+container; when it changes, workspace files carry over so later commands still
+see earlier output. Without the directive, the directory uses the module's own
+base container.
+
+A package's own `generate` fails when the scan could not read its module,
+naming the file, while the batch `generate` skips that module (see below).
+
+Tests run with a nested Dagger engine, so a suite that drives Dagger works.
 
 ### `golangci-lint`
 
 | Function     | Description                                   |
 | ------------ | --------------------------------------------- |
-| `lint-all`   | Lint every selected module (a `@check`).      |
-| `lint`       | Lint one module.                              |
+| `projects`   | Projects discovered from the workspace, as a collection. |
+| `project`    | The project containing a workspace path.      |
+| `module`     | The Go module containing a workspace path.    |
 | `version`    | The bundled golangci-lint version.            |
+
+A project is a directory holding `.golangci.yml`, `.yaml`, `.toml` or `.json`,
+and it lints everything below that no nested configuration claims: each Go
+module below it, and the part below it of a module that encloses it. A
+directory with no configuration above it is not linted, and a configuration
+with no Go code around it is not a project.
+
+On a project: `modules` and `lint` (a `@check`). A project runs golangci-lint
+once per Go module it covers, with that module's toolchain, and golangci-lint
+finds the project's configuration by its own lookup. The collection's batch
+`lint` runs once over the selected projects in place of each project's own, as
+for `go`. Both linters name their check `lint`, so `dagger check --lint` runs
+them together and `--golangci-lint --lint` runs this one; select projects with
+`--golangci-lint-project=PATH`.
 
 `version` is the linter release, pinned to 2.11.4 by digest, and `goVersion` is
 the Go toolchain — chosen independently, because the binary is copied out of
 its image onto that toolchain. A C/C++ toolchain is present, since cgo
 dependencies need one during typecheck.
 
+Both linters take `base`, `goVersion`, `includeExtraFiles` and `lint` settings
+that work as `go`'s do, except that `lint` selects project roots. A `base` must
+carry a Go toolchain and any C/C++ dependencies; the linter is installed into
+it unless it already has one, and `goVersion` is ignored alongside it and
+recorded in `warnings`. Each linter's
+configuration files are mounted with their directory structure, so its normal
+config lookup applies. Use `includeExtraFiles` for files the linter reads that
+the Go patterns miss, such as generated inputs or non-Go embedded assets.
+
 ### `staticcheck`
 
 | Function     | Description                                   |
 | ------------ | --------------------------------------------- |
-| `lint-all`   | Check every selected module (a `@check`).     |
-| `lint`       | Check one module.                             |
+| `projects`   | Projects discovered from the workspace, as a collection. |
+| `project`    | The project containing a workspace path.      |
+| `module`     | The Go module containing a workspace path.    |
+
+Projects work as golangci-lint's do, rooted at each `staticcheck.conf`.
+Staticcheck merges a package's `staticcheck.conf` files itself, so a nested
+project still inherits from its parent's. Select it with
+`--staticcheck --lint`, and projects with `--staticcheck-project=PATH`.
 
 `version` is the Staticcheck release, built once with `go install` in a pinned
 Go container, and `goVersion` is the Go toolchain. Test files are analyzed;
@@ -108,6 +308,8 @@ with a check for the same tool would run that tool twice.
 | `setting-patterns`  | Selection patterns, repaired for older beta engines.        |
 | `go-container`      | A Go toolchain container at a version, with the shared caches. |
 | `tool-builder`      | The pinned container tool binaries are built in.             |
+| `go-platforms`      | Every `GOOS/GOARCH` the pinned toolchain can target.         |
+| `host-platform`     | The engine's platform as `GOOS/GOARCH`.                      |
 | `with-tool`         | Install a tool binary, unless the container has one.        |
 | `with-warnings`     | Announce ignored settings as container steps.               |
 | `default-go-version` | The version used for a module that declares no `go` directive. |
@@ -175,14 +377,21 @@ says. Each ignored setting is listed in `warnings` and announced as a step in
 the container, since Dang has no diagnostics channel of its own.
 
 **A directory with a `go.mod` is not automatically a module.** Discovery
-reports a module root only when its `go.mod` parses and carries a module line,
+reports a module root only when its `go.mod` carries a module line,
 and when the module holds Go files that Go itself would look at — not only ones
 under `testdata/` or a `.`/`_` directory. Everything else is left out, because
 handing it to a tool yields a complaint about the tool rather than about the
 directory: golangci-lint errors on a module with no packages, and no Go command
 accepts a `go.mod` with no module line. `module` and `at` still reach one, so a
 caller that spells out a path gets that path, and an unparseable `go.mod` still
-says what is wrong with it. `gomod`'s `scanned-module-roots` is the list.
+says what is wrong with it. `gomod`'s `scanned-module-roots` is the scanner's
+view of the same list, and its suite asserts the two agree.
+
+**Listing never runs the scanner.** Which roots are modules, and which tests a
+module has, are answered from the workspace directly: `findRoots`, a read of
+each `go.mod`, globs and `Workspace.search`. The scanner builds and runs only
+when something needs a module's sources, so `dagger check -l` and
+`dagger list` pay for neither.
 
 The line is "no Go files", not "no packages after build constraints". A module
 whose files are all constrained out is still a module, and the toolchain's
@@ -192,8 +401,8 @@ message about it names the module already.
 the workspace, so a module with an unreadable `go.mod` or a Go file that will
 not parse records the reason against itself and the pass carries on. Anything
 that needs that module's sources raises the reason, which names the file;
-everything else is unaffected. `test-all` reports it beside the modules that
-passed, and `generate-all` — which has to ask every module in the workspace
+everything else is unaffected. The batch `test` reports it beside the modules
+that passed, and the batch `generate` — which has to ask every selected module
 whether it holds generators — gets an answer rather than an error. Failing the
 whole scan instead would let one bad file stop every check in the repository,
 including for modules you had excluded.
@@ -215,16 +424,18 @@ selection matrix; each tool's suite asserts only that its own settings reach
 it.
 
 **Fixtures are shared where they are the same.** `testdata/` and `fixtures/` at
-the root serve every module. A tool keeps its own only when the fixture is
-specific to it — `golangci-lint/testdata/go-module-lint-fail` does not compile,
-so it cannot live where `go`'s `test-all` would find it.
+the root serve every module, with a `.golangci.yml` in the ones golangci-lint
+lints. A tool keeps its own only when the fixture is specific to it —
+`golangci-lint/testdata/projects` fails under any configuration but the one
+each part is meant to get, and `golangci-lint/testdata/go-module-lint-fail`
+does not compile, so neither can live where `go`'s batch `test` would find it.
 
 ## Known problem: only one failure is reported
 
-A batch of three failing modules reports one failure, not three. The lint
+A batch of three failing projects reports one failure, not three. The lint
 modules aggregate results into a directory and sync it, and the first error
-stops every later report; you repair one module, run again, and find the next.
-`go`'s `test-all` does not have this shape — it collects each module's failure
+stops every later report; you repair one project, run again, and find the next.
+`go`'s batch `test` does not have this shape — it collects each module's failure
 and names them all.
 
 The obvious repair for the lint modules — collecting exit codes rather than
@@ -240,24 +451,21 @@ One command runs all four suites:
 dagger check
 ```
 
-That builds a dev engine from dagger/dagger and runs them inside it, because
-`//go:generate:container` needs `Workspace.resolve`, which no released engine
-has yet. The engine commit is pinned in `.dagger/modules/engine-e2e/`, and the
-suites it runs are listed in that module's `workspace.toml`.
+The root `dagger.toml` installs `go`'s suite as the entrypoint and each other
+suite under a `<tool>-checks` key, which prefixes its checks. Every module needs
+v1.0.0-beta.15 or later, the first release with collections and the
+`Workspace.resolve` that `//go:generate:container` uses.
 
-The three suites that do not need the dev engine also run against a released
-one directly, which is far quicker while iterating:
+One suite, or one check, at a time:
 
 ```sh
+dagger check -m .dagger/modules/go-dev            # the root go module
 dagger check -m gomod/.dagger/modules/e2e         # the shared library
 dagger check -m golangci-lint/.dagger/modules/e2e
 dagger check -m staticcheck/.dagger/modules/e2e
 
 dagger check -m gomod/.dagger/modules/e2e scan-check   # or one check by name
 ```
-
-`dagger shell playground` opens the dev engine with an example repository at
-`/example`; run `dagger generate` there to try the container directive.
 
 `testdata/` and `fixtures/` hold the modules the suites run against. Several of
 them fail on purpose — a failing test, a lint diagnostic, a module with no
@@ -274,6 +482,8 @@ workspace.
 
 Two differences are worth knowing before you switch:
 
+- They lint projects, rooted at each configuration file, rather than Go
+  modules. A repository with no configuration file is not linted at all.
 - `skipLint` no longer takes a workspace. It never read one; selection is a
   question about a path.
 - A bare scan no longer implies test inputs. The standalone modules were

@@ -1,3 +1,0 @@
-[modules.example]
-source = ".dagger/example"
-entrypoint = true

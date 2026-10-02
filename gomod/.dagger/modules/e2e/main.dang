@@ -13,6 +13,7 @@ type E2e {
   let helperPath: String! = "gomod/helpers/go-includes"
   let unreadablePath: String! = "fixtures/go-module-unreadable"
   let emptyPath: String! = "testdata/go-module-empty"
+  let projectsPath: String! = "golangci-lint/testdata/projects"
 
   let assert(condition: Boolean!, message: String!): Void {
     if (condition == false) { raise message }
@@ -21,6 +22,30 @@ type E2e {
 
   let selects(patterns: [String!]!, path: String!): Boolean! {
     gomod.at(path).selected(patterns)
+  }
+
+  """
+  The platform list matches what the pinned toolchain supports, and the
+  engine's own platform is one of them.
+  """
+  platformsCheck: Void @check {
+    let listed = gomod
+      .toolBuilder
+      .withExec(["go", "tool", "dist", "list"])
+      .stdout
+      .split("\n")
+      .filter { line => line != "" }
+    let missing = listed.filter { p => gomod.goPlatforms.contains(p) == false }
+    let extra = gomod.goPlatforms.filter { p => listed.contains(p) == false }
+    assert(
+      missing.length == 0 and extra.length == 0,
+      "goPlatforms drifted from go tool dist list: missing " + missing.join(", ") + "; extra " + extra.join(", "),
+    )
+    assert(
+      gomod.goPlatforms.contains(gomod.hostPlatform),
+      "the engine platform is not a Go platform: " + gomod.hostPlatform,
+    )
+    null
   }
 
   """
@@ -75,6 +100,61 @@ type E2e {
       err: Error => err.message
     }
     assert(missing.contains("no Go module found"), "missing module lookup succeeded")
+    null
+  }
+
+  """
+  A project rooted at a marker covers the modules below it that no nested
+  marker claims, and the part of an enclosing module below it; nested markers
+  inside a covered module are skipped, and only packages outside them run.
+  """
+  projectCheck(ws: Workspace!): Void @check {
+    let markers = [".golangci.yml"]
+    let roots = gomod.projectRoots(ws, markers)
+    assert(roots.contains(projectsPath), "a marker above its modules did not root a project")
+    assert(roots.contains(projectsPath + "/notes") == false, "a marker with no Go code rooted a project")
+    assert(
+      gomod.projectRoot(ws, projectsPath + "/inner/quiet", markers) == projectsPath + "/inner/quiet",
+      "lookup passed over the nearest marker",
+    )
+    assert(
+      gomod.projectRoot(ws, projectsPath + "/inner", markers) == projectsPath,
+      "lookup did not climb to a marker",
+    )
+    let missing = { gomod.projectRoot(ws, ".", markers) } rescue {
+      err: Error => err.message
+    }
+    assert(missing.contains("no project found"), "missing project lookup succeeded")
+
+    let scopes = gomod.projectScopes(ws, projectsPath, markers).{{module, path, skip}}
+    assert(
+      scopes.map { scope => scope.module }.contains(projectsPath + "/owned") == false,
+      "a module claimed by a nested marker was covered",
+    )
+    let inner = scopes.filter { scope => scope.module == projectsPath + "/inner" }
+    assert(inner.length == 1, "a module holding a nested marker was left out")
+    assert(
+      inner.map { scope => scope.skip } == [[projectsPath + "/inner/quiet"]],
+      "the nested marker was not skipped",
+    )
+    let quiet = gomod.projectScopes(ws, projectsPath + "/inner/quiet", markers).{{module, path, skip}}
+    assert(
+      quiet.map { scope => scope.module + ":" + scope.path } == [projectsPath + "/inner:" + projectsPath + "/inner/quiet"],
+      "a marker inside a module did not cover the part below it",
+    )
+
+    let mod = gomod.at(projectsPath + "/inner")
+    let ctr = gomod
+      .goContainer(gomod.scannerVersion)
+      .withDirectory("/src", ws.directory("/", include: [projectsPath + "/**"]))
+      .withWorkdir("/src/" + mod.path)
+    let parent = mod
+      .withPackages(ctr, ["echo"], under: mod.path, skip: [projectsPath + "/inner/quiet"])
+      .stdout
+    assert(parent.contains("/inner"), "the module's own package did not run: " + parent)
+    assert(parent.contains("quiet") == false, "a skipped package ran: " + parent)
+    let nested = mod.withPackages(ctr, ["echo"], under: projectsPath + "/inner/quiet").stdout
+    assert(nested.trimSpace.hasSuffix("/inner/quiet"), "the scoped package did not run: " + nested)
     null
   }
 
@@ -198,6 +278,17 @@ type E2e {
     assert(
       discovered.contains(embedPath) and discovered.contains(helperPath),
       "discovery lost a real module",
+    )
+
+    # Discovery reads the workspace directly and the scanner reads its own
+    # snapshot; they must still agree on what a module is.
+    let scanned = gomod.scannedModuleRoots(ws)
+    let onlyDiscovered = discovered.filter { p => scanned.contains(p) == false }
+    let onlyScanned = scanned.filter { p => discovered.contains(p) == false }
+    assert(
+      onlyDiscovered.length == 0 and onlyScanned.length == 0,
+      "discovery and the scanner disagree: discovery alone has "
+        + onlyDiscovered.join(", ") + "; the scanner alone has " + onlyScanned.join(", "),
     )
 
     # Naming one directly still reaches it: a caller that spells out a path

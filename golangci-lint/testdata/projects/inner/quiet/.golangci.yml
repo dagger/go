@@ -1,0 +1,6 @@
+version: "2"
+# quiet.go fails staticcheck, which only the parent configuration enables.
+linters:
+  default: none
+  enable:
+    - errcheck
