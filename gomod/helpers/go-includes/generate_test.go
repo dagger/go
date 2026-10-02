@@ -11,18 +11,19 @@ import (
 func TestGenerationDirectoryDiscovery(t *testing.T) {
 	root := t.TempDir()
 	for name, contents := range map[string]string{
-		"ignored/_generate.go":  "package ignored\n//go:generate echo no\n",
-		"hidden/.generate.go":   "package hidden\n//go:generate echo no\n",
-		"go.mod":                "module example.com/root\n",
-		"generate.go":           "package root\n//go:generate echo root\n",
-		"a/generate.go":         "package a\n//go:generate echo a\n",
-		"a/another.go":          "package a\n//go:generate echo another\n",
-		"z/generate.go":         "package z\n//go:generate\techo z\n",
-		"include/generate.go":   "package include\n//go:generate:include asset\n",
-		"container/generate.go": "package container\n//go:generate:container generate-env\n",
-		"comment/generate.go":   "package comment\n// go:generate echo no\n",
-		"nested/go.mod":         "module example.com/nested\n",
-		"nested/generate.go":    "package nested\n//go:generate echo nested\n",
+		"ignored/_generate.go":   "package ignored\n//go:generate echo no\n",
+		"hidden/.generate.go":    "package hidden\n//go:generate echo no\n",
+		"go.mod":                 "module example.com/root\n",
+		"generate.go":            "package root\n//go:generate echo root\n",
+		"a/generate.go":          "package a\n//go:generate echo a\n",
+		"a/another.go":           "package a\n//go:generate echo another\n",
+		"z/generate.go":          "package z\n//go:generate\techo z\n",
+		"include/generate.go":    "package include\n//go:generate:include asset\n",
+		"container/generate.go":  "package container\n//go:generate:container generate-env\n",
+		"dependency/generate.go": "package dependency\n//go:generate:dependency db dag://tools/db\n",
+		"comment/generate.go":    "package comment\n// go:generate echo no\n",
+		"nested/go.mod":          "module example.com/nested\n",
+		"nested/generate.go":     "package nested\n//go:generate echo nested\n",
 	} {
 		p := filepath.Join(root, name)
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {

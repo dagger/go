@@ -243,6 +243,20 @@ package selects a container. Consecutive packages with the same value share
 container state; changes carry workspace files forward. Packages without the
 directive use the module's configured base.
 
+Services can be bound by name for generation or tests:
+
+```go
+//go:generate:dependency db dag+service://my-module/my-db
+//go:test:dependency backend dag://my-mod/the-backend
+```
+
+`:dependency` accepts one name and one service link per line. Repeat the directive
+to bind more services. Bindings apply to that directory,
+with either the default container or `:container`. Conflicting links for the same
+name are errors. Adjacent directories share container state only when their
+container and dependency directives agree. Workspace files carry over when either
+changes.
+
 A package's own `generate` fails when the scan could not read its module,
 naming the file, while the batch `generate` skips that module (see below).
 

@@ -853,9 +853,11 @@ type GoModule {
   """
   let generateExec(ws: Workspace!, dirs: [String!]!): Container! {
     let initial = base(ws).withDirectory(".", source(ws, generate: true))
-    dirs.reduce(GoGeneration(container: initial, value: "")) { state, dir =>
+    dirs.reduce(GoGeneration(container: initial, configuration: "\n")) { state, dir =>
       let value = lib.at(path).generateContainer(ws, dir)
-      let ctr = if (value == state.value) {
+      let bindings = lib.at(path).generateDependencies(ws, dir)
+      let key = value + "\n" + bindings.join("\n")
+      let ctr = if (key == state.configuration) {
         state.container
       } else {
         let selected = if (value == "") {
@@ -865,10 +867,12 @@ type GoModule {
             gomod.withGoCaches(ws.resolve(value).container.withoutEntrypoint),
           )
         }
-        selected.withDirectory(mountPath, state.container.directory(mountPath))
+        gomod
+          .withServiceDependencies(ws, selected, bindings)
+          .withDirectory(mountPath, state.container.directory(mountPath))
       }
       GoGeneration(
-        value: value,
+        configuration: key,
         container: ctr
           .withWorkdir(mountPath + "/" + dir)
           .withExec(["go", "generate", "."], experimentalPrivilegedNesting: true),
@@ -922,10 +926,17 @@ type GoModule {
       }
     }
     let selected = dirs.map { dir => testContainer(ws, dir) }
-    if (selected.any { value => value != "" }) {
-      dirs.reduce(GoTesting(container: base(ws), value: "", initialized: false)) { state, dir =>
+    if (selected.any { value => value != "" } or dirs.any { dir =>
+      testDependencies(
+        ws,
+        dir,
+      ).length > 0
+    }) {
+      dirs.reduce(GoTesting(container: base(ws), configuration: "", initialized: false)) { state, dir =>
         let value = testContainer(ws, dir)
-        let ctr = if (state.initialized and value == state.value) {
+        let bindings = testDependencies(ws, dir)
+        let key = value + "\n" + bindings.join("\n")
+        let ctr = if (state.initialized and key == state.configuration) {
           state.container
         } else {
           let selectedBase = if (value == "") {
@@ -935,7 +946,10 @@ type GoModule {
               gomod.withGoCaches(ws.resolve(value).container.withoutEntrypoint),
             )
           }
-          let fresh = testEnvWithBase(ws, selectedBase)
+          let fresh = testEnvWithBase(
+            ws,
+            gomod.withServiceDependencies(ws, selectedBase, bindings),
+          )
           if (state.initialized) {
             fresh.withDirectory(mountPath, state.container.directory(mountPath))
           } else {
@@ -943,7 +957,7 @@ type GoModule {
           }
         }
         GoTesting(
-          value: value,
+          configuration: key,
           container: runTestDirectory(ws, ctr, dir),
           initialized: true,
         )
@@ -960,6 +974,10 @@ type GoModule {
   """
   let testContainer(ws: Workspace!, dir: String!): String! {
     lib.at(path).testContainer(ws, packagePath(dir))
+  }
+
+  let testDependencies(ws: Workspace!, dir: String!): [String!]! {
+    lib.at(path).testDependencies(ws, packagePath(dir))
   }
 
   """
@@ -980,16 +998,17 @@ type GoModule {
   """
   let testEnvForDirectory(ws: Workspace!, dir: String!): Container! {
     let value = testContainer(ws, dir)
-    if (value == "") {
-      testEnv(ws)
+    let selectedBase = if (value == "") {
+      base(ws)
     } else {
-      testEnvWithBase(
-        ws,
-        prepareBase(
-          gomod.withGoCaches(ws.resolve(value).container.withoutEntrypoint),
-        ),
+      prepareBase(
+        gomod.withGoCaches(ws.resolve(value).container.withoutEntrypoint),
       )
     }
+    testEnvWithBase(
+      ws,
+      gomod.withServiceDependencies(ws, selectedBase, testDependencies(ws, dir)),
+    )
   }
 
   """
@@ -1247,15 +1266,15 @@ type GoTest {
   }
 }
 
-# Carry workspace files across changes in the generation container.
+# Carry workspace files across changes in the generation container or services.
 type GoGeneration {
   let container: Container!
-  let value: String!
+  let configuration: String!
 }
 
-# Carry test container state across adjacent package directories.
+# Carry test container state across packages with the same container and services.
 type GoTesting {
   let container: Container!
-  let value: String!
+  let configuration: String!
   let initialized: Boolean!
 }

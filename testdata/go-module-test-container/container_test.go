@@ -8,6 +8,7 @@ import (
 )
 
 //go:test:container dag://go-dev/test-env
+//go:test:dependency directive-backend dag+service://go-dev/dependency-service
 //go:test:include input.txt
 func TestSelectedContainer(t *testing.T) {
 	if os.Getenv("TESTER_BASE") != "workspace" {
@@ -32,5 +33,14 @@ func TestSelectedContainer(t *testing.T) {
 	body, err := io.ReadAll(response.Body)
 	if err != nil || string(body) != "test service retained\n" {
 		t.Fatalf("selected container lost service: %q, %v", body, err)
+	}
+	response, err = http.Get("http://directive-backend:8080/value")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err = io.ReadAll(response.Body)
+	if err != nil || string(body) != "dependency service\n" {
+		t.Fatalf("named test lost dependency: %q, %v", body, err)
 	}
 }

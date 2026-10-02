@@ -1308,9 +1308,8 @@ type GoDev {
     let selectedRoot = "testdata/go-module-test-container"
     run(
       go(version: "1.26.1", test: [selectedRoot])
-        .module(ws, selectedRoot, findUp: false)
         .packages(ws)
-        .get(key: ".")
+        .get(key: selectedRoot)
         .tests(ws)
         .get(key: "TestSelectedContainer")
         .test(ws),
@@ -1363,6 +1362,179 @@ type GoDev {
         assert(failure.contains("artifact is a Directory, not a Container"), "wrong test artifact type was not reported: " + failure)
       } else {
         assert(failure.contains("no artifact matches"), "missing test artifact was not reported: " + failure)
+      }
+    }
+    null
+  }
+
+  dependencyService: Service! {
+    container
+      .from("busybox:1.37.0")
+      .withNewFile("/www/value", "dependency service\n")
+      .withExposedPort(8080)
+      .asService(args: ["httpd", "-f", "-p", "8080", "-h", "/www"])
+  }
+
+  otherDependencyService: Service! {
+    container
+      .from("busybox:1.37.0")
+      .withNewFile("/www/value", "other service\n")
+      .withExposedPort(8080)
+      .asService(args: ["httpd", "-f", "-p", "8080", "-h", "/www"])
+  }
+
+  """
+  Dependency directives bind services to default and selected containers.
+  """
+  serviceDependenciesCheck(ws: Workspace!): Void @check {
+    let root = "fixtures/service-dependencies"
+    let fixture = directory
+      .withNewFile("go.mod", "module example.com/dependencies\n\ngo 1.26.1\n")
+      .withNewFile("generate.go", ```go
+        package fixture
+        //go:generate:dependency db dag+service://go-dev/dependency-service
+        //go:generate:dependency backend dag://go-dev/other-dependency-service
+        //go:generate sh -ec "wget -qO db.txt http://db:8080/value; wget -qO backend.txt http://backend:8080/value; echo shared > /dependency-state"
+      ``` + "\n")
+      .withNewFile("main_test.go", ```go
+        package fixture
+        import ("io"; "net/http"; "os"; "testing")
+        //go:test:dependency db dag://go-dev/dependency-service
+        //go:test:dependency backend dag+service://go-dev/other-dependency-service
+        func TestBindings(t *testing.T) {
+          for host, want := range map[string]string{"db": "dependency service\n", "backend": "other service\n"} {
+            r, err := http.Get("http://"+host+":8080/value"); if err != nil { t.Fatal(err) }
+            body, err := io.ReadAll(r.Body); r.Body.Close()
+            if err != nil || string(body) != want { t.Fatalf("%s: %q, %v", host, body, err) }
+          }
+          if err := os.WriteFile("test-output.txt", []byte("carried\n"), 0644); err != nil { t.Fatal(err) }
+          if err := os.WriteFile("/dependency-state", []byte("shared\n"), 0644); err != nil { t.Fatal(err) }
+        }
+      ``` + "\n")
+      .withNewFile("a-same/generate.go", ```go
+        package same
+        //go:generate:dependency backend dag://go-dev/other-dependency-service
+        //go:generate:dependency db dag+service://go-dev/dependency-service
+        //go:generate sh -ec "grep -qx shared /dependency-state; wget -qO same.txt http://db:8080/value"
+      ``` + "\n")
+      .withNewFile("a-same/main_test.go", ```go
+        package same
+        import ("os"; "testing")
+        //go:test:dependency backend dag+service://go-dev/other-dependency-service
+        //go:test:dependency db dag://go-dev/dependency-service
+        func TestShared(t *testing.T) {
+          b, err := os.ReadFile("/dependency-state")
+          if err != nil || string(b) != "shared\n" { t.Fatalf("same bindings lost state: %q, %v", b, err) }
+        }
+      ``` + "\n")
+      .withNewFile("b-custom/generate.go", ```go
+        package custom
+        //go:generate:container dag://go-dev/generate-env
+        //go:generate:dependency db dag://go-dev/other-dependency-service
+        //go:generate sh -ec "test ! -f /dependency-state; cat ../db.txt > carried.txt; wget -qO db.txt http://db:8080/value; wget -qO inherited.txt http://generator-input:8080/value; echo custom > /dependency-state"
+      ``` + "\n")
+      .withNewFile("b-custom/main_test.go", ```go
+        package custom
+        import ("io"; "net/http"; "os"; "testing")
+        //go:test:container dag://go-dev/test-env
+        //go:test:dependency db dag+service://go-dev/other-dependency-service
+        func TestCustom(t *testing.T) {
+          if _, err := os.Stat("/dependency-state"); !os.IsNotExist(err) { t.Fatal("different bindings retained container state") }
+          for host, want := range map[string]string{"db": "other service\n", "tester-input": "test service retained\n"} {
+            r, err := http.Get("http://"+host+":8080/value"); if err != nil { t.Fatal(err) }
+            b, err := io.ReadAll(r.Body); r.Body.Close()
+            if err != nil || string(b) != want { t.Fatalf("%s: %q, %v", host, b, err) }
+          }
+          b, err := os.ReadFile("../test-output.txt")
+          if err != nil || string(b) != "carried\n" { t.Fatalf("workspace output lost: %q, %v", b, err) }
+          if err := os.WriteFile("/dependency-state", []byte("custom\n"), 0644); err != nil { t.Fatal(err) }
+        }
+      ``` + "\n")
+      .withNewFile("c-clean/generate.go", ```go
+        package clean
+        //go:generate:container dag://go-dev/generate-env
+        //go:generate sh -ec "test ! -f /dependency-state; if wget -qO /dev/null http://db:8080/value; then exit 1; fi; echo clean > clean.txt"
+      ``` + "\n")
+      .withNewFile("c-clean/main_test.go", ```go
+        package clean
+        import ("net"; "os"; "testing")
+        //go:test:container dag://go-dev/test-env
+        func TestClean(t *testing.T) {
+          if _, err := os.Stat("/dependency-state"); !os.IsNotExist(err) { t.Fatal("dependency change retained container state") }
+          if _, err := net.LookupHost("db"); err == nil { t.Fatal("service binding leaked into another package") }
+        }
+      ``` + "\n")
+    let caller = ws.withDirectory(root, fixture)
+    let module = go(version: "1.26.1", test: [root], generate: [root + "/**"]).module(
+      caller,
+      root,
+      findUp: false,
+    )
+    let changes = module.generate(caller)
+    assert(
+      changes.layer.file(root + "/db.txt").contents == "dependency service\n",
+      "default generate service was not bound",
+    )
+    assert(
+      changes.layer.file(root + "/backend.txt").contents == "other service\n",
+      "second generate service was not bound",
+    )
+    assert(
+      changes.layer.file(root + "/a-same/same.txt").contents == "dependency service\n",
+      "same dependency configuration lost its service",
+    )
+    assert(
+      changes.layer.file(root + "/b-custom/db.txt").contents == "other service\n",
+      "custom generate service was not bound",
+    )
+    assert(
+      changes.layer.file(root + "/b-custom/inherited.txt").contents == "service binding retained\n",
+      "custom container lost its existing service",
+    )
+    assert(
+      changes.layer.file(root + "/b-custom/carried.txt").contents == "dependency service\n",
+      "dependency change lost workspace output",
+    )
+    assert(
+      changes.layer.file(root + "/c-clean/clean.txt").contents == "clean\n",
+      "dependency binding leaked",
+    )
+    module.test(caller)
+    let defaultCaller = ws.withDirectory(
+      root,
+      fixture.withoutDirectory("b-custom").withoutDirectory("c-clean"),
+    )
+    go(version: "1.26.1", test: [root]).module(defaultCaller, root, findUp: false).test(defaultCaller)
+    null
+  }
+
+  """
+  Missing or non-service artifacts report dependency resolution errors.
+  """
+  serviceDependenciesErrorsCheck(ws: Workspace!): Void @check {
+    let root = "fixtures/service-dependency-errors"
+    ["dag://missing-module/service", "dag://go-dev/container-directory"].map { address =>
+      let fixture = directory
+        .withNewFile("go.mod", "module example.com/dependency-errors\n\ngo 1.26.1\n")
+        .withNewFile("generate.go", "package fixture\n//go:generate:dependency db " + address + "\n//go:generate go version\n")
+        .withNewFile("main_test.go", "package fixture\nimport \"testing\"\n//go:test:dependency db " + address + "\nfunc TestDependency(t *testing.T) {}\n")
+      let caller = ws.withDirectory(root, fixture)
+      let module = go(version: "1.26.1", test: [root], generate: [root + "/**"]).module(
+        caller,
+        root,
+        findUp: false,
+      )
+      let generated = { module.generate(caller).addedPaths.join(","); "unexpected success" } rescue {
+        err: Error => err.message
+      }
+      let tested = { module.test(caller); "unexpected success" } rescue {
+        err: Error => err.message
+      }
+      [generated, tested].map { failure =>
+        assert(failure != "unexpected success" and failure.contains(address), "dependency resolution error did not name the link: " + failure)
+        if (address == "dag://go-dev/container-directory") {
+          assert(failure.contains("artifact is a Directory, not a Service"), "wrong dependency artifact type was not reported: " + failure)
+        }
       }
     }
     null

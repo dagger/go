@@ -74,8 +74,8 @@ func newTargetModuleFromArgs(ctx context.Context, cliArgs []string) (*targetModu
 		fmt.Fprintln(os.Stderr, "usage: go-includes --output PATH [--test] [--generate] [--test-dirs] [/DIR]")
 		flags.PrintDefaults()
 	}
-	test := flags.Bool("test", false, "also follow //go:test:include and //go:test:container directives")
-	generate := flags.Bool("generate", false, "also follow //go:generate:include directives and go:generate go -C modules")
+	test := flags.Bool("test", false, "also follow //go:test:include, //go:test:container and service dependency directives")
+	generate := flags.Bool("generate", false, "also follow //go:generate:include, container and service dependency directives and go:generate go -C modules")
 	testDirs := flags.Bool("test-dirs", false, "print directories containing Go tests")
 	output := flags.String("output", "", "file to write results to (one entry per line)")
 	if err := flags.Parse(cliArgs); err != nil {
@@ -544,7 +544,7 @@ func goDirectivesInFile(filePath string, data []byte) ([]goDirective, error) {
 				position: fset.Position(comment.Slash).String(),
 				comment:  comment.Text,
 			}
-			if directive.isEmbed() || directive.isTestInclude() || directive.isTestContainer() || directive.isGenerateInclude() || directive.hasName("go:generate:container") || directive.isGenerate() {
+			if directive.isEmbed() || directive.isTestInclude() || directive.isTestContainer() || directive.isGenerateInclude() || directive.hasName("go:generate:container") || directive.isGenerate() || directive.isDependency() {
 				directives = append(directives, directive)
 			}
 		}
@@ -581,6 +581,11 @@ func (d goDirective) isTestInclude() bool {
 // isTestContainer reports whether the directive is //go:test:container.
 func (d goDirective) isTestContainer() bool {
 	return d.hasName("go:test:container")
+}
+
+// isDependency reports whether this is a service dependency directive.
+func (d goDirective) isDependency() bool {
+	return d.hasName("go:generate:dependency") || d.hasName("go:test:dependency")
 }
 
 // isGenerateInclude reports whether the directive is //go:generate:include.
@@ -680,7 +685,7 @@ func (d goDirective) line() (string, string, bool) {
 		nameEnd = len(line)
 	}
 	name := line[:nameEnd]
-	if name != "go:embed" && name != "go:test:include" && name != "go:test:container" && name != "go:generate:include" && name != "go:generate:container" && name != "go:generate" {
+	if name != "go:embed" && name != "go:test:include" && name != "go:test:container" && name != "go:generate:include" && name != "go:generate:container" && name != "go:generate" && name != "go:generate:dependency" && name != "go:test:dependency" {
 		return "", "", false
 	}
 	return name, line[nameEnd:], true

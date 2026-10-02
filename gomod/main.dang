@@ -21,6 +21,16 @@ type Gomod {
   """
   includeExtraFiles: [String!]! = []
 
+  """
+  Resolve service links and bind them to a container by name.
+  """
+  withServiceDependencies(ws: Workspace!, ctr: Container!, bindings: [String!]!): Container! {
+    bindings.reduce(ctr) { current, binding =>
+      let parts = binding.split("\t")
+      current.withServiceBinding(parts[0] ?? "", ws.resolve(parts[1] ?? "").service)
+    }
+  }
+
   new(
     """
     Extra workspace-root include patterns mounted for every module's commands.
@@ -704,6 +714,30 @@ type GoMod {
       .file(stemFor(directory) + ".generatecontainer")
       .contents
       .trimSpace
+  }
+
+  """
+  Service bindings requested by a generate directory, as name TAB address.
+  """
+  generateDependencies(ws: Workspace!, directory: String!): [String!]! {
+    gomod
+      .scan(ws, generate: true)
+      .file(stemFor(directory) + ".generatedependencies")
+      .contents
+      .split("\n")
+      .filter { line => line != "" }
+  }
+
+  """
+  Service bindings requested by a test package, as name TAB address.
+  """
+  testDependencies(ws: Workspace!, directory: String!): [String!]! {
+    gomod
+      .scan(ws, test: true)
+      .file(stemFor(directory) + ".testdependencies")
+      .contents
+      .split("\n")
+      .filter { line => line != "" }
   }
 
   """
