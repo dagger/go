@@ -229,12 +229,36 @@ generators need a different order.
 
 A directory can pick the container its generators run in with
 `//go:generate:container`, resolved with the caller's `Workspace.resolve` — a
-workspace container by name, such as `generate-env`, or an image reference such
-as `docker.io/library/golang:1.26.1-alpine`. Conflicting values in one
+workspace container address, such as `dag://example/generate-env`, or an image
+reference such as `docker.io/library/golang:1.26.1-alpine`. Conflicting values in one
 directory are errors. Consecutive directories naming the same one share a
 container; when it changes, workspace files carry over so later commands still
 see earlier output. Without the directive, the directory uses the module's own
 base container.
+
+Tests can select a container for each test package with `//go:test:container`.
+It uses the same workspace container addresses and image references. All Go
+files in one package must agree. Packages run in lexical order when any test
+package selects a container. Consecutive packages with the same value share
+container state; changes carry workspace files forward. Packages without the
+directive use the module's configured base.
+
+Services can be bound by name for generation or tests:
+
+```go
+//go:generate:dependency db dag+service://my-module/my-db
+//go:test:dependency backend dag://my-mod/the-backend
+//go:test:dependency web index.docker.io/library/nginx:1.28.0-alpine
+```
+
+`:dependency` accepts one name and one service address per line. Use a DAG link
+to a service or an image address. Image services use their default command and
+wait for their exposed ports. Repeat the directive to bind more services.
+Bindings apply to that directory,
+with either the default container or `:container`. Conflicting links for the same
+name are errors. Adjacent directories share container state only when their
+container and dependency directives agree. Workspace files carry over when either
+changes.
 
 A package's own `generate` fails when the scan could not read its module,
 naming the file, while the batch `generate` skips that module (see below).
@@ -451,21 +475,20 @@ One command runs all four suites:
 dagger check
 ```
 
-The root `dagger.toml` installs `go`'s suite as the entrypoint and each other
-suite under a `<tool>-checks` key, which prefixes its checks. Every module needs
-v1.0.0-beta.15 or later, the first release with collections and the
-`Workspace.resolve` that `//go:generate:container` uses.
-
-One suite, or one check, at a time:
+Use Dagger v1.0.0-beta.15. All suites run directly on the released engine.
+Run one suite or check while iterating:
 
 ```sh
-dagger check -m .dagger/modules/go-dev            # the root go module
-dagger check -m gomod/.dagger/modules/e2e         # the shared library
-dagger check -m golangci-lint/.dagger/modules/e2e
-dagger check -m staticcheck/.dagger/modules/e2e
+dagger check "dag://go-dev/**"                  # the root go module
+dagger check "dag://gomod-checks/**"            # the shared library
+dagger check "dag://golangci-lint-checks/**"
+dagger check "dag://staticcheck-checks/**"
 
-dagger check -m gomod/.dagger/modules/e2e scan-check   # or one check by name
+dagger check dag://gomod-checks/scan-check       # or one check by name
 ```
+
+`dagger shell playground` opens a container with an example repository at
+`/example`; run `dagger generate` there to try the container directive.
 
 `testdata/` and `fixtures/` hold the modules the suites run against. Several of
 them fail on purpose — a failing test, a lint diagnostic, a module with no

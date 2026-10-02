@@ -38,9 +38,17 @@ func (index *localIndex) generateDirectoriesFor(moduleRoot string) ([]string, er
 	return dirs, nil
 }
 
-// generateContainersFor uses the same parsed comments and directory scope as
-// go:generate:include. Values are passed unchanged to Workspace.resolve.
+// generateContainersFor returns the container requested by each generate directory.
 func (index *localIndex) generateContainersFor(moduleRoot string) (map[string]string, error) {
+	return index.containersFor(moduleRoot, "go:generate:container")
+}
+
+// testContainersFor returns the container requested by each test directory.
+func (index *localIndex) testContainersFor(moduleRoot string) (map[string]string, error) {
+	return index.containersFor(moduleRoot, "go:test:container")
+}
+
+func (index *localIndex) containersFor(moduleRoot, directiveName string) (map[string]string, error) {
 	directives, err := index.directives(moduleRoot)
 	if err != nil {
 		return nil, err
@@ -48,7 +56,7 @@ func (index *localIndex) generateContainersFor(moduleRoot string) (map[string]st
 	containers := map[string]string{}
 	positions := map[string]string{}
 	for _, directive := range directives {
-		if !directive.hasName("go:generate:container") {
+		if !directive.hasName(directiveName) {
 			continue
 		}
 		args, err := directive.args()
@@ -56,11 +64,11 @@ func (index *localIndex) generateContainersFor(moduleRoot string) (map[string]st
 			return nil, err
 		}
 		if len(args) != 1 || strings.TrimSpace(args[0]) == "" {
-			return nil, fmt.Errorf("%s: //go:generate:container requires one non-empty value", directive.position)
+			return nil, fmt.Errorf("%s: //%s requires one non-empty value", directive.position, directiveName)
 		}
 		dir := path.Dir(directive.filePath)
 		if previous, ok := containers[dir]; ok && previous != args[0] {
-			return nil, fmt.Errorf("%s: conflicting //go:generate:container values in directory %s: %q (at %s) and %q", directive.position, dir, previous, positions[dir], args[0])
+			return nil, fmt.Errorf("%s: conflicting //%s values in directory %s: %q (at %s) and %q", directive.position, directiveName, dir, previous, positions[dir], args[0])
 		}
 		containers[dir] = args[0]
 		positions[dir] = directive.position

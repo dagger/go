@@ -18,8 +18,8 @@ import (
 func runAll(cliArgs []string) error {
 	flags := flag.NewFlagSet("go-includes --all", flag.ExitOnError)
 	flags.Bool("all", false, "compute includes for every module")
-	test := flags.Bool("test", false, "also follow //go:test:include directives")
-	generate := flags.Bool("generate", false, "also follow //go:generate:include directives and go:generate go -C modules")
+	test := flags.Bool("test", false, "also follow //go:test:include, //go:test:container and service dependency directives")
+	generate := flags.Bool("generate", false, "also follow //go:generate:include, container and service dependency directives and go:generate go -C modules")
 	root := flags.String("root", ".", "workspace root to scan")
 	outputDir := flags.String("output-dir", "", "directory to write one file of include patterns per module to")
 	if err := flags.Parse(cliArgs); err != nil {
@@ -84,6 +84,15 @@ func (index *localIndex) writeAllDir(dir string, test, generate bool) error {
 			// empty string so a reader never has to tell absent from empty.
 			for _, generateDir := range scan.generateDirs {
 				files[moduleOutputFile(generateDir, ".generatecontainer")] = scan.generateContainers[generateDir]
+				files[moduleOutputFile(generateDir, ".generatedependencies")] = linesWithTrailer(scan.generateDependencies[generateDir])
+			}
+		}
+		if test {
+			// Write an empty value too: every test package has either its
+			// selected container or the default module container.
+			for _, testDir := range scan.testDirs {
+				files[moduleOutputFile(testDir, ".testcontainer")] = scan.testContainers[testDir]
+				files[moduleOutputFile(testDir, ".testdependencies")] = linesWithTrailer(scan.testDependencies[testDir])
 			}
 		}
 		for name, contents := range files {
@@ -215,11 +224,14 @@ func linesWithTrailer(lines []string) string {
 // moduleScan is one module's slice of the workspace scan, or the reason there
 // is none.
 type moduleScan struct {
-	includes           []string
-	testDirs           []string
-	generateDirs       []string
-	generateContainers map[string]string
-	failure            string
+	includes             []string
+	testDirs             []string
+	generateDirs         []string
+	generateContainers   map[string]string
+	testContainers       map[string]string
+	generateDependencies map[string][]string
+	testDependencies     map[string][]string
+	failure              string
 }
 
 // scanModule computes one module's inputs, returning the failure as data
@@ -231,8 +243,14 @@ func (index *localIndex) scanModule(moduleRoot string, test, generate bool) modu
 	}
 	var generateDirs []string
 	var generateContainers map[string]string
+	var generateDependencies map[string][]string
+	var testDependencies map[string][]string
 	if generate {
 		generateDirs, err = index.generateDirectoriesFor(moduleRoot)
+		if err != nil {
+			return moduleScan{failure: err.Error() + "\n"}
+		}
+		generateDependencies, err = index.dependenciesFor(moduleRoot, "generate")
 		if err != nil {
 			return moduleScan{failure: err.Error() + "\n"}
 		}
@@ -241,11 +259,25 @@ func (index *localIndex) scanModule(moduleRoot string, test, generate bool) modu
 			return moduleScan{failure: err.Error() + "\n"}
 		}
 	}
+	var testContainers map[string]string
+	if test {
+		testDependencies, err = index.dependenciesFor(moduleRoot, "test")
+		if err != nil {
+			return moduleScan{failure: err.Error() + "\n"}
+		}
+		testContainers, err = index.testContainersFor(moduleRoot)
+		if err != nil {
+			return moduleScan{failure: err.Error() + "\n"}
+		}
+	}
 	return moduleScan{
-		includes:           includes,
-		testDirs:           index.testDirectoriesFor(moduleRoot),
-		generateDirs:       generateDirs,
-		generateContainers: generateContainers,
+		includes:             includes,
+		testDirs:             index.testDirectoriesFor(moduleRoot),
+		generateDirs:         generateDirs,
+		generateContainers:   generateContainers,
+		testContainers:       testContainers,
+		generateDependencies: generateDependencies,
+		testDependencies:     testDependencies,
 	}
 }
 

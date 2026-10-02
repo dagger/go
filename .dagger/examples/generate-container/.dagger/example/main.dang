@@ -1,0 +1,13 @@
+type Example {
+  """
+  Go container with a mounted file and an HTTP service.
+  """
+  generateEnv: Container! { checks.generateEnv }
+
+  """
+  Run this project's Go generator in its selected container.
+  """
+  generate(ws: Workspace!): Changeset! @generate {
+    go.module(ws, ".").generate(ws)
+  }
+}

@@ -21,6 +21,25 @@ type Gomod {
   """
   includeExtraFiles: [String!]! = []
 
+  """
+  Resolve DAG service links or images and bind them to a container by name.
+  """
+  withServiceDependencies(ws: Workspace!, ctr: Container!, bindings: [String!]!): Container! {
+    bindings.reduce(ctr) { current, binding =>
+      let parts = binding.split("\t")
+      let address = parts[1] ?? ""
+      let service = if (address.hasPrefix("dag://") or address.hasPrefix("dag+service://")) {
+        ws.resolve(address).service
+      } else {
+        let image = ws.resolve(address).container
+        image.exposedPorts.{{port, protocol}}.reduce(image) { ready, port =>
+          ready.withExposedPort(port.port, protocol: port.protocol)
+        }.asService
+      }
+      current.withServiceBinding(parts[0] ?? "", service)
+    }
+  }
+
   new(
     """
     Extra workspace-root include patterns mounted for every module's commands.
@@ -647,8 +666,8 @@ type GoMod {
   and local go.mod replaces reachable from this module's include graph.
 
   With neither flag, only go:embed directives and local replaces are followed.
-  `test` also follows go:test:include, `generate` also follows
-  go:generate:include and the modules that go:generate `go -C` reaches.
+  `test` also follows go:test:include and go:test:container, `generate` also
+  follows go:generate:include and the modules that go:generate `go -C` reaches.
   """
   includeDiscovered(
     ws: Workspace!,
@@ -680,6 +699,18 @@ type GoMod {
   }
 
   """
+  The container a test directory asks for with //go:test:container, or "" when
+  it asks for none. The caller resolves the value against its own workspace.
+  """
+  testContainer(ws: Workspace!, directory: String!): String! {
+    gomod
+      .scan(ws, test: true)
+      .file(stemFor(directory) + ".testcontainer")
+      .contents
+      .trimSpace
+  }
+
+  """
   The container a generate directory asks for with //go:generate:container, or
   "" when it asks for none. `directory` is one of `generateDirectories`.
 
@@ -692,6 +723,30 @@ type GoMod {
       .file(stemFor(directory) + ".generatecontainer")
       .contents
       .trimSpace
+  }
+
+  """
+  Service bindings requested by a generate directory, as name TAB address.
+  """
+  generateDependencies(ws: Workspace!, directory: String!): [String!]! {
+    gomod
+      .scan(ws, generate: true)
+      .file(stemFor(directory) + ".generatedependencies")
+      .contents
+      .split("\n")
+      .filter { line => line != "" }
+  }
+
+  """
+  Service bindings requested by a test package, as name TAB address.
+  """
+  testDependencies(ws: Workspace!, directory: String!): [String!]! {
+    gomod
+      .scan(ws, test: true)
+      .file(stemFor(directory) + ".testdependencies")
+      .contents
+      .split("\n")
+      .filter { line => line != "" }
   }
 
   """
