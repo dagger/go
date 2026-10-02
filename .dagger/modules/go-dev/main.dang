@@ -1509,6 +1509,45 @@ type GoDev {
   }
 
   """
+  Images supply services using their default command, on default or custom containers.
+  """
+  imageDependenciesCheck(ws: Workspace!): Void @check {
+    let root = "fixtures/image-dependencies"
+    ["", "index.docker.io/library/golang:1.26.1-alpine", "dag://go-dev/test-env"].map { base =>
+      let generateContainer = if (base == "") { "" } else { "//go:generate:container " + base + "\n" }
+      let testContainer = if (base == "") { "" } else { "//go:test:container " + base + "\n" }
+      let fixture = directory
+        .withNewFile("go.mod", "module example.com/image-dependencies\n\ngo 1.26.1\n")
+        .withNewFile("generate.go", "package fixture\n" + generateContainer + ```go
+          //go:generate:dependency web index.docker.io/library/nginx:1.28.0-alpine
+          //go:generate sh -ec "wget -qO generated.html http://web"
+        ``` + "\n")
+        .withNewFile("main_test.go", "package fixture\n" + testContainer + ```go
+          import ("io"; "net/http"; "strings"; "testing")
+          //go:test:dependency web index.docker.io/library/nginx:1.28.0-alpine
+          func TestImageService(t *testing.T) {
+            r, err := http.Get("http://web"); if err != nil { t.Fatal(err) }
+            defer r.Body.Close()
+            b, err := io.ReadAll(r.Body)
+            if err != nil || !strings.Contains(string(b), "Welcome to nginx!") { t.Fatalf("image service: %q, %v", b, err) }
+          }
+        ``` + "\n")
+      let caller = ws.withDirectory(root, fixture)
+      let module = go(version: "1.26.1", test: [root], generate: [root]).module(
+        caller,
+        root,
+        findUp: false,
+      )
+      assert(
+        module.generate(caller).layer.file(root + "/generated.html").contents.contains("Welcome to nginx!"),
+        "generator could not use the image service",
+      )
+      module.test(caller)
+    }
+    null
+  }
+
+  """
   Missing or non-service artifacts report dependency resolution errors.
   """
   serviceDependenciesErrorsCheck(ws: Workspace!): Void @check {

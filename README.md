@@ -248,10 +248,13 @@ Services can be bound by name for generation or tests:
 ```go
 //go:generate:dependency db dag+service://my-module/my-db
 //go:test:dependency backend dag://my-mod/the-backend
+//go:test:dependency web index.docker.io/library/nginx:1.28.0-alpine
 ```
 
-`:dependency` accepts one name and one service link per line. Repeat the directive
-to bind more services. Bindings apply to that directory,
+`:dependency` accepts one name and one service address per line. Use a DAG link
+to a service or an image address. Image services use their default command and
+wait for their exposed ports. Repeat the directive to bind more services.
+Bindings apply to that directory,
 with either the default container or `:container`. Conflicting links for the same
 name are errors. Adjacent directories share container state only when their
 container and dependency directives agree. Workspace files carry over when either

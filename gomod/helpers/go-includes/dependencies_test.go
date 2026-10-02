@@ -13,11 +13,12 @@ func TestServiceDependencies(t *testing.T) {
 		t.Run(operation, func(t *testing.T) {
 			for _, tc := range []struct{ name, directives, err string }{
 				{"multiple and duplicate", ":dependency backend dag://tools/backend\n//go:" + operation + ":dependency db \"dag+service://tools/db\"\n//go:" + operation + ":dependency db dag+service://tools/db", ""},
-				{"missing link", ":dependency db", "requires a binding name and a dag service link"},
-				{"extra argument", ":dependency db dag://tools/db extra", "requires a binding name and a dag service link"},
-				{"empty name", ":dependency \"\" dag://tools/db", "requires a binding name and a dag service link"},
-				{"invalid name", ":dependency \"db name\" dag://tools/db", "requires a binding name and a dag service link"},
-				{"image link", ":dependency db docker.io/postgres:17", "requires a binding name and a dag service link"},
+				{"missing link", ":dependency db", "requires a binding name and a service address"},
+				{"extra argument", ":dependency db dag://tools/db extra", "requires a binding name and a service address"},
+				{"empty name", ":dependency \"\" dag://tools/db", "requires a binding name and a service address"},
+				{"invalid name", ":dependency \"db name\" dag://tools/db", "requires a binding name and a service address"},
+				{"empty address", ":dependency db \"\"", "requires a binding name and a service address"},
+				{"invalid address", ":dependency db \"image address\"", "requires a binding name and a service address"},
 				{"bad quote", ":dependency db \"dag://tools/db", "invalid quoted string"},
 				{"cross file conflict", ":dependency db dag://tools/db", "conflicting service dependency"},
 				{"conflict", ":dependency db dag://tools/db\n//go:" + operation + ":dependency db dag://tools/other", "conflicting service dependency"},
@@ -26,7 +27,7 @@ func TestServiceDependencies(t *testing.T) {
 					root := t.TempDir()
 					files := map[string]string{
 						"go.mod":              "module example.com/root\n",
-						"main_test.go":        "package fixture\n//go:generate echo root\n//go:" + operation + tc.directives + "\n",
+						"main_test.go":        "package fixture\n//go:generate echo root\n//go:" + operation + tc.directives + "\n//go:" + operation + ":dependency web index.docker.io/library/nginx:1.28.0-alpine\n",
 						"child/child_test.go": "package child\n//go:generate echo child\n",
 						"nested/go.mod":       "module example.com/nested\n",
 						"nested/main_test.go": "package nested\n//go:" + operation + ":dependency isolated dag://tools/nested\n",
@@ -66,7 +67,7 @@ func TestServiceDependencies(t *testing.T) {
 						}
 						return
 					}
-					want := map[string][]string{".": {"backend\tdag://tools/backend", "db\tdag+service://tools/db"}}
+					want := map[string][]string{".": {"backend\tdag://tools/backend", "db\tdag+service://tools/db", "web\tindex.docker.io/library/nginx:1.28.0-alpine"}}
 					if err != nil || !reflect.DeepEqual(got, want) {
 						t.Fatalf("got %v, %v; want %v", got, err, want)
 					}

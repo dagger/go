@@ -22,12 +22,21 @@ type Gomod {
   includeExtraFiles: [String!]! = []
 
   """
-  Resolve service links and bind them to a container by name.
+  Resolve DAG service links or images and bind them to a container by name.
   """
   withServiceDependencies(ws: Workspace!, ctr: Container!, bindings: [String!]!): Container! {
     bindings.reduce(ctr) { current, binding =>
       let parts = binding.split("\t")
-      current.withServiceBinding(parts[0] ?? "", ws.resolve(parts[1] ?? "").service)
+      let address = parts[1] ?? ""
+      let service = if (address.hasPrefix("dag://") or address.hasPrefix("dag+service://")) {
+        ws.resolve(address).service
+      } else {
+        let image = ws.resolve(address).container
+        image.exposedPorts.{{port, protocol}}.reduce(image) { ready, port =>
+          ready.withExposedPort(port.port, protocol: port.protocol)
+        }.asService
+      }
+      current.withServiceBinding(parts[0] ?? "", service)
     }
   }
 

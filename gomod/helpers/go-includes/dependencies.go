@@ -26,9 +26,9 @@ func (index *localIndex) dependenciesFor(moduleRoot, operation string) (map[stri
 		}
 		name, _, _ := directive.line()
 		if len(args) != 2 || args[0] == "" || strings.IndexFunc(args[0], unicode.IsSpace) >= 0 ||
-			!(strings.HasPrefix(args[1], "dag://") || strings.HasPrefix(args[1], "dag+service://")) ||
+			args[1] == "" ||
 			strings.IndexFunc(args[1], unicode.IsSpace) >= 0 {
-			return nil, fmt.Errorf("%s: //%s requires a binding name and a dag service link", directive.position, name)
+			return nil, fmt.Errorf("%s: //%s requires a binding name and a service address", directive.position, name)
 		}
 		dir := path.Dir(directive.filePath)
 		if bindings[dir] == nil {
