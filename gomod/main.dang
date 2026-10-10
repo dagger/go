@@ -569,8 +569,40 @@ type GoMod {
   nestedRoots(ws: Workspace!): [String!]! {
     ws
       .findRoots(start: "/" + subpath(""), markers: ["go.mod"])
-      .map { root => gomod.workspaceRootPath(ws, root) }
+      .map { root => rootPath(ws, root) }
       .filter { root => root != path }
+  }
+
+  # Gomod.workspaceRootPath, in process: calling it through gomod is a module
+  # call, with the fixed per-call cost of one, for a few string operations.
+  let rootPath(ws: Workspace!, cwdPath: String!): String! {
+    let segments = cwdPath.split("/").filter { segment => segment != "" and segment != "." }
+    let up = segments.filter { segment => segment == ".." }.length
+    let down = segments.filter { segment => segment != ".." }
+    let resolved = ws.cwd.split("/").filter { segment => segment != "" }.dropLast(up) + down
+
+    if (resolved.length == 0) { "." } else { resolved.join("/") }
+  }
+
+  # Gomod.scan, in process. It builds the same container, so it is the same
+  # cached exec; calling gomod.scan instead would add a module call each time.
+  let scanned(ws: Workspace!, test: Boolean!, generate: Boolean!): Directory! {
+    let testFlags = if (test) { ["--test"] } else { [] }
+    let generateFlags = if (generate) { ["--generate"] } else { [] }
+    container
+      .from("golang:" + gomod.scannerVersion + "-alpine")
+      .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
+      .withEnvVariable("GOMODCACHE", "/go/pkg/mod")
+      .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
+      .withEnvVariable("GOCACHE", "/root/.cache/go-build")
+      .withoutEntrypoint
+      .withWorkdir("/helpers/go-includes")
+      .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
+      .withExec(["go", "build", "-o", "/usr/local/bin/go-includes", "."])
+      .withDirectory("/ws", ws.directory("/", include: ["**/*.go", "**/go.mod"]))
+      .withWorkdir("/ws")
+      .withExec(["go-includes", "--all", "--output-dir", "/output"] + testFlags + generateFlags)
+      .directory("/output")
   }
 
   # A workspace path made relative to this module root.
@@ -619,7 +651,7 @@ type GoMod {
     test: Boolean! = false,
     generate: Boolean! = false,
   ): String {
-    let failure = gomod.scan(ws, test: test, generate: generate).file(outputStem + ".err").contents.trimSpace
+    let failure = scanned(ws, test, generate).file(outputStem + ".err").contents.trimSpace
     if (failure == "") { null } else { failure }
   }
 
@@ -629,7 +661,7 @@ type GoMod {
     generate: Boolean!,
     suffix: String!,
   ): [String!]! {
-    let output = gomod.scan(ws, test: test, generate: generate)
+    let output = scanned(ws, test, generate)
     let failure = output.file(outputStem + ".err").contents.trimSpace
     if (failure != "") {
       raise failure
@@ -667,7 +699,7 @@ type GoMod {
   patch that has no image yet would otherwise stop the module being checked.
   """
   goVersion(ws: Workspace!): String {
-    let declared = gomod.scan(ws).file(outputStem + ".goversion").contents.trimSpace
+    let declared = scanned(ws, false, false).file(outputStem + ".goversion").contents.trimSpace
     if (declared == "") { null } else { declared }
   }
 
@@ -687,8 +719,7 @@ type GoMod {
   against its own workspace.
   """
   generateContainer(ws: Workspace!, directory: String!): String! {
-    gomod
-      .scan(ws, generate: true)
+    scanned(ws, false, true)
       .file(stemFor(directory) + ".generatecontainer")
       .contents
       .trimSpace
