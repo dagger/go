@@ -923,11 +923,13 @@ type GoModule {
     if (files.length == 0) {
       empty
     } else {
-      # One search over the module tree, matched back to the package's files
-      # below. The search is the same for every package, so it runs once.
-      # Searching a subdirectory or the files by name would be narrower, but
-      # fails on a workspace built with withDirectory.
-      let matches = testMatches(ws)
+      # Search only this package's test files, keeping directory traversal and
+      # filename ordering consistent with module-wide discovery.
+      let matches = ws.search(
+        paths: ["/" + pkgPath],
+        globs: [if (pkgPath == ".") { "/*_test.go" } else { "/" + pkgPath + "/*_test.go" }],
+        pattern: testFunctionPattern,
+      ).{{filePath, matchedLines}}
       files
         .reduce(empty) { names, file =>
           names + matches
