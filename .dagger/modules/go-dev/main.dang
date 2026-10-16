@@ -2,6 +2,53 @@
 Development checks for dagger.io/go.
 """
 type GoDev {
+  """
+  Test filenames are literal paths, including characters used by glob patterns.
+  """
+  packageSearchFilenamesCheck: Void @check {
+    let files = directory
+      .withNewFile("go.mod", "module example.com/test-filenames\n\ngo 1.26.1\n")
+      .withNewFile("bracket[1]_test.go", "package fixture\nimport \"testing\"\nfunc TestBracket(t *testing.T) {}\n")
+      .withNewFile("normal_test.go", "package fixture\nimport \"testing\"\nfunc TestNormal(t *testing.T) {}\n")
+      .withNewFile("link-target.txt", "package fixture\nimport \"testing\"\nfunc TestLinked(t *testing.T) {}\n")
+      .withSymlink(target: "link-target.txt", linkName: "linked_test.go")
+    let caller = files.asWorkspace
+    let tool = go(version: "1.26.1")
+    let names = tool.packages(caller).get(key: ".").tests(caller).keys
+    assert(names == ["TestBracket", "TestNormal"], "literal filename tests: " + names.join(", "))
+    let mounted = directory
+      .asWorkspace
+      .withDirectory("mounted/package", files)
+      .withWorkdir("mounted/package")
+    let mountedNames = tool.packages(mounted).get(key: "mounted/package").tests(mounted).keys
+    assert(mountedNames == names, "mounted test names: " + mountedNames.join(", "))
+    null
+  }
+
+  """
+  Test collection listing sees added host-workspace files in filename order.
+  """
+  packageSearchOverlayCheck(ws: Workspace!): Void @check {
+    let root = "testdata/go-module-with-testdata"
+    let tool = go(version: "1.26.1")
+    let base = ws.withWorkdir(root)
+    let before = tool.packages(base).get(key: root).tests(base).keys
+    let caller = base
+      .withNewFile("/" + root + "/z_added_a_test.go", "package fixture\nimport \"testing\"\nfunc TestOverlayAlpha(t *testing.T) {}\n")
+      .withNewFile("/" + root + "/z_added_z_test.go", "package fixture\nimport \"testing\"\nfunc Test正常(t *testing.T) {}\n")
+    let names = tool.packages(caller).get(key: root).tests(caller).keys
+    assert(names == before + ["TestOverlayAlpha", "Test正常"], "overlay test names: " + names.join(", "))
+    let addedPackage = caller.withNewFile(
+      "/" + root + "/added-package/added_test.go",
+      "package added\nimport \"testing\"\nfunc TestAddedPackage(t *testing.T) {}\n",
+    )
+    assert(
+      tool.packages(addedPackage).get(key: root + "/added-package").tests(addedPackage).keys == ["TestAddedPackage"],
+      "a package created through Dagger lost its tests",
+    )
+    null
+  }
+
   let generatedFixturePath: String! = "testdata/go-module-generate"
   let generatedFilePath: String! = generatedFixturePath + "/generated.go"
   let baseFixturePath: String! = "testdata/go-module-custom-base"
@@ -264,6 +311,7 @@ type GoDev {
         func ExampleAlpha() {}
         func Examplefoo() {}
       ``` + "\n")
+      .withNewFile("unicode_test.go", "package root\nimport \"testing\"\nfunc TestÉÉ(t *testing.T) {}\nfunc Test正常(t *testing.T) {}\nfunc TestParameter(т *testing.T) {}\n")
       .withNewFile("constrained_test.go", "//go:build never\n\npackage root\nimport \"testing\"\nfunc TestConstrained(t *testing.T) {}\n")
       .withNewFile("sub/b_test.go", "package sub\nimport \"testing\"\nfunc TestBeta(t *testing.T) {}\nfunc TestAlpha(t *testing.T) {}\n")
       .withNewFile("examples/c_test.go", "package examples\nfunc Example() {}\n")
@@ -279,7 +327,7 @@ type GoDev {
     )
     let rootNames = found.get(key: ".").tests(rooted).keys
     assert(
-      rootNames == ["TestAlpha", "FuzzAlpha", "ExampleAlpha", "TestConstrained"],
+      rootNames == ["TestAlpha", "FuzzAlpha", "ExampleAlpha", "TestConstrained", "TestÉÉ", "Test正常", "TestParameter"],
       "static test discovery found: " + rootNames.join(", "),
     )
     let subNames = found.get(key: "sub").tests(rooted).keys
