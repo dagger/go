@@ -450,6 +450,48 @@ type GoDev {
   }
 
   """
+  A package builds as the workspace it is given says, not as the one it was
+  found in: binary looks again for its module and whether it is a main
+  package. Callers inside a module pass a workspace explicitly, so the two can
+  differ.
+  """
+  otherWorkspaceCheck: Void @check {
+    let found = directory
+      .withNewFile("go.mod", "module example.com/workspaces\n\ngo 1.26.1\n")
+      .withNewFile("app/app_test.go", "package main\n\nimport \"testing\"\n\nfunc TestApp(t *testing.T) {}\n")
+      .withNewFile("cmd/main.go", goMain("cmd"))
+      .withNewFile("tool/main.go", goMain("tool"))
+    let tool = go(version: "1.26.1")
+    let packages = tool.packages(found.asWorkspace)
+    assert(packages.keys == ["app", "cmd", "tool"], "package discovery found: " + packages.keys.join(", "))
+
+    let madeMain = found.withNewFile("app/main.go", goMain("app")).asWorkspace
+    let app = tool
+      .module(madeMain, ".", findUp: false)
+      .base(madeMain)
+      .withFile("/usr/local/bin/app", packages.get(key: "app").binary(madeMain))
+      .withExec(["app"])
+      .stdout
+    assert(app == "app\n", "a package made a main package printed: " + app)
+
+    let madeLibrary = found.withNewFile("cmd/main.go", "package cmd\n").asWorkspace
+    let library = { packages.get(key: "cmd").binary(madeLibrary).size; "no failure" } rescue {
+      err: Error => err.message
+    }
+    assert(library.contains("not a main package"), "a package made a library built: " + library)
+
+    let nested = found.withNewFile("tool/go.mod", "module example.com/tool\n\ngo 1.26.1\n").asWorkspace
+    let moved = tool
+      .module(nested, "tool", findUp: false)
+      .base(nested)
+      .withFile("/usr/local/bin/tool", packages.get(key: "tool").binary(nested))
+      .withExec(["tool"])
+      .stdout
+    assert(moved == "tool\n", "a package moved into a nested module printed: " + moved)
+    null
+  }
+
+  """
   Run every module's tests while respecting per-module skip configuration.
   """
   singleModuleCheck(ws: Workspace!): Void @check {
