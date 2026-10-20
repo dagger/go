@@ -233,6 +233,24 @@ type E2e {
   }
 
   """
+  Owned files use byte order, including when a directory and file share a stem.
+  """
+  fileOrderCheck: Void @check {
+    let base = directory.withNewFile("go.mod", "module example.com/order\n\ngo 1.26.1\n")
+    assert(gomod.at(".").ownFiles(base.asWorkspace, "*.go") == [], "empty module has Go files")
+    let single = base.withNewFile("a.go", "package root\n")
+    assert(gomod.at(".").ownFiles(single.asWorkspace, "*.go") == ["a.go"], "single file changed")
+    let files = single
+      .withNewFile("a/b.go", "package a\n")
+      .withNewFile("z.go", "package root\n")
+      .withNewFile("A.go", "package root\n")
+      .withNewFile("é.go", "package root\n")
+    let found = gomod.at(".").ownFiles(files.asWorkspace, "*.go")
+    assert(found == ["A.go", "a.go", "a/b.go", "z.go", "é.go"], "file order changed: " + found.join(", "))
+    null
+  }
+
+  """
   Test and generate directory listings come from the same scan.
   """
   directoriesCheck(ws: Workspace!): Void @check {

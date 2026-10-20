@@ -201,7 +201,11 @@ type Go {
   let sorted(items: [String!]!): [String!]! {
     let empty: [String!]! = []
     items.reduce(empty) { acc, item =>
-      acc.takeWhile { x => x <= item } + [item] + acc.dropWhile { x => x <= item }
+      if (acc.length == 0 or acc.takeLast(1).join("") <= item) {
+        acc + [item]
+      } else {
+        acc.takeWhile { x => x <= item } + [item] + acc.dropWhile { x => x <= item }
+      }
     }
   }
 
@@ -782,7 +786,11 @@ type GoModule {
   let sorted(items: [String!]!): [String!]! {
     let empty: [String!]! = []
     items.reduce(empty) { acc, item =>
-      acc.takeWhile { x => x <= item } + [item] + acc.dropWhile { x => x <= item }
+      if (acc.length == 0 or acc.takeLast(1).join("") <= item) {
+        acc + [item]
+      } else {
+        acc.takeWhile { x => x <= item } + [item] + acc.dropWhile { x => x <= item }
+      }
     }
   }
 
