@@ -317,13 +317,24 @@ type Gomod {
   A container with the shared Go module and build caches mounted, so every tool
   in the workspace warms one download cache and one build cache rather than
   one each.
+
+  Module downloads also retry. proxy.golang.org sometimes resets a module zip
+  download mid-stream, and with Go's default GOPROXY only a 404 or 410 falls
+  through to the next entry. "|" falls through on any error, so a failed zip
+  download retries the proxy once, then fetches from the origin. A container
+  that sets its own GOPROXY keeps it.
   """
   withGoCaches(ctr: Container!): Container! {
-    ctr
+    let cached = ctr
       .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
       .withEnvVariable("GOMODCACHE", "/go/pkg/mod")
       .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
       .withEnvVariable("GOCACHE", "/root/.cache/go-build")
+    if ((ctr.envVariable("GOPROXY") ?? "") == "") {
+      cached.withEnvVariable("GOPROXY", "https://proxy.golang.org|https://proxy.golang.org|direct")
+    } else {
+      cached
+    }
   }
 
   """
@@ -636,6 +647,8 @@ type GoMod {
       .withEnvVariable("GOMODCACHE", "/go/pkg/mod")
       .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
       .withEnvVariable("GOCACHE", "/root/.cache/go-build")
+      # The same download retry as withGoCaches.
+      .withEnvVariable("GOPROXY", "https://proxy.golang.org|https://proxy.golang.org|direct")
       .withoutEntrypoint
       .withWorkdir("/helpers/go-includes")
       .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
