@@ -79,13 +79,14 @@ type GolangciLint {
 
   """
   golangci-lint projects at or below the working directory, keyed by the
-  directory holding their configuration.
+  directory holding their configuration. Projects the lint setting skips are
+  left out unless includeSkipLint.
   """
   projects(
     ws: Workspace!,
     include: [String!]! = [],
     exclude: [String!]! = [],
-    includeSkipLint: Boolean! = true,
+    includeSkipLint: Boolean! = false,
   ): GolangciLintProjects! {
     GolangciLintProjects(
       paths: lib

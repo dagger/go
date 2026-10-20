@@ -90,13 +90,14 @@ type Staticcheck {
 
   """
   Staticcheck projects at or below the working directory, keyed by the
-  directory holding their staticcheck.conf.
+  directory holding their staticcheck.conf. Projects the lint setting skips
+  are left out unless includeSkipped.
   """
   projects(
     ws: Workspace!,
     include: [String!]! = [],
     exclude: [String!]! = [],
-    includeSkipped: Boolean! = true,
+    includeSkipped: Boolean! = false,
   ): StaticcheckProjects! {
     StaticcheckProjects(
       paths: lib

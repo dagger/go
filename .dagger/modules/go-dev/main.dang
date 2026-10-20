@@ -396,6 +396,15 @@ type GoDev {
     assert(selected == ["cmd/hello", "cmd/stamp", "lib"], "build patterns selected: " + selected.join(", "))
     let none = go(version: "1.26.1", build: ["!**"]).packages(caller).keys
     assert(none == ["lib"], "an empty build selection kept: " + none.join(", "))
+    # A workspace path reaches a nested module's main packages, whose directory
+    # within their own module is ".".
+    let outside = go(version: "1.26.1", build: ["**", "!nested"]).packages(caller).keys
+    assert(
+      outside == [".", "broken", "cmd/hello", "cmd/stamp", "cmd/tool/v2", "lib", "tools/hello"],
+      "a workspace path exclusion kept: " + outside.join(", "),
+    )
+    let inside = go(version: "1.26.1", build: ["nested"]).packages(caller).keys
+    assert(inside == ["lib", "nested"], "a workspace path selection kept: " + inside.join(", "))
 
     # buildFlags reach go build as separate arguments, so a value may hold
     # spaces, which GOFLAGS cannot carry.

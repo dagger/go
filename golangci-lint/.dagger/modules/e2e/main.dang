@@ -105,8 +105,8 @@ type E2e {
 
   """
   The lint setting reaches selection, including the JSON-fragment spelling
-  older beta engines deliver, and a skipped project still shows up in
-  discovery.
+  older beta engines deliver, and a skipped project stays out of discovery
+  unless asked for.
   """
   selectionCheck(ws: Workspace!): Void @check {
     assert(selectsOut(ws, ["**"], "a/b") == false, "default selection failed")
@@ -116,12 +116,12 @@ type E2e {
     assert(selectsOut(ws, ["[\"!docs\"", "\"!tmp\"]"], "docs"), "beta settings normalization failed")
     let tool = golangciLint(lint: ["!" + failurePath])
     assert(
-      tool.projects(ws).keys.contains(failurePath),
-      "discovery hid skipped project",
+      tool.projects(ws).keys.contains(failurePath) == false,
+      "discovery kept skipped project",
     )
     assert(
-      tool.projects(ws, includeSkipLint: false).keys.contains(failurePath) == false,
-      "skip filter failed",
+      tool.projects(ws, includeSkipLint: true).keys.contains(failurePath),
+      "includeSkipLint hid skipped project",
     )
     run(tool.project(ws, failurePath).lint(ws))
     run(golangciLint(lint: ["!**"]).projects(ws).batch.lint(ws))

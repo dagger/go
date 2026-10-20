@@ -46,8 +46,8 @@ A bare pattern selects, a `"!"`-prefixed pattern excludes, and an exclude wins
 whatever the order. `docs` means `docs` and every module below it; `**` and `*`
 mean all of them; `["!**"]` means none. Other glob shapes are not interpreted.
 `go` spells its two as `test` and `generate` rather than `lint`. Its `build`
-setting uses the same rules, but selects main packages by their directory
-within each module rather than module roots.
+setting uses the same rules, but selects main packages, by their directory
+within each module or by their workspace path.
 
 ## The modules
 
@@ -74,7 +74,7 @@ On a module: `test`, `generate`, `skip-test`, `skip-generate`,
 | `includeExtraFiles`   | Extra workspace files to mount, as include patterns.          |
 | `test`                | Module roots to test (see [Scoping](#scoping)).               |
 | `generate`            | Directories to run `go generate` in (see below).              |
-| `build`               | Main packages to build, by module-relative directory.         |
+| `build`               | Main packages to build, by module-relative or workspace path. |
 | `buildFlags`          | Extra flags for `go build` only.                              |
 | `goflags`             | `GOFLAGS` in every Go container.                              |
 | `mountPath`           | Where the workspace is mounted in Go containers.              |
@@ -162,9 +162,11 @@ modules and names starting with `.` or `_`. Other build constraints are not
 evaluated: a package whose files are all for another platform is listed, and
 building it fails.
 
-The `build` setting selects `main` packages by module-relative directory with
-the [Scoping](#scoping) rules, and applies in every module: `["cmd/**",
-"!cmd/internal"]` keeps `cmd` and its subdirectories except `cmd/internal`.
+The `build` setting selects `main` packages with the [Scoping](#scoping) rules.
+A pattern matches a package's directory within its module, in every module, or
+its workspace path: `["cmd/**", "!cmd/internal"]` keeps `cmd` and its
+subdirectories except `cmd/internal` in each module, and `["!vendor"]` drops
+every main package in the modules under `vendor`.
 
 `buildFlags` are passed to `go build` as separate arguments, after `goflags`
 has applied through `GOFLAGS`, so a value may contain spaces:
@@ -258,7 +260,10 @@ with no Go code around it is not a project.
 
 On a project: `modules` and `lint` (a `@check`). A project runs golangci-lint
 once per Go module it covers, with that module's toolchain, and golangci-lint
-finds the project's configuration by its own lookup. The collection's batch
+finds the project's configuration by its own lookup. Projects the `lint`
+setting skips are left out of `projects` unless `includeSkipLint` (for
+staticcheck, `includeSkipped`) is true; `project` still reaches one, and its
+`lint` does nothing. The collection's batch
 `lint` runs once over the selected projects in place of each project's own, as
 for `go`. Both linters name their check `lint`, so `dagger check --lint` runs
 them together and `--golangci-lint --lint` runs this one; select projects with
