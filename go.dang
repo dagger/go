@@ -37,7 +37,7 @@ type Go {
     """
     generate: [String!]! = ["**"],
     """
-    Main packages to build, as module-relative globs. "!" excludes.
+    Main packages to build, by module-relative or workspace path. "!" excludes.
     """
     build: [String!]! = ["**"],
     """
@@ -98,7 +98,7 @@ type Go {
   generate: [String!]! = ["**"]
 
   """
-  Main packages to build, as module-relative globs. "!" excludes.
+  Main packages to build, by module-relative or workspace path. "!" excludes.
   """
   build: [String!]! = ["**"]
 
@@ -497,7 +497,8 @@ type GoModule {
   let generatePatterns: [String!]!
 
   """
-  Module-relative globs selecting which main packages to build.
+  Globs selecting which main packages to build, by module-relative or
+  workspace path.
   """
   let buildPatterns: [String!]!
 
@@ -951,8 +952,19 @@ type GoModule {
         .filter { f => mains.contains(f) and ignored.contains(f) == false }
         .map { f => packageDirectory(f) }
         .uniq
-        .filter { pkg => lib.at(pkg).selected(buildPatterns) }
+        .filter { pkg => buildSelected(pkg) }
     }
+  }
+
+  # Whether the build setting selects a module-relative main package. A pattern
+  # matches the package's directory within the module or its workspace path, so
+  # "!vendor" leaves out every main package in modules under vendor.
+  let buildSelected(pkg: String!): Boolean! {
+    let paths = [pkg, packagePath(pkg)]
+    let selecting = buildPatterns.filter { p => p.hasPrefix("!") == false }
+    let excluding = buildPatterns.filter { p => p.hasPrefix("!") }
+    (selecting.length == 0 or selecting.any { p => paths.any { at => lib.at(at).selected([p]) } })
+      and excluding.any { p => paths.any { at => lib.at(at).selected([p]) == false } } == false
   }
 
   # Workspace-root paths of the Go files in this module's tree with a line of

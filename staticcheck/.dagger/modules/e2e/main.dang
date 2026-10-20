@@ -140,8 +140,12 @@ type E2e {
       "exclude-only selection excluded clean project",
     )
     assert(
-      excludeOnly.projects(ws, includeSkipped: false).keys.contains(failPath) == false,
-      "filtered discovery included excluded project",
+      excludeOnly.projects(ws).keys.contains(failPath) == false,
+      "discovery included excluded project",
+    )
+    assert(
+      excludeOnly.projects(ws, includeSkipped: true).keys.contains(failPath),
+      "includeSkipped hid excluded project",
     )
     run(excluded.project(ws, failPath).lint(ws))
     run(staticcheck(lint: ["!**"]).projects(ws).batch.lint(ws))
