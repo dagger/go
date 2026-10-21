@@ -552,15 +552,34 @@ type GoMod {
   and names starting with "." or "_" are left out, as Go leaves them out.
   """
   ownFiles(ws: Workspace!, glob: String!): [String!]! {
-    let nested = nestedRoots(ws)
+    let nested = nestedRootSet(ws)
     sorted(
       ws
         .glob(subpath("**/" + glob))
         .filter { file => file.hasSuffix("/") == false }
         .map { file => file.trimPrefix("/").trimPrefix("./") }
-        .filter { file => nested.any { root => file.hasPrefix(root + "/") } == false }
+        .filter { file => under(file, nested) == false }
         .filter { file => goIgnores(relative(file)) == false },
     )
+  }
+
+  # nestedRoots as a set, so testing a file against them costs one lookup per
+  # directory above it rather than one comparison per nested module.
+  let nestedRootSet(ws: Workspace!): Map[Boolean!]! {
+    let none: Map[Boolean!]! = [:]
+    nestedRoots(ws).reduce(none) { roots, root => roots.with(root, true) }
+  }
+
+  # Whether a workspace path lies below one of the roots in a set.
+  let under(file: String!, roots: Map[Boolean!]!): Boolean! {
+    file
+      .split("/")
+      .dropLast(1)
+      .reduce({{dir: "", found: false}}) { state, segment =>
+        let dir = if (state.dir == "") { segment } else { state.dir + "/" + segment }
+        {{dir: dir, found: state.found or roots.has(dir)}}
+      }
+      .found
   }
 
   """
