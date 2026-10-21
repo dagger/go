@@ -169,8 +169,8 @@ type Go {
     # A list rather than a collection: modules decide how a package is mounted
     # and which toolchain it gets, but they are not something to select.
     lib
-      .modules(ws, include: include, exclude: exclude).{{path}}
-      .map { found => goModule(ws, found.path) }
+      .modules(ws, include: include, exclude: exclude).{{path, goFiles}}
+      .map { found => goModuleAt(found.path, workspaceMountPath(ws), found.goFiles) }
       .filter { mod =>
         (includeSkipTest or mod.skipTest == false)
           and (includeSkipGenerate or mod.skipGenerate(ws) == false)
@@ -194,14 +194,33 @@ type Go {
   # The module holding a package. A package holds no module of its own, so
   # that the collection needs no workspace.
   let packageModule(ws: Workspace!, pkgPath: String!, mount: String!): GoModule! {
-    goModuleAt(lib.module(ws, pkgPath).path, mount)
+    goModuleAt(lib.module(ws, pkgPath).path, mount, null)
   }
 
-  # Byte-order sort, as Go's sort.Strings.
+  # Byte-order sort, as Go's sort.Strings: a merge sort, n log n comparisons.
   let sorted(items: [String!]!): [String!]! {
-    let empty: [String!]! = []
-    items.reduce(empty) { acc, item =>
-      acc.takeWhile { x => x <= item } + [item] + acc.dropWhile { x => x <= item }
+    if (items.length < 2) {
+      items
+    } else {
+      let half = items.length / 2
+      mergeSorted(sorted(items.takeFirst(half)), sorted(items.dropFirst(half)))
+    }
+  }
+
+  # Merges two byte-ordered lists into one.
+  let mergeSorted(a: [String!]!, b: [String!]!): [String!]! {
+    let i = 0
+    let j = 0
+    (a + b).map { unused =>
+      if (j == b.length or (i < a.length and a[i]! <= b[j]!)) {
+        let item = a[i]!
+        i += 1
+        item
+      } else {
+        let item = b[j]!
+        j += 1
+        item
+      }
     }
   }
 
@@ -213,10 +232,12 @@ type Go {
   }
 
   let goModule(ws: Workspace!, modPath: String!): GoModule! {
-    goModuleAt(modPath, workspaceMountPath(ws))
+    goModuleAt(modPath, workspaceMountPath(ws), null)
   }
 
-  let goModuleAt(modPath: String!, mount: String!): GoModule! {
+  # files is the module's Go files when the caller already has them, as
+  # Gomod.modules returns them, and null otherwise.
+  let goModuleAt(modPath: String!, mount: String!, files: [String!]): GoModule! {
     GoModule(
       path: modPath,
       configuredVersion: version,
@@ -229,6 +250,7 @@ type Go {
       buildFlags: buildFlags,
       goflags: goflags,
       mountPath: mount,
+      knownGoFiles: files,
     )
   }
 }
@@ -263,7 +285,7 @@ type GoPackages @collection {
     paths
       .map { p => tool.lib.module(ws, p).path }
       .uniq
-      .map { modPath => tool.goModuleAt(modPath, mountPath) }
+      .map { modPath => tool.goModuleAt(modPath, mountPath, null) }
   }
 
   # The selected packages in one module.
@@ -517,6 +539,10 @@ type GoModule {
   """
   mountPath: String!
 
+  # This module's Go files in no particular order, when whoever made it had
+  # them; package discovery uses them instead of listing the module again.
+  let knownGoFiles: [String!]
+
   """
   The shared library, which answers discovery, selection and source policy for
   this module, so `go` mounts what `golangci-lint` and `staticcheck` mount.
@@ -691,27 +717,29 @@ type GoModule {
   let packagePaths(ws: Workspace!): [String!]! {
     # The module's files are listed once and shared: listing them is the
     # costly part, and every kind of package is found among them.
-    let files = lib.at(path).ownFiles(ws, "*.go")
+    let files = knownGoFiles ?? lib.at(path).ownFiles(ws, "*.go")
     let empty: [String!]! = []
     let testDirs = if (skipTest) {
       empty
     } else {
-      let withTests = testMatches(ws).map { match => match.filePath.trimPrefix("/").trimPrefix("./") }
+      let withTests = testFiles(ws)
       files.filter { f => f.hasSuffix("_test.go") and withTests.contains(f) }.map { f => packageDirectory(f) }
     }
-    let dirs = testDirs + binaryPackagesIn(ws, files) + generatePackagesIn(ws, files)
+    # One marker search for both kinds of package below.
+    let marked = markers(ws)
+    let dirs = testDirs + binaryPackagesIn(ws, files, marked) + generatePackagesIn(ws, files, marked)
     dirs.uniq.map { dir => packagePath(dir) }
   }
 
   # Module-relative directories holding a go:generate command and selected by
   # the generate setting. A go:generate:include or :container annotation alone
   # is not a command.
-  let generatePackagesIn(ws: Workspace!, files: [String!]!): [String!]! {
+  let generatePackagesIn(ws: Workspace!, files: [String!]!, marked: [{{file: String!, line: String!}}!]!): [String!]! {
     let empty: [String!]! = []
     if (files.length == 0) {
       empty
     } else {
-      let found = markedFiles(ws, "generate")
+      let found = markedIn(marked, "generate")
       let dirs = files.filter { f => found.contains(f) }.map { f => packagePath(packageDirectory(f)) }.uniq
       selectGenerate(ws, dirs).map { dir => relativeDir(dir) }
     }
@@ -774,15 +802,52 @@ type GoModule {
     ws.search(
       paths: [if (path == ".") { "/" } else { "/" + path }],
       globs: ["*_test.go"],
-      pattern: `^func (Test([^a-z(]\w*)?\(\s*\w+\s+\*testing\.T\s*\)|Fuzz([^a-z(]\w*)?\(\s*\w+\s+\*testing\.F\s*\)|Example([^a-z(]\w*)?\(\s*\))`,
+      pattern: testFunctionPattern,
     ).{{filePath, matchedLines}}
   }
 
-  # Byte-order sort, as Go's sort.Strings.
+  # Workspace-root paths of the files in this module's tree that testMatches
+  # finds a line in: one result per file rather than per function, and only
+  # its path.
+  let testFiles(ws: Workspace!): [String!]! {
+    ws.search(
+      paths: [if (path == ".") { "/" } else { "/" + path }],
+      globs: ["*_test.go"],
+      pattern: testFunctionPattern,
+      filesOnly: true,
+    ).{{filePath}}
+      .map { match => match.filePath.trimPrefix("/").trimPrefix("./") }
+  }
+
+  # A test, fuzz or example function declaration.
+  let testFunctionPattern: String! {
+    `^func (Test([^a-z(]\w*)?\(\s*\w+\s+\*testing\.T\s*\)|Fuzz([^a-z(]\w*)?\(\s*\w+\s+\*testing\.F\s*\)|Example([^a-z(]\w*)?\(\s*\))`
+  }
+
+  # Byte-order sort, as Go's sort.Strings: a merge sort, n log n comparisons.
   let sorted(items: [String!]!): [String!]! {
-    let empty: [String!]! = []
-    items.reduce(empty) { acc, item =>
-      acc.takeWhile { x => x <= item } + [item] + acc.dropWhile { x => x <= item }
+    if (items.length < 2) {
+      items
+    } else {
+      let half = items.length / 2
+      mergeSorted(sorted(items.takeFirst(half)), sorted(items.dropFirst(half)))
+    }
+  }
+
+  # Merges two byte-ordered lists into one.
+  let mergeSorted(a: [String!]!, b: [String!]!): [String!]! {
+    let i = 0
+    let j = 0
+    (a + b).map { unused =>
+      if (j == b.length or (i < a.length and a[i]! <= b[j]!)) {
+        let item = a[i]!
+        i += 1
+        item
+      } else {
+        let item = b[j]!
+        j += 1
+        item
+      }
     }
   }
 
@@ -936,18 +1001,18 @@ type GoModule {
   # how go:generate scripts are kept out of the build. Other build constraints
   # are not evaluated: the build reports what the search got wrong.
   let binaryPackages(ws: Workspace!): [String!]! {
-    binaryPackagesIn(ws, lib.at(path).ownFiles(ws, "*.go"))
+    binaryPackagesIn(ws, lib.at(path).ownFiles(ws, "*.go"), markers(ws))
   }
 
   # binaryPackages among this module's own files, listed by the caller.
-  let binaryPackagesIn(ws: Workspace!, ownFiles: [String!]!): [String!]! {
+  let binaryPackagesIn(ws: Workspace!, ownFiles: [String!]!, marked: [{{file: String!, line: String!}}!]!): [String!]! {
     let empty: [String!]! = []
     let files = ownFiles.filter { f => f.hasSuffix("_test.go") == false }
     if (files.length == 0) {
       empty
     } else {
-      let mains = markedFiles(ws, "main")
-      let ignored = markedFiles(ws, "ignore")
+      let mains = markedIn(marked, "main")
+      let ignored = markedIn(marked, "ignore")
       files
         .filter { f => mains.contains(f) and ignored.contains(f) == false }
         .map { f => packageDirectory(f) }
@@ -967,28 +1032,35 @@ type GoModule {
       and excluding.any { p => paths.any { at => lib.at(at).selected([p]) == false } } == false
   }
 
-  # Workspace-root paths of the Go files in this module's tree with a line of
-  # one kind: "main" for a package main clause, "ignore" for an ignore build
-  # tag, "generate" for a go:generate command. One search finds all three, so
-  # discovering a module's packages searches its tree once. The caller narrows
-  # the files to the module's own.
-  let markedFiles(ws: Workspace!, kind: String!): [String!]! {
+  # Marker lines in this module's tree, each with its workspace-root file path:
+  # "package main" clauses, ignore build tags and go:generate commands. One
+  # search finds all three, so discovering a module's packages searches and
+  # reads its tree once; markedIn narrows the lines to a kind, and the caller
+  # narrows the files to the module's own.
+  let markers(ws: Workspace!): [{{file: String!, line: String!}}!]! {
     ws
       .search(
         paths: [if (path == ".") { "/" } else { "/" + path }],
         globs: ["*.go"],
         pattern: `^(package main\s*(//.*)?|//(go:build| \+build) ignore\s*|//go:generate\s.*)$`,
       ).{{filePath, matchedLines}}
+      .map { match => {{file: match.filePath.trimPrefix("/").trimPrefix("./"), line: match.matchedLines}} }
+  }
+
+  # The files with a marker line of one kind: "main" for a package main clause,
+  # "ignore" for an ignore build tag, "generate" for a go:generate command.
+  let markedIn(marked: [{{file: String!, line: String!}}!]!, kind: String!): [String!]! {
+    marked
       .filter { match =>
         if (kind == "main") {
-          match.matchedLines.hasPrefix("package main")
+          match.line.hasPrefix("package main")
         } else if (kind == "generate") {
-          match.matchedLines.hasPrefix("//go:generate")
+          match.line.hasPrefix("//go:generate")
         } else {
-          match.matchedLines.hasPrefix("//go:build") or match.matchedLines.hasPrefix("// +build")
+          match.line.hasPrefix("//go:build") or match.line.hasPrefix("// +build")
         }
       }
-      .map { match => match.filePath.trimPrefix("/").trimPrefix("./") }
+      .map { match => match.file }
       .uniq
   }
 

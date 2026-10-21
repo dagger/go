@@ -54,9 +54,11 @@ type Gomod {
     ws
       .findRoots(markers: ["go.mod"])
       .map { root => workspaceRootPath(ws, root) }
-      .filter { modPath => at(modPath).isGoModule(ws) }
       .filter { modPath => pathIncluded(ws, modPath, include, exclude) }
       .map { modPath => at(modPath) }
+      .filter { mod => mod.declaresModule(ws) }
+      .map { mod => mod.listed(ws) }
+      .filter { mod => mod.goFiles != null and mod.goFiles!.length > 0 }
   }
 
   """
@@ -80,7 +82,7 @@ type Gomod {
   to carry a Workspace it has no other use for.
   """
   at(path: String!): GoMod! {
-    GoMod(path: normalize(path), includeExtraFiles: includeExtraFiles)
+    GoMod(path: normalize(path), includeExtraFiles: includeExtraFiles, goFiles: null)
   }
 
   """
@@ -500,6 +502,19 @@ type GoMod {
   includeExtraFiles: [String!]!
 
   """
+  This module's Go files, as ownFiles(ws, "*.go") lists them but in no
+  particular order. Set on the modules Gomod.modules returns, which lists them
+  anyway, so a caller walking every module need not ask again; null on a module
+  from at or module.
+  """
+  goFiles: [String!]
+
+  # This module with its Go files listed.
+  let listed(ws: Workspace!): GoMod! {
+    GoMod(path: path, includeExtraFiles: includeExtraFiles, goFiles: unsortedOwnFiles(ws, "*.go"))
+  }
+
+  """
   A workspace-root path for a module-relative subpath.
   """
   subpath(relativePath: String!): String! {
@@ -543,8 +558,12 @@ type GoMod {
   line, and it holds Go files that Go would read.
   """
   isGoModule(ws: Workspace!): Boolean! {
+    declaresModule(ws) and unsortedOwnFiles(ws, "*.go").length > 0
+  }
+
+  # Whether this root's go.mod has a module line.
+  let declaresModule(ws: Workspace!): Boolean! {
     ws.file("/" + subpath("go.mod")).contents.match(`(?m)^[ \t]*module([ \t(]|$)`) != null
-      and ownFiles(ws, "*.go").length > 0
   }
 
   """
@@ -552,15 +571,37 @@ type GoMod {
   and names starting with "." or "_" are left out, as Go leaves them out.
   """
   ownFiles(ws: Workspace!, glob: String!): [String!]! {
-    let nested = nestedRoots(ws)
-    sorted(
-      ws
-        .glob(subpath("**/" + glob))
-        .filter { file => file.hasSuffix("/") == false }
-        .map { file => file.trimPrefix("/").trimPrefix("./") }
-        .filter { file => nested.any { root => file.hasPrefix(root + "/") } == false }
-        .filter { file => goIgnores(relative(file)) == false },
-    )
+    sorted(unsortedOwnFiles(ws, glob))
+  }
+
+  # ownFiles in no particular order, for callers that only need what it holds.
+  let unsortedOwnFiles(ws: Workspace!, glob: String!): [String!]! {
+    let nested = nestedRootSet(ws)
+    ws
+      .glob(subpath("**/" + glob))
+      .filter { file => file.hasSuffix("/") == false }
+      .map { file => file.trimPrefix("/").trimPrefix("./") }
+      .filter { file => under(file, nested) == false }
+      .filter { file => goIgnores(relative(file)) == false }
+  }
+
+  # nestedRoots as a set, so testing a file against them costs one lookup per
+  # directory above it rather than one comparison per nested module.
+  let nestedRootSet(ws: Workspace!): Map[Boolean!]! {
+    let none: Map[Boolean!]! = [:]
+    nestedRoots(ws).reduce(none) { roots, root => roots.with(root, true) }
+  }
+
+  # Whether a workspace path lies below one of the roots in a set.
+  let under(file: String!, roots: Map[Boolean!]!): Boolean! {
+    file
+      .split("/")
+      .dropLast(1)
+      .reduce({{dir: "", found: false}}) { state, segment =>
+        let dir = if (state.dir == "") { segment } else { state.dir + "/" + segment }
+        {{dir: dir, found: state.found or roots.has(dir)}}
+      }
+      .found
   }
 
   """
@@ -617,11 +658,30 @@ type GoMod {
     }
   }
 
-  # Byte-order sort, as Go's sort.Strings.
+  # Byte-order sort, as Go's sort.Strings: a merge sort, n log n comparisons.
   let sorted(items: [String!]!): [String!]! {
-    let empty: [String!]! = []
-    items.reduce(empty) { acc, item =>
-      acc.takeWhile { x => x <= item } + [item] + acc.dropWhile { x => x <= item }
+    if (items.length < 2) {
+      items
+    } else {
+      let half = items.length / 2
+      mergeSorted(sorted(items.takeFirst(half)), sorted(items.dropFirst(half)))
+    }
+  }
+
+  # Merges two byte-ordered lists into one.
+  let mergeSorted(a: [String!]!, b: [String!]!): [String!]! {
+    let i = 0
+    let j = 0
+    (a + b).map { unused =>
+      if (j == b.length or (i < a.length and a[i]! <= b[j]!)) {
+        let item = a[i]!
+        i += 1
+        item
+      } else {
+        let item = b[j]!
+        j += 1
+        item
+      }
     }
   }
 
