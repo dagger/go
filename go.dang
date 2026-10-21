@@ -725,19 +725,21 @@ type GoModule {
       let withTests = testFiles(ws)
       files.filter { f => f.hasSuffix("_test.go") and withTests.contains(f) }.map { f => packageDirectory(f) }
     }
-    let dirs = testDirs + binaryPackagesIn(ws, files) + generatePackagesIn(ws, files)
+    # One marker search for both kinds of package below.
+    let marked = markers(ws)
+    let dirs = testDirs + binaryPackagesIn(ws, files, marked) + generatePackagesIn(ws, files, marked)
     dirs.uniq.map { dir => packagePath(dir) }
   }
 
   # Module-relative directories holding a go:generate command and selected by
   # the generate setting. A go:generate:include or :container annotation alone
   # is not a command.
-  let generatePackagesIn(ws: Workspace!, files: [String!]!): [String!]! {
+  let generatePackagesIn(ws: Workspace!, files: [String!]!, marked: [{{file: String!, line: String!}}!]!): [String!]! {
     let empty: [String!]! = []
     if (files.length == 0) {
       empty
     } else {
-      let found = markedFiles(ws, "generate")
+      let found = markedIn(marked, "generate")
       let dirs = files.filter { f => found.contains(f) }.map { f => packagePath(packageDirectory(f)) }.uniq
       selectGenerate(ws, dirs).map { dir => relativeDir(dir) }
     }
@@ -999,18 +1001,18 @@ type GoModule {
   # how go:generate scripts are kept out of the build. Other build constraints
   # are not evaluated: the build reports what the search got wrong.
   let binaryPackages(ws: Workspace!): [String!]! {
-    binaryPackagesIn(ws, lib.at(path).ownFiles(ws, "*.go"))
+    binaryPackagesIn(ws, lib.at(path).ownFiles(ws, "*.go"), markers(ws))
   }
 
   # binaryPackages among this module's own files, listed by the caller.
-  let binaryPackagesIn(ws: Workspace!, ownFiles: [String!]!): [String!]! {
+  let binaryPackagesIn(ws: Workspace!, ownFiles: [String!]!, marked: [{{file: String!, line: String!}}!]!): [String!]! {
     let empty: [String!]! = []
     let files = ownFiles.filter { f => f.hasSuffix("_test.go") == false }
     if (files.length == 0) {
       empty
     } else {
-      let mains = markedFiles(ws, "main")
-      let ignored = markedFiles(ws, "ignore")
+      let mains = markedIn(marked, "main")
+      let ignored = markedIn(marked, "ignore")
       files
         .filter { f => mains.contains(f) and ignored.contains(f) == false }
         .map { f => packageDirectory(f) }
@@ -1030,28 +1032,35 @@ type GoModule {
       and excluding.any { p => paths.any { at => lib.at(at).selected([p]) == false } } == false
   }
 
-  # Workspace-root paths of the Go files in this module's tree with a line of
-  # one kind: "main" for a package main clause, "ignore" for an ignore build
-  # tag, "generate" for a go:generate command. One search finds all three, so
-  # discovering a module's packages searches its tree once. The caller narrows
-  # the files to the module's own.
-  let markedFiles(ws: Workspace!, kind: String!): [String!]! {
+  # Marker lines in this module's tree, each with its workspace-root file path:
+  # "package main" clauses, ignore build tags and go:generate commands. One
+  # search finds all three, so discovering a module's packages searches and
+  # reads its tree once; markedIn narrows the lines to a kind, and the caller
+  # narrows the files to the module's own.
+  let markers(ws: Workspace!): [{{file: String!, line: String!}}!]! {
     ws
       .search(
         paths: [if (path == ".") { "/" } else { "/" + path }],
         globs: ["*.go"],
         pattern: `^(package main\s*(//.*)?|//(go:build| \+build) ignore\s*|//go:generate\s.*)$`,
       ).{{filePath, matchedLines}}
+      .map { match => {{file: match.filePath.trimPrefix("/").trimPrefix("./"), line: match.matchedLines}} }
+  }
+
+  # The files with a marker line of one kind: "main" for a package main clause,
+  # "ignore" for an ignore build tag, "generate" for a go:generate command.
+  let markedIn(marked: [{{file: String!, line: String!}}!]!, kind: String!): [String!]! {
+    marked
       .filter { match =>
         if (kind == "main") {
-          match.matchedLines.hasPrefix("package main")
+          match.line.hasPrefix("package main")
         } else if (kind == "generate") {
-          match.matchedLines.hasPrefix("//go:generate")
+          match.line.hasPrefix("//go:generate")
         } else {
-          match.matchedLines.hasPrefix("//go:build") or match.matchedLines.hasPrefix("// +build")
+          match.line.hasPrefix("//go:build") or match.line.hasPrefix("// +build")
         }
       }
-      .map { match => match.filePath.trimPrefix("/").trimPrefix("./") }
+      .map { match => match.file }
       .uniq
   }
 
