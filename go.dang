@@ -722,7 +722,7 @@ type GoModule {
     let testDirs = if (skipTest) {
       empty
     } else {
-      let withTests = testMatches(ws).map { match => match.filePath.trimPrefix("/").trimPrefix("./") }
+      let withTests = testFiles(ws)
       files.filter { f => f.hasSuffix("_test.go") and withTests.contains(f) }.map { f => packageDirectory(f) }
     }
     let dirs = testDirs + binaryPackagesIn(ws, files) + generatePackagesIn(ws, files)
@@ -800,8 +800,26 @@ type GoModule {
     ws.search(
       paths: [if (path == ".") { "/" } else { "/" + path }],
       globs: ["*_test.go"],
-      pattern: `^func (Test([^a-z(]\w*)?\(\s*\w+\s+\*testing\.T\s*\)|Fuzz([^a-z(]\w*)?\(\s*\w+\s+\*testing\.F\s*\)|Example([^a-z(]\w*)?\(\s*\))`,
+      pattern: testFunctionPattern,
     ).{{filePath, matchedLines}}
+  }
+
+  # Workspace-root paths of the files in this module's tree that testMatches
+  # finds a line in: one result per file rather than per function, and only
+  # its path.
+  let testFiles(ws: Workspace!): [String!]! {
+    ws.search(
+      paths: [if (path == ".") { "/" } else { "/" + path }],
+      globs: ["*_test.go"],
+      pattern: testFunctionPattern,
+      filesOnly: true,
+    ).{{filePath}}
+      .map { match => match.filePath.trimPrefix("/").trimPrefix("./") }
+  }
+
+  # A test, fuzz or example function declaration.
+  let testFunctionPattern: String! {
+    `^func (Test([^a-z(]\w*)?\(\s*\w+\s+\*testing\.T\s*\)|Fuzz([^a-z(]\w*)?\(\s*\w+\s+\*testing\.F\s*\)|Example([^a-z(]\w*)?\(\s*\))`
   }
 
   # Byte-order sort, as Go's sort.Strings: a merge sort, n log n comparisons.
