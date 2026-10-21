@@ -741,7 +741,13 @@ type GoModule {
     } else {
       let found = markedIn(marked, "generate")
       let dirs = files.filter { f => found.contains(f) }.map { f => packagePath(packageDirectory(f)) }.uniq
-      selectGenerate(ws, dirs).map { dir => relativeDir(dir) }
+      # Selecting globs the workspace for each pattern: skip it when there is
+      # nothing to select, as in most modules.
+      if (dirs.length == 0) {
+        empty
+      } else {
+        selectGenerate(ws, dirs).map { dir => relativeDir(dir) }
+      }
     }
   }
 
