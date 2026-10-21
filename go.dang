@@ -182,13 +182,31 @@ type Go {
   """
   packages(ws: Workspace!): GoPackages! {
     let empty: [String!]! = []
+    let mods = modules(ws)
+    let paths = if (mods.length == 0) {
+      empty
+    } else {
+      # The test and marker searches run once over every module's tree rather
+      # than once per module, and each module keeps the files that are its own.
+      let searched = mods[0]!.searchedUnder(
+        ws,
+        outermost(mods.map { mod => mod.path }),
+        mods.any { mod => mod.skipTest == false },
+      )
+      mods.reduce(empty) { all, mod => all + mod.packagePaths(ws, searched) }
+    }
     GoPackages(
-      paths: sorted(
-        modules(ws).reduce(empty) { all, mod => all + mod.packagePaths(ws) },
-      ),
+      paths: sorted(paths),
       mountPath: workspaceMountPath(ws),
       tool: self,
     )
+  }
+
+  # The paths among modPaths not inside another of them.
+  let outermost(modPaths: [String!]!): [String!]! {
+    modPaths.filter { p =>
+      modPaths.any { q => q != p and (q == "." or p.hasPrefix(q + "/")) } == false
+    }
   }
 
   # The module holding a package. A package holds no module of its own, so
@@ -714,7 +732,8 @@ type GoModule {
   # Workspace paths of this module's packages that have something to do: tests
   # to run, a main package to build, or go:generate commands to run. Each is
   # found by searching the source, so listing packages runs no container.
-  let packagePaths(ws: Workspace!): [String!]! {
+  # searched is searchedUnder over trees that hold this module's.
+  let packagePaths(ws: Workspace!, searched: {{testFiles: [String!]!, mains: [String!]!, ignored: [String!]!, generated: [String!]!}}!): [String!]! {
     # The module's files are listed once and shared: listing them is the
     # costly part, and every kind of package is found among them.
     let files = knownGoFiles ?? lib.at(path).ownFiles(ws, "*.go")
@@ -722,24 +741,38 @@ type GoModule {
     let testDirs = if (skipTest) {
       empty
     } else {
-      let withTests = testFiles(ws)
-      files.filter { f => f.hasSuffix("_test.go") and withTests.contains(f) }.map { f => packageDirectory(f) }
+      files.filter { f => f.hasSuffix("_test.go") and searched.testFiles.contains(f) }.map { f => packageDirectory(f) }
     }
-    # One marker search for both kinds of package below.
-    let marked = markers(ws)
-    let dirs = testDirs + binaryPackagesIn(ws, files, marked) + generatePackagesIn(ws, files, marked)
+    let dirs = testDirs
+      + binaryPackagesIn(ws, files, searched.mains, searched.ignored)
+      + generatePackagesIn(ws, files, searched.generated)
     dirs.uniq.map { dir => packagePath(dir) }
+  }
+
+  # The workspace-root paths of the files that the test and marker searches
+  # find a line in, over the trees at module roots: test files with a test,
+  # fuzz or example function, unless no caller wants tests, and files with each
+  # kind of marker line. They cover nested modules' files too, so callers keep
+  # their own.
+  let searchedUnder(ws: Workspace!, roots: [String!]!, withTests: Boolean!): {{testFiles: [String!]!, mains: [String!]!, ignored: [String!]!, generated: [String!]!}}! {
+    let paths = roots.map { root => if (root == ".") { "/" } else { "/" + root } }
+    let marked = markersUnder(ws, paths)
+    let none: [String!]! = []
+    let tests = if (withTests) { testFilesUnder(ws, paths) } else { none }
+    let mains = markedIn(marked, "main")
+    let ignored = markedIn(marked, "ignore")
+    let generated = markedIn(marked, "generate")
+    {{testFiles: tests, mains: mains, ignored: ignored, generated: generated}}
   }
 
   # Module-relative directories holding a go:generate command and selected by
   # the generate setting. A go:generate:include or :container annotation alone
   # is not a command.
-  let generatePackagesIn(ws: Workspace!, files: [String!]!, marked: [{{file: String!, line: String!}}!]!): [String!]! {
+  let generatePackagesIn(ws: Workspace!, files: [String!]!, found: [String!]!): [String!]! {
     let empty: [String!]! = []
     if (files.length == 0) {
       empty
     } else {
-      let found = markedIn(marked, "generate")
       let dirs = files.filter { f => found.contains(f) }.map { f => packagePath(packageDirectory(f)) }.uniq
       # Selecting globs the workspace for each pattern: skip it when there is
       # nothing to select, as in most modules.
@@ -812,12 +845,12 @@ type GoModule {
     ).{{filePath, matchedLines}}
   }
 
-  # Workspace-root paths of the files in this module's tree that testMatches
-  # finds a line in: one result per file rather than per function, and only
-  # its path.
-  let testFiles(ws: Workspace!): [String!]! {
+  # Workspace-root paths of the files under search paths that testMatches
+  # would find a line in: one result per file rather than per function, and
+  # only its path.
+  let testFilesUnder(ws: Workspace!, paths: [String!]!): [String!]! {
     ws.search(
-      paths: [if (path == ".") { "/" } else { "/" + path }],
+      paths: paths,
       globs: ["*_test.go"],
       pattern: testFunctionPattern,
       filesOnly: true,
@@ -1038,18 +1071,17 @@ type GoModule {
   # how go:generate scripts are kept out of the build. Other build constraints
   # are not evaluated: the build reports what the search got wrong.
   let binaryPackages(ws: Workspace!): [String!]! {
-    binaryPackagesIn(ws, lib.at(path).ownFiles(ws, "*.go"), markers(ws))
+    let marked = markersUnder(ws, [if (path == ".") { "/" } else { "/" + path }])
+    binaryPackagesIn(ws, lib.at(path).ownFiles(ws, "*.go"), markedIn(marked, "main"), markedIn(marked, "ignore"))
   }
 
   # binaryPackages among this module's own files, listed by the caller.
-  let binaryPackagesIn(ws: Workspace!, ownFiles: [String!]!, marked: [{{file: String!, line: String!}}!]!): [String!]! {
+  let binaryPackagesIn(ws: Workspace!, ownFiles: [String!]!, mains: [String!]!, ignored: [String!]!): [String!]! {
     let empty: [String!]! = []
     let files = ownFiles.filter { f => f.hasSuffix("_test.go") == false }
     if (files.length == 0) {
       empty
     } else {
-      let mains = markedIn(marked, "main")
-      let ignored = markedIn(marked, "ignore")
       files
         .filter { f => mains.contains(f) and ignored.contains(f) == false }
         .map { f => packageDirectory(f) }
@@ -1069,15 +1101,14 @@ type GoModule {
       and excluding.any { p => paths.any { at => rootSelected(normalized(at), [p]) == false } } == false
   }
 
-  # Marker lines in this module's tree, each with its workspace-root file path:
+  # Marker lines under search paths, each with its workspace-root file path:
   # "package main" clauses, ignore build tags and go:generate commands. One
-  # search finds all three, so discovering a module's packages searches and
-  # reads its tree once; markedIn narrows the lines to a kind, and the caller
-  # narrows the files to the module's own.
-  let markers(ws: Workspace!): [{{file: String!, line: String!}}!]! {
+  # search finds all three, so its results are read once; markedIn narrows the
+  # lines to a kind, and the caller narrows the files to a module's own.
+  let markersUnder(ws: Workspace!, paths: [String!]!): [{{file: String!, line: String!}}!]! {
     ws
       .search(
-        paths: [if (path == ".") { "/" } else { "/" + path }],
+        paths: paths,
         globs: ["*.go"],
         pattern: `^(package main\s*(//.*)?|//(go:build| \+build) ignore\s*|//go:generate\s.*)$`,
       ).{{filePath, matchedLines}}
