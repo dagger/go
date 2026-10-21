@@ -1,0 +1,417 @@
+package main
+
+import (
+	"reflect"
+	"slices"
+	"strings"
+	"testing"
+)
+
+var testRoots = roots{Src: "/src", Mod: "/go/pkg/mod", Cwd: "/src"}
+
+// mainLink is a main package's compile and link, as go build -n prints them,
+// with extra lines for the package's compile step.
+func mainLink(compile ...string) string {
+	return strings.Join(append(append([]string{
+		"mkdir -p $WORK/b001/",
+		"",
+		"#",
+		"# example.com/m",
+		"#",
+		"",
+	}, compile...),
+		"cat >$WORK/b001/importcfg.link << 'EOF' # internal",
+		"packagefile example.com/m=$WORK/b001/_pkg_.a",
+		"EOF",
+		"mkdir -p $WORK/b001/exe/",
+		"cd .",
+		"/usr/local/go/pkg/tool/linux_amd64/link -o $WORK/b001/exe/a.out -importcfg $WORK/b001/importcfg.link -buildmode=exe $WORK/b001/_pkg_.a",
+		"mv $WORK/b001/exe/a.out /gobuild/out/out",
+	), "\n")
+}
+
+func TestShellWords(t *testing.T) {
+	got := shellWords(`a 'b c' "d \"e\"" f\ g "-ldflags=\"-O2\" \"-g\""`)
+	want := []string{"a", "b c", `d "e"`, "f g", `-ldflags="-O2" "-g"`}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("shellWords: %q, want %q", got, want)
+	}
+}
+
+// A cgo package's steps run as the plan has them: the C compiler's flag
+// probes are dropped, its directory changes kept, and the package's
+// directory, which C compiles read by bare names, mounted whole.
+func TestParsePlanCgo(t *testing.T) {
+	plan := mainLink(
+		"cd /src/cgoapp",
+		"TERM='dumb' CGO_LDFLAGS='' /usr/local/go/pkg/tool/linux_amd64/cgo -objdir $WORK/b001/ -importpath example.com/m -- -I $WORK/b001/ -O2 -g ./main.go",
+		"cd $WORK",
+		"gcc -fno-caret-diagnostics -O2 -g -c -x c - -o /dev/null || true",
+		"cd /src/cgoapp",
+		"TERM='dumb' gcc -I . -fPIC -m64 -pthread -I $WORK/b001/ -O2 -g -o $WORK/b001/_x001.o -c add.c",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -trimpath \"$WORK/b001=>\" -p main -pack $WORK/b001/_cgo_gotypes.go $WORK/b001/main.cgo1.go",
+		"go tool pack r $WORK/b001/_pkg_.a $WORK/b001/_x001.o # internal",
+	)
+	blocks, err := parsePlan(plan, testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := blocks["b001"]
+	if !b.cgo {
+		t.Error("cgo step not marked")
+	}
+	if !slices.Contains(b.srcFiles, "cgoapp/**") || !slices.Contains(b.srcFiles, "cgoapp/main.go") {
+		t.Errorf("srcFiles: %q", b.srcFiles)
+	}
+	if b.out != "exe/a.out" {
+		t.Errorf("out: %q", b.out)
+	}
+	script := b.script(blocks, nil, soloCompileC)
+	if strings.Contains(script, "/dev/null || true") {
+		t.Error("a flag probe was kept")
+	}
+	if !strings.Contains(script, "cd /src/cgoapp\nTERM='dumb' gcc") {
+		t.Errorf("the change to the package's directory before the C compile was dropped:\n%s", script)
+	}
+	if strings.Contains(script, "$WORK") {
+		t.Errorf("$WORK left in the script:\n%s", script)
+	}
+}
+
+// An embedded file is named in embedcfg JSON, spaces and all.
+func TestParsePlanEmbedcfg(t *testing.T) {
+	plan := mainLink(
+		"cat >$WORK/b001/embedcfg << 'EOF' # internal",
+		`{"Patterns":{"assets/*":["assets/hello world.txt"]},"Files":{"assets/hello world.txt":"/src/assets/hello world.txt"}}EOF`,
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main -embedcfg $WORK/b001/embedcfg -pack ./main.go",
+	)
+	blocks, err := parsePlan(plan, testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(blocks["b001"].srcFiles, "assets/hello world.txt") {
+		t.Errorf("srcFiles: %q", blocks["b001"].srcFiles)
+	}
+}
+
+// A PGO profile's preprocessing has no package header, and every compile
+// reads its output: it isn't a dependency, so it doesn't pull the packages
+// that read it out of their tiers.
+func TestParsePlanProfile(t *testing.T) {
+	plan := strings.Join([]string{
+		"mkdir -p $WORK/b002/",
+		"/usr/local/go/pkg/tool/linux_amd64/preprofile -o $WORK/b002/pgo.preprofile -i /src/default.pgo",
+		"mkdir -p $WORK/b003/",
+		"",
+		"#",
+		"# fmt",
+		"#",
+		"",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b003/_pkg_.a -p fmt -std -pgoprofile=$WORK/b002/pgo.preprofile -pack /usr/local/go/src/fmt/print.go",
+	}, "\n") + "\n" + mainLink(
+		"cat >$WORK/b001/importcfg << 'EOF' # internal",
+		"packagefile fmt=$WORK/b003/_pkg_.a",
+		"EOF",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main -pgoprofile=$WORK/b002/pgo.preprofile -importcfg $WORK/b001/importcfg -pack ./main.go",
+	)
+	blocks, err := parsePlan(plan, testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := blocks["b002"]
+	if !p.isProfile || !slices.Contains(p.srcFiles, "default.pgo") || p.output() != "pgo.preprofile" {
+		t.Errorf("profile step: %+v", p)
+	}
+	for _, id := range []string{"b001", "b003"} {
+		b := blocks[id]
+		if b.profile != "b002" || slices.Contains(b.deps, "b002") {
+			t.Errorf("%s: profile %q, deps %q", id, b.profile, b.deps)
+		}
+	}
+	if !outsideSet(blocks)["b003"] {
+		t.Error("fmt left the outside set")
+	}
+}
+
+// -trimpath's rewrites name the source root, but the source root isn't an
+// input of the compile: mounting it would make every package read the whole
+// tree.
+func TestParsePlanTrimpathIsNotAnInput(t *testing.T) {
+	plan := mainLink(
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -trimpath \"$WORK/b001=>;/src=>example.com/m\" -p main -pack ./main.go",
+	)
+	blocks, err := parsePlan(plan, testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := blocks["b001"].srcFiles; !reflect.DeepEqual(got, []string{"main.go"}) {
+		t.Errorf("srcFiles: %q", got)
+	}
+}
+
+// A directory change names where the next commands run: a standard library
+// package's step that changes to the source doesn't read it.
+func TestParsePlanCdIsNotAnInput(t *testing.T) {
+	plan := strings.Join([]string{
+		"mkdir -p $WORK/b002/",
+		"",
+		"#",
+		"# fmt",
+		"#",
+		"",
+		"cd /src/sub",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b002/_pkg_.a -p fmt -std -pack /usr/local/go/src/fmt/print.go",
+	}, "\n") + "\n" + mainLink("/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main -pack ./main.go")
+	blocks, err := parsePlan(plan, testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := blocks["b002"].srcFiles; len(got) != 0 {
+		t.Errorf("fmt's srcFiles: %q", got)
+	}
+	if !outsideSet(blocks)["b002"] {
+		t.Error("fmt left the outside set")
+	}
+}
+
+// A cgo step keeps the directory changes the plan prints, but not the one
+// carried in from the step before, which would tie it to the project.
+func TestCgoScriptDropsCarriedDirectory(t *testing.T) {
+	plan := mainLink(
+		"cd /usr/local/go/src/runtime/cgo",
+		"TERM='dumb' /usr/local/go/pkg/tool/linux_amd64/cgo -objdir $WORK/b001/ -importpath runtime/cgo -- -I $WORK/b001/ ./cgo.go",
+		"TERM='dumb' gcc -I . -o $WORK/b001/_x001.o -c gcc_linux.c",
+	)
+	blocks, err := parsePlan(plan, roots{Src: "/proj", Mod: "/go/pkg/mod", Cwd: "/proj/sub"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := blocks["b001"].script(blocks, nil, soloCompileC)
+	if strings.Contains(script, "/proj/sub") {
+		t.Errorf("the project's directory is in the script:\n%s", script)
+	}
+	if !strings.Contains(script, "cd /usr/local/go/src/runtime/cgo\n") {
+		t.Errorf("the plan's own directory change was dropped:\n%s", script)
+	}
+}
+
+// A quoted directory is decoded for inputs and quoted again in scripts.
+func TestParsePlanQuotedDirectory(t *testing.T) {
+	plan := mainLink(
+		"cd '/src/my dir'",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main -pack ./main.go",
+	)
+	blocks, err := parsePlan(plan, roots{Src: "/src", Mod: "/go/pkg/mod", Cwd: "/src/my dir"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := blocks["b001"]
+	if !slices.Contains(b.srcFiles, "my dir/main.go") {
+		t.Errorf("srcFiles: %q", b.srcFiles)
+	}
+	if script := b.script(blocks, nil, soloCompileC); !strings.Contains(script, "cd '/src/my dir'") {
+		t.Errorf("the directory isn't quoted:\n%s", script)
+	}
+}
+
+func TestSplitPattern(t *testing.T) {
+	for in, want := range map[string][2]string{
+		"m@v1/**/*.h":  {"m@v1", "**/*.h"},
+		"m@v1/inc/**":  {"m@v1/inc", "**"},
+		"m@v1/x/y.h":   {"m@v1/x", "y.h"},
+		"m@v1/a/*/b.h": {"m@v1/a", "*/b.h"},
+	} {
+		dir, glob := splitPattern(in)
+		if dir != want[0] || glob != want[1] {
+			t.Errorf("splitPattern(%q) = %q, %q; want %q, %q", in, dir, glob, want[0], want[1])
+		}
+	}
+}
+
+// As with any repeated go flag, the last -modfile counts, and the call's
+// flags count over GOFLAGS.
+func TestModfile(t *testing.T) {
+	for _, c := range []struct {
+		flags, goflags []string
+		want           string
+		set            bool
+	}{
+		{[]string{"-modfile=a.mod", "-modfile=b.mod"}, nil, "b.mod", true},
+		{[]string{"-modfile", "a.mod"}, []string{"-modfile=g.mod"}, "a.mod", true},
+		{nil, []string{"-modfile=g.mod", "-modfile=h.mod"}, "h.mod", true},
+		// An empty one in the call means the module's own go.mod.
+		{[]string{"-modfile="}, []string{"-modfile=g.mod"}, "", true},
+		{[]string{"-trimpath"}, nil, "", false},
+	} {
+		if got, set := modfile(c.flags, c.goflags); got != c.want || set != c.set {
+			t.Errorf("modfile(%q, %q) = %q, %v; want %q, %v", c.flags, c.goflags, got, set, c.want, c.set)
+		}
+	}
+}
+
+// GOFLAGS splits as the go command splits it, not as a shell would.
+func TestSplitGOFLAGS(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		want []string
+	}{
+		{"-tags=foo\n-modfile=alt.mod", []string{"-tags=foo", "-modfile=alt.mod"}},
+		{" '-ldflags=-X a=b'\t-trimpath ", []string{"-ldflags=-X a=b", "-trimpath"}},
+		{`-tags=a\b -x"y"`, []string{`-tags=a\b`, `-x"y"`}},
+		{`"-gcflags=all=-N -l"`, []string{"-gcflags=all=-N -l"}},
+		{"", nil},
+	} {
+		got, err := splitGOFLAGS(c.in)
+		if err != nil || !reflect.DeepEqual(got, c.want) {
+			t.Errorf("splitGOFLAGS(%q) = %q, %v; want %q", c.in, got, err, c.want)
+		}
+	}
+	if _, err := splitGOFLAGS("'-tags=a"); err == nil {
+		t.Error("an unterminated quote was accepted")
+	}
+}
+
+// go build installs the header of a c-shared or c-archive library's
+// exported functions next to it.
+func TestExportsHeader(t *testing.T) {
+	cshared := strings.Replace(mainLink(
+		"TERM='dumb' /usr/local/go/pkg/tool/linux_amd64/cgo -objdir $WORK/b001/ -importpath example.com/m -exportheader=$WORK/b001/_cgo_install.h -- ./main.go",
+	), "-buildmode=exe", "-buildmode=c-shared", 1)
+	blocks, err := parsePlan(cshared, testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !blocks["b001"].exportsHeader() {
+		t.Error("a c-shared build's header was not found")
+	}
+	exe, err := parsePlan(mainLink("/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main -pack ./main.go"), testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exe["b001"].exportsHeader() {
+		t.Error("an executable has a header")
+	}
+}
+
+// A plugin or c-shared library links in its exe directory with a relative
+// -o, whether or not the main package uses cgo.
+func TestScriptKeepsLinkDirectory(t *testing.T) {
+	plan := strings.NewReplacer(
+		"cd .\n", "cd $WORK/b001/exe/\n",
+		"-o $WORK/b001/exe/a.out ", "-o a.out.so ",
+		"-buildmode=exe", "-buildmode=c-shared",
+		"mv $WORK/b001/exe/a.out ", "mv $WORK/b001/exe/a.out.so ",
+	).Replace(mainLink("/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main -pack ./main.go"))
+	blocks, err := parsePlan(plan, testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := blocks["b001"]
+	if b.cgo {
+		t.Fatal("no cgo step here")
+	}
+	script := b.script(blocks, nil, soloCompileC)
+	if !strings.Contains(script, "cd /work/"+b.name+"/exe/\n") || !strings.Contains(script, "link -o a.out.so ") {
+		t.Errorf("the link's directory change was dropped:\n%s", script)
+	}
+}
+
+// Go leaves -c out when it would be 1, as on a one-CPU engine: the script is
+// the same either way.
+func TestScriptCompileConcurrency(t *testing.T) {
+	script := func(compile string) string {
+		blocks, err := parsePlan(mainLink(compile), testRoots)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return blocks["b001"].script(blocks, nil, soloCompileC)
+	}
+	with := script("/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main -c=4 -nolocalimports -pack ./main.go")
+	without := script("/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main -nolocalimports -pack ./main.go")
+	if with != without || strings.Count(with, " -c=") != 1 || !strings.Contains(with, "compile -c="+soloCompileC+" -o ") {
+		t.Errorf("with -c:\n%s\nwithout:\n%s", with, without)
+	}
+	wrapped := script("/opt/wrap /usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main -pack ./main.go")
+	if !strings.Contains(wrapped, "/opt/wrap /usr/local/go/pkg/tool/linux_amd64/compile -c="+soloCompileC+" -o ") {
+		t.Errorf("a -toolexec compile:\n%s", wrapped)
+	}
+}
+
+// The link's build ID is made in its exec from what it reads; a -buildid
+// in the call's -ldflags still comes last.
+func TestScriptLinkBuildID(t *testing.T) {
+	plan := strings.Replace(mainLink("/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main -buildid PlanC/PlanC -pack ./main.go"),
+		"-buildmode=exe ", "-buildmode=exe -buildid=PlanX/PlanY/PlanY/PlanX -X main.v=1 ", 1)
+	blocks, err := parsePlan(plan, testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := blocks["b001"]
+	script := b.script(blocks, nil, soloCompileC)
+	if !strings.Contains(script, "id=$(/gobuild/gohdr linkid /work/"+b.name+"/importcfg.link ") ||
+		!strings.Contains(script, " -buildid=$id -X main.v=1 ") || strings.Contains(script, "Plan") {
+		t.Errorf("link build ID:\n%s", script)
+	}
+	user, err := parsePlan(strings.Replace(plan, "-X main.v=1", "-buildid=", 1), testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := user["b001"].script(user, nil, soloCompileC); !strings.Contains(s, " -buildid=$id -buildid= ") {
+		t.Errorf("the call's own -buildid was dropped:\n%s", s)
+	}
+}
+
+// The C compiler flags the go command adds after probing the compiler come
+// back, in the go command's places.
+func TestAddCFlags(t *testing.T) {
+	probes := []string{
+		"probe\tgcc\t-fno-caret-diagnostics\tno",
+		"probe\tgcc\t-Qunused-arguments\tno",
+		"probe\tgcc\t-Wl,--no-gc-sections\tyes",
+		"probe\tgcc\t-fdebug-prefix-map=a=b\tyes",
+		"probe\tgcc\t-ffile-prefix-map=a=b\tyes",
+		"probe\tgcc\t-gno-record-gcc-switches\tyes",
+		"probe\tgcc\t-frandom-seed=1\tyes",
+	}
+	cc := parseCC(strings.Join(slices.Concat(probes, []string{"modroot\t/src/cgoapp\t/src", "goos\tlinux"}), "\n"))
+	windows := parseCC(strings.Join(slices.Concat(probes, []string{"goos\twindows"}), "\n"))
+	block := func(cc ccInfo, dir, importPath, compileFlags string) *block {
+		blocks, err := parsePlan(strings.Replace(mainLink(
+			"cd "+dir,
+			"TERM='dumb' /usr/local/go/pkg/tool/linux_amd64/cgo -objdir $WORK/b001/ -importpath "+importPath+" -- -I $WORK/b001/ -O2 -g ./x.go",
+			"TERM='dumb' gcc -I . -fPIC -m64 -pthread -fmessage-length=0 -I $WORK/b001/ -O2 -g -o $WORK/b001/_x001.o -c x.c",
+			"TERM='dumb' gcc -I . -fPIC -m64 -pthread -fmessage-length=0 -o $WORK/b001/_cgo_.o $WORK/b001/_x001.o -O2 -g",
+			"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a "+compileFlags+" -p "+importPath+" -buildid Seed/Seed -pack $WORK/b001/x.cgo1.go",
+		), "# example.com/m\n", "# "+importPath+"\n", 1), testRoots)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b := blocks["b001"]
+		b.addCFlags(cc)
+		return b
+	}
+	const compiler = "TERM='dumb' gcc -I . -fPIC -m64 -pthread -Wl,--no-gc-sections -fmessage-length=0 -ffile-prefix-map=$WORK/b001=/tmp/go-build -gno-record-gcc-switches"
+	for _, c := range []struct {
+		name                            string
+		cc                              ccInfo
+		dir, importPath, flags, mapping string
+	}{
+		{"std", cc, "/usr/local/go/src/runtime/cgo", "runtime/cgo", `-trimpath "$WORK/b001=>" -std`, " -ffile-prefix-map=/usr/local/go=/_/GOROOT"},
+		{"windows std", windows, "/usr/local/go/src/runtime/cgo", "runtime/cgo", `-trimpath "$WORK/b001=>" -std`, ` '-ffile-prefix-map=/usr/local/go=\\_\_/GOROOT'`},
+		// -modfile=alt.mod naming another module path: the import path has it.
+		{"alternate module file", cc, "/src/cgoapp", "example.com/alt/cgoapp", `-trimpath "/src/cgoapp=>example.com/alt/cgoapp;$WORK/b001=>"`, " -ffile-prefix-map=/src=/_/example.com/alt"},
+		{"no -trimpath", cc, "/src/cgoapp", "example.com/m/cgoapp", `-trimpath "$WORK/b001=>"`, ""},
+		{"main module", cc, "/src/cgoapp", "example.com/m/cgoapp", `-trimpath "/src/cgoapp=>example.com/m/cgoapp;$WORK/b001=>"`, " -ffile-prefix-map=/src=/_/example.com/m"},
+		{"module cache", cc, "/go/pkg/mod/example.com/x@v1.2.0/sub", "example.com/x/sub", `-trimpath "/go/pkg/mod/example.com/x@v1.2.0/sub=>example.com/x@v1.2.0/sub;$WORK/b001=>"`, " -ffile-prefix-map=/go/pkg/mod/example.com/x@v1.2.0=/_/example.com/x@v1.2.0"},
+		{"vendored", cc, "/src/vendor/example.com/x/sub", "example.com/x/sub", `-trimpath "/src/vendor/example.com/x/sub=>example.com/x@v1.2.0/sub;$WORK/b001=>"`, " -ffile-prefix-map=/src/vendor=/_/vendor"},
+	} {
+		b := block(c.cc, c.dir, c.importPath, c.flags)
+		want := compiler + " -I $WORK/b001/ -O2 -g" + c.mapping + " -frandom-seed=Seed -o $WORK/b001/_x001.o -c x.c"
+		if !slices.Contains(b.lines, want) {
+			t.Errorf("%s: no C compile\n%s\nin\n%s", c.name, want, strings.Join(b.lines, "\n"))
+		}
+		if link := compiler + " -o $WORK/b001/_cgo_.o $WORK/b001/_x001.o -O2 -g"; !slices.Contains(b.lines, link) {
+			t.Errorf("%s: no C link\n%s\nin\n%s", c.name, link, strings.Join(b.lines, "\n"))
+		}
+	}
+}
