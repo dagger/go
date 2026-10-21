@@ -51,14 +51,33 @@ type Gomod {
   ): [GoMod!]! {
     # Answered from the workspace directly rather than from the scan, so that
     # listing modules never builds or runs the scanner.
-    ws
+    let declared = ws
       .findRoots(markers: ["go.mod"])
       .map { root => workspaceRootPath(ws, root) }
       .filter { modPath => pathIncluded(ws, modPath, include, exclude) }
       .map { modPath => at(modPath) }
       .filter { mod => mod.declaresModule(ws) }
-      .map { mod => mod.listed(ws) }
-      .filter { mod => mod.goFiles != null and mod.goFiles!.length > 0 }
+    let byModule = goFilesByModule(ws, declared)
+    let none: [String!]! = []
+    declared
+      .map { mod => mod.withGoFiles(byModule.get(mod.path) ?? none) }
+      .filter { mod => mod.goFiles!.length > 0 }
+  }
+
+  # Each module's own Go files, keyed by module path, as GoMod.unsortedOwnFiles
+  # lists them. Globbing once per module was a workspace call per module, and
+  # each module's glob covered the modules nested in it again; this globs once
+  # per outermost module and gives each file to the deepest module root above
+  # it.
+  let goFilesByModule(ws: Workspace!, mods: [GoMod!]!): Map[[String!]!]! {
+    let none: Map[[String!]!]! = [:]
+    mods
+      .filter { mod =>
+        mods.any { other =>
+          other.path != mod.path and (other.path == "." or mod.path.hasPrefix(other.path + "/"))
+        } == false
+      }
+      .reduce(none) { byModule, top => top.withOwnGoFilesBelow(ws, byModule) }
   }
 
   """
@@ -520,9 +539,59 @@ type GoMod {
   """
   goFiles: [String!]
 
-  # This module with its Go files listed.
-  let listed(ws: Workspace!): GoMod! {
-    GoMod(path: path, includeExtraFiles: includeExtraFiles, goFiles: unsortedOwnFiles(ws, "*.go"))
+  # This module with its Go files set.
+  let withGoFiles(files: [String!]!): GoMod! {
+    GoMod(path: path, includeExtraFiles: includeExtraFiles, goFiles: files)
+  }
+
+  # byModule with the own Go files of this module and of each module root below
+  # it added under that root's path, as unsortedOwnFiles lists them, from one
+  # glob.
+  let withOwnGoFilesBelow(ws: Workspace!, byModule: Map[[String!]!]!): Map[[String!]!]! {
+    let roots = nestedRootSet(ws).with(path, true)
+    let owned = ws
+      .glob(subpath("**/*.go"))
+      .filter { file => file.hasSuffix("/") == false }
+      .map { file => file.trimPrefix("/").trimPrefix("./") }
+      .map { file => {{owner: deepestRoot(file, roots), file: file}} }
+      .filter { pair =>
+        goIgnores(if (pair.owner == ".") { pair.file } else { pair.file.trimPrefix(pair.owner + "/") }) == false
+      }
+    mergeGroups(byModule, grouped(owned))
+  }
+
+  # Files grouped by owner, in their order. The list is halved and the halves'
+  # groups joined, so each file is copied once per level, rather than a group
+  # being copied each time a file is added to it.
+  let grouped(pairs: [{{owner: String!, file: String!}}!]!): Map[[String!]!]! {
+    let none: Map[[String!]!]! = [:]
+    if (pairs.length == 0) {
+      none
+    } else if (pairs.length == 1) {
+      none.with(pairs[0]!.owner, [pairs[0]!.file])
+    } else {
+      let half = pairs.length / 2
+      mergeGroups(grouped(pairs.takeFirst(half)), grouped(pairs.dropFirst(half)))
+    }
+  }
+
+  # a with b's groups added after its own.
+  let mergeGroups(a: Map[[String!]!]!, b: Map[[String!]!]!): Map[[String!]!]! {
+    let none: [String!]! = []
+    b.reduce(a) { groups, owner, files => groups.with(owner, (groups.get(owner) ?? none) + files) }
+  }
+
+  # The deepest root in a set holding a file in this module's tree, or this
+  # module's path when none below it does.
+  let deepestRoot(file: String!, roots: Map[Boolean!]!): String! {
+    file
+      .split("/")
+      .dropLast(1)
+      .reduce({{dir: "", owner: path}}) { state, segment =>
+        let dir = if (state.dir == "") { segment } else { state.dir + "/" + segment }
+        {{dir: dir, owner: if (roots.has(dir)) { dir } else { state.owner }}}
+      }
+      .owner
   }
 
   """
