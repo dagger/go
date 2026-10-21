@@ -247,7 +247,11 @@ type Gomod {
   container: the engine builds and runs it once for the whole workspace.
   """
   let scanner(ws: Workspace!): Container! {
-    withGoCaches(container.from("golang:" + scannerVersion + "-alpine"))
+    # No cache volumes: the scan is an ordinary result, which another engine
+    # can pull from the remote cache.
+    container.from("golang:" + scannerVersion + "-alpine")
+      # The same download retry as withGoCaches.
+      .withEnvVariable("GOPROXY", "https://proxy.golang.org|https://proxy.golang.org|direct")
       .withoutEntrypoint
       .withWorkdir("/helpers/go-includes")
       .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
@@ -365,6 +369,13 @@ type Gomod {
   defaultGoVersion: String! { scannerVersion }
 
   """
+  The image goContainer starts from for a Go version.
+  """
+  goImage(version: String!): String! {
+    "golang:" + version + "-alpine"
+  }
+
+  """
   A Go toolchain container at `version`, with the shared Go caches mounted.
 
   Every tool in the workspace builds its module containers from this, so two
@@ -379,7 +390,7 @@ type Gomod {
     """
     cgo: Boolean! = false,
   ): Container! {
-    let ctr = withGoCaches(container.from("golang:" + version + "-alpine").withoutEntrypoint)
+    let ctr = withGoCaches(container.from(goImage(version)).withoutEntrypoint)
     if (cgo) { ctr.withExec(["apk", "add", "--no-cache", "build-base"]) } else { ctr }
   }
 
@@ -712,10 +723,6 @@ type GoMod {
     let generateFlags = if (generate) { ["--generate"] } else { [] }
     container
       .from("golang:" + gomod.scannerVersion + "-alpine")
-      .withMountedCache("/go/pkg/mod", cacheVolume("go-mod"))
-      .withEnvVariable("GOMODCACHE", "/go/pkg/mod")
-      .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
-      .withEnvVariable("GOCACHE", "/root/.cache/go-build")
       # The same download retry as withGoCaches.
       .withEnvVariable("GOPROXY", "https://proxy.golang.org|https://proxy.golang.org|direct")
       .withoutEntrypoint

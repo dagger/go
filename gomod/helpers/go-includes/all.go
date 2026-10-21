@@ -72,6 +72,12 @@ func (index *localIndex) writeAllDir(dir string, test, generate bool) error {
 	if err := writeModuleOutput(dir, "_modules_", linesWithTrailer(index.goModules())); err != nil {
 		return err
 	}
+	if err := index.writeHeaderPack(filepath.Join(dir, headerPackFile)); err != nil {
+		return err
+	}
+	if err := index.writeDiscovery(filepath.Join(dir, discoveryFile)); err != nil {
+		return err
+	}
 	for _, moduleRoot := range index.moduleRoots {
 		scan := index.scanModule(moduleRoot, test, generate)
 		files := map[string]string{
