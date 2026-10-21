@@ -169,8 +169,8 @@ type Go {
     # A list rather than a collection: modules decide how a package is mounted
     # and which toolchain it gets, but they are not something to select.
     lib
-      .modules(ws, include: include, exclude: exclude).{{path}}
-      .map { found => goModule(ws, found.path) }
+      .modules(ws, include: include, exclude: exclude).{{path, goFiles}}
+      .map { found => goModuleAt(found.path, workspaceMountPath(ws), found.goFiles) }
       .filter { mod =>
         (includeSkipTest or mod.skipTest == false)
           and (includeSkipGenerate or mod.skipGenerate(ws) == false)
@@ -194,7 +194,7 @@ type Go {
   # The module holding a package. A package holds no module of its own, so
   # that the collection needs no workspace.
   let packageModule(ws: Workspace!, pkgPath: String!, mount: String!): GoModule! {
-    goModuleAt(lib.module(ws, pkgPath).path, mount)
+    goModuleAt(lib.module(ws, pkgPath).path, mount, null)
   }
 
   # Byte-order sort, as Go's sort.Strings: a merge sort, n log n comparisons.
@@ -232,10 +232,12 @@ type Go {
   }
 
   let goModule(ws: Workspace!, modPath: String!): GoModule! {
-    goModuleAt(modPath, workspaceMountPath(ws))
+    goModuleAt(modPath, workspaceMountPath(ws), null)
   }
 
-  let goModuleAt(modPath: String!, mount: String!): GoModule! {
+  # files is the module's Go files when the caller already has them, as
+  # Gomod.modules returns them, and null otherwise.
+  let goModuleAt(modPath: String!, mount: String!, files: [String!]): GoModule! {
     GoModule(
       path: modPath,
       configuredVersion: version,
@@ -248,6 +250,7 @@ type Go {
       buildFlags: buildFlags,
       goflags: goflags,
       mountPath: mount,
+      knownGoFiles: files,
     )
   }
 }
@@ -282,7 +285,7 @@ type GoPackages @collection {
     paths
       .map { p => tool.lib.module(ws, p).path }
       .uniq
-      .map { modPath => tool.goModuleAt(modPath, mountPath) }
+      .map { modPath => tool.goModuleAt(modPath, mountPath, null) }
   }
 
   # The selected packages in one module.
@@ -536,6 +539,10 @@ type GoModule {
   """
   mountPath: String!
 
+  # This module's Go files in no particular order, when whoever made it had
+  # them; package discovery uses them instead of listing the module again.
+  let knownGoFiles: [String!]
+
   """
   The shared library, which answers discovery, selection and source policy for
   this module, so `go` mounts what `golangci-lint` and `staticcheck` mount.
@@ -710,7 +717,7 @@ type GoModule {
   let packagePaths(ws: Workspace!): [String!]! {
     # The module's files are listed once and shared: listing them is the
     # costly part, and every kind of package is found among them.
-    let files = lib.at(path).ownFiles(ws, "*.go")
+    let files = knownGoFiles ?? lib.at(path).ownFiles(ws, "*.go")
     let empty: [String!]! = []
     let testDirs = if (skipTest) {
       empty
