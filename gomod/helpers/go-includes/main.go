@@ -531,7 +531,7 @@ func (t targetModule) goDirectives(ctx context.Context) ([]goDirective, error) {
 // goDirectivesInFile extracts Go comment directives from one parsed Go file.
 func goDirectivesInFile(filePath string, data []byte) ([]goDirective, error) {
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, filePath, data, parser.ParseComments)
+	file, err := parser.ParseFile(fset, filePath, data, parser.ParseComments|parser.SkipObjectResolution)
 	if err != nil {
 		return nil, err
 	}
