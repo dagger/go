@@ -557,7 +557,7 @@ type GoModule {
   Whether tests are skipped for this module.
   """
   skipTest: Boolean! {
-    lib.at(path).selected(testPatterns) == false
+    rootSelected(normalized(path), testPatterns) == false
   }
 
   """
@@ -853,7 +853,38 @@ type GoModule {
 
   # The workspace path of a package directory in this module.
   let packagePath(dir: String!): String! {
-    if (dir == ".") { path } else { lib.at(path).subpath(dir) }
+    if (dir == ".") { path } else { subpathOf(normalized(path), dir) }
+  }
+
+  # GoMod.subpath, GoMod.selected and Gomod.normalize, in process. Through gomod
+  # each is a module call, with the fixed per-call cost of one, for a few string
+  # operations; discovery makes one for every package directory.
+  let subpathOf(root: String!, relativePath: String!): String! {
+    if (root == ".") { relativePath } else { root.trimSuffix("/") + "/" + relativePath }
+  }
+
+  let normalized(p: String!): String! {
+    let segments = p.split("/").filter { segment => segment != "" and segment != "." }
+    if (segments.length == 0) { "." } else { segments.join("/") }
+  }
+
+  let rootSelected(root: String!, patterns: [String!]!): Boolean! {
+    let selecting = patterns.filter { pattern => pattern.hasPrefix("!") == false }
+    let excluding = patterns
+      .filter { pattern => pattern.hasPrefix("!") }
+      .map { pattern => pattern.trimPrefix("!") }
+    (selecting.length == 0 or selecting.any { pattern => rootMatches(root, pattern) })
+      and excluding.any { pattern => rootMatches(root, pattern) } == false
+  }
+
+  let rootMatches(root: String!, pattern: String!): Boolean! {
+    let trimmed = pattern.trimPrefix("/").trimSuffix("/")
+    if (trimmed == "**" or trimmed == "*") {
+      true
+    } else {
+      let prefix = trimmed.trimSuffix("/**")
+      root == prefix or root.hasPrefix(prefix + "/")
+    }
   }
 
   """
@@ -1028,8 +1059,8 @@ type GoModule {
     let paths = [pkg, packagePath(pkg)]
     let selecting = buildPatterns.filter { p => p.hasPrefix("!") == false }
     let excluding = buildPatterns.filter { p => p.hasPrefix("!") }
-    (selecting.length == 0 or selecting.any { p => paths.any { at => lib.at(at).selected([p]) } })
-      and excluding.any { p => paths.any { at => lib.at(at).selected([p]) == false } } == false
+    (selecting.length == 0 or selecting.any { p => paths.any { at => rootSelected(normalized(at), [p]) } })
+      and excluding.any { p => paths.any { at => rootSelected(normalized(at), [p]) == false } } == false
   }
 
   # Marker lines in this module's tree, each with its workspace-root file path:
