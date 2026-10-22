@@ -393,6 +393,9 @@ func includeBasePatterns(moduleRoot string) []string {
 		// A vendor directory puts the go command in vendor mode, which reads
 		// this to check the vendored modules against go.mod.
 		"vendor/modules.txt",
+		// go build uses a main package's default.pgo for profile-guided
+		// optimization, unless a -pgo flag says otherwise.
+		"**/default.pgo",
 	}
 	for i, pattern := range patterns {
 		patterns[i] = path.Join(moduleRoot, pattern)

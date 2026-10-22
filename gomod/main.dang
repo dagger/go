@@ -908,6 +908,7 @@ type GoMod {
       subpath("go.work"),
       subpath("go.work.sum"),
       subpath("vendor/modules.txt"),
+      subpath("**/default.pgo"),
     ]
   }
 

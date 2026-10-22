@@ -720,7 +720,7 @@ type GoDev {
 
   # The PGO shapes pgoCheck builds: a profile go finds as default.pgo, one a
   # -pgo flag names in the source, and one it names outside the source.
-  let pgoShapes: [String!]! = ["base"]
+  let pgoShapes: [String!]! = ["auto", "flag", "base"]
 
   """
   A PGO build is the one plain go build makes, byte for byte but for its
