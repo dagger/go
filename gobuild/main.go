@@ -158,7 +158,7 @@ func run(ctx context.Context, base *dagger.Container, image string, from *dagger
 	if err != nil {
 		return nil, nil, fmt.Errorf("module checksums: %w", err)
 	}
-	mods := &modules{base: b.base, root: b.roots.Mod, all: b.mods, sums: sums}
+	mods := &modules{root: b.roots.Mod, all: b.mods, sums: sums}
 	if err := mods.expandLoose(ctx, blocks); err != nil {
 		return nil, nil, err
 	}
@@ -224,6 +224,10 @@ func (b *build) profileStep(ctx context.Context, bl *block, blocks map[string]*b
 	}
 	return &profileOutput{dir: dir, path: out}, nil
 }
+
+// modCacheDir is where the build's module download is made, mounted at
+// GOMODCACHE wherever it is read.
+const modCacheDir = "/gobuild/modcache"
 
 // build is what a build's execs share.
 type build struct {
@@ -333,7 +337,16 @@ func newBuild(ctx context.Context, ctr *dagger.Container, image string, from *da
 	// vendor directory without modules.txt is an error go reports itself.
 	// Without one in the source, go is not asked.
 	mode, _ := lastFlag("mod", flags, envFlags)
-	script := "set -e\nmkdir -p " + shQuote(gomodcache) + "\nmode=" + shQuote(mode) + "\nsrc=" + shQuote(mountPath) + "\ngomod=" + shQuote(goMod) + `
+	// The download goes to one path whatever GOMODCACHE the base has, as a
+	// file read from the module cache is keyed by its path in it too: then
+	// a module's download is the same input in every project. A module
+	// cache the base comes with, filled for offline builds, is its start.
+	start := ""
+	if path.Clean(gomodcache) != modCacheDir {
+		start = "\n[ ! -d " + shQuote(gomodcache) + " ] || [ " + shQuote(gomodcache) + " -ef " + modCacheDir + " ] || cp -a " + shQuote(gomodcache) + "/. " + modCacheDir + "/"
+	}
+	script := "set -e\nmkdir -p " + modCacheDir + start +
+		"\nexport GOMODCACHE=" + modCacheDir + "\nmode=" + shQuote(mode) + "\nsrc=" + shQuote(mountPath) + "\ngomod=" + shQuote(goMod) + `
 if [ -z "$mode" ] && [ -n "$(find "$src" -path '*/vendor/modules.txt' | head -n 1)" ]; then
 	work=$(go env GOWORK)
 	if [ -n "$work" ] && [ "$work" != off ]; then
@@ -353,7 +366,7 @@ fi
 		WithMountedDirectory(mountPath, source.Filter(dagger.DirectoryFilterOpts{Include: include})).
 		WithWorkdir(cwd).
 		WithExec([]string{"sh", "-c", script}, noNest).
-		Directory(gomodcache).Sync(ctx)
+		Directory(modCacheDir).Sync(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("go mod download: %w", err)
 	}

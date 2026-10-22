@@ -784,19 +784,34 @@ type GoDev {
   """
   A module whose go directive asks for a newer Go than the base's builds with
   the toolchain the go command switches to, as go build would, and the
-  binary reports that Go.
+  binary reports that Go; so does a dependency that asks for it too, served
+  from a file proxy in the base, the toolchain from the default proxy.
   """
   toolchainSwitchCheck: Void @check {
+    let dep = directory
+      .withNewFile("go.mod", "module example.com/newgo\n\ngo 1.26.1\n")
+      .withNewFile("newgo.go", "package newgo\n\nconst Answer = 42\n")
+    let made = container
+      .from("golang:1.25-alpine")
+      .withExec(["apk", "add", "--no-cache", "zip"])
+      .withDirectory("/z/example.com/newgo@v1.0.0", dep)
+      .withExec(["sh", "-c", "set -e; p=/proxy/example.com/newgo/@v; mkdir -p $p; cd /z; zip -qr $p/v1.0.0.zip example.com/newgo@v1.0.0; cp example.com/newgo@v1.0.0/go.mod $p/v1.0.0.mod; printf 'v1.0.0\\n' > $p/list; printf '{\"Version\":\"v1.0.0\"}' > $p/v1.0.0.info"])
     let base = container
       .from("golang:1.25-alpine")
+      .withDirectory("/proxy", made.directory("/proxy"))
+      .withEnvVariable("GOPROXY", "file:///proxy,https://proxy.golang.org")
+      .withEnvVariable("GONOSUMDB", "example.com")
       .withEnvVariable("GOTOOLCHAIN", "auto")
-    let ws = directory
-      .withNewFile("go.mod", "module example.com/switch\n\ngo 1.26.1\n")
-      .withNewFile("main.go", "package main\n\nimport (\n\t\"fmt\"\n\t\"runtime\"\n)\n\nfunc main() { fmt.Println(runtime.Version()) }\n")
+    let ws = base
+      .withNewFile("/ws/go.mod", "module example.com/switch\n\ngo 1.26.1\n\nrequire example.com/newgo v1.0.0\n")
+      .withNewFile("/ws/main.go", "package main\n\nimport (\n\t\"fmt\"\n\t\"runtime\"\n\n\t\"example.com/newgo\"\n)\n\nfunc main() { fmt.Println(runtime.Version(), newgo.Answer) }\n")
+      .withWorkdir("/ws")
+      .withExec(["go", "mod", "tidy"])
+      .directory("/ws")
       .asWorkspace
     let built = go(base: base).packages(ws).get(key: ".").binary(ws)
     let out = base.withFile("/usr/local/bin/switch", built).withExec(["switch"]).stdout
-    assert(out == "go1.26.1\n", "the binary's Go: " + out)
+    assert(out == "go1.26.1 42\n", "the binary's Go and its dependency: " + out)
     null
   }
 
@@ -1161,6 +1176,12 @@ type GoDev {
       .withMountedCache("/root/.cache/go-build", cacheVolume("go-dev-custom-base-build"))
     let built = go(base: cached).packages(ws).get(key: baseFixturePath + "/cmd/writegenerated").binary(ws)
     assert(built.size > 0, "a custom base with Go cache volumes built an empty binary")
+
+    # A base whose module cache is where the per-package build makes its
+    # module download, here through a symlink, as GOMODCACHE is the module's.
+    let linked = base.withExec(["sh", "-c", "mkdir -p /gobuild/modcache /go/pkg && rm -rf /go/pkg/mod && ln -s /gobuild/modcache /go/pkg/mod"])
+    let builtLinked = go(base: linked).packages(ws).get(key: baseFixturePath + "/cmd/writegenerated").binary(ws)
+    assert(builtLinked.size > 0, "a custom base whose module cache is the per-package download's built an empty binary")
 
     let changes = mod.generate(ws)
     assert(

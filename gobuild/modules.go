@@ -12,16 +12,16 @@ import (
 	"dagger/gobuild/internal/dagger"
 )
 
-// modules are the downloaded modules a build's packages read, each its own
-// download, keyed by the module, its version and the checksum the build's
-// own download verified (against go.sum, or the checksum database): every
-// build that reads a module version shares it, and a dependency bump
+// modules are the downloaded modules a build's packages read, each
+// extracted on its own from the build's download, keyed by that download's
+// content, which the build verified (against go.sum, or the checksum
+// database): every build that reads a module version shares it, and a
+// dependency bump
 // changes only that module's packages and what imports them. A package
 // mounts each module it reads whole, so its C and assembly can include any
 // file of the module, which the plan never names, and nothing is selected
 // file by file.
 type modules struct {
-	base *dagger.Container
 	// root is where they are, GOMODCACHE.
 	root string
 	// all is the module cache the build downloaded, evaluated, for a file
@@ -36,8 +36,13 @@ type modules struct {
 }
 
 // dir is the module directory <module>@<version>, as the module cache names
-// it, downloaded on its own and checked against the build's checksum for it,
-// which keys it.
+// it, extracted on its own from the build's download of it by gohdr, after
+// checking the download against the checksum the build verified. The zip
+// is read on its own from the evaluated module cache, so the directory is
+// keyed by its content, the same in every project, toolchain and module
+// cache path that reads that module version; and nothing is fetched, nor
+// does the go command run, whose version and environment would otherwise
+// decide the install.
 func (m *modules) dir(name string) *dagger.Directory {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -45,35 +50,19 @@ func (m *modules) dir(name string) *dagger.Directory {
 		return d
 	}
 	at := strings.LastIndex(name, "@")
-	ziphash := path.Join(m.root, "cache/download", name[:at], "@v", name[at+1:]+".ziphash")
-	// Outside any module and workspace, with no GOFLAGS (such as -mod or
-	// -modfile) that apply to the build's own module, and with the
-	// checksum the build verified rather than the checksum database, so a
-	// base whose module cache is filled offline downloads nothing. A Go
-	// toolchain, which the go command downloads as a module when the build
-	// asks for a newer Go, it verifies against the database whatever the
-	// environment says, so its download keeps the base's setting; and its
-	// commands are made executable, as the go command does before it first
-	// runs a toolchain it downloaded.
-	toolchain := strings.HasPrefix(name, "golang.org/toolchain@")
-	script := "set -e\ngo mod download " + shQuote(unescapeModule(name)) +
-		"\nsum=$(cat " + shQuote(ziphash) + ")" +
-		"\n[ \"$sum\" = " + shQuote(m.sums[name]) + " ] || { echo " + shQuote(unescapeModule(name)+": checksum ") + "\"$sum\"" +
-		shQuote(", not "+m.sums[name]+" as the build verified") + " >&2; exit 1; }"
-	if toolchain {
-		dir := shQuote(path.Join(m.root, name))
-		script += "\nfor d in " + dir + "/bin " + dir + "/pkg/tool; do [ ! -d \"$d\" ] || find \"$d\" -type f -exec chmod a+x {} +; done"
+	zipFile := path.Join("cache/download", name[:at], "@v", name[at+1:]+".zip")
+	script := "set -e\n/gobuild/gohdr modunzip /gobuild/mod.zip " + shQuote(unescapeModule(name)) + " /gobuild/mod " + shQuote(m.sums[name])
+	// A Go toolchain, which the go command downloads as a module when the
+	// build asks for a newer Go, gets its commands made executable, as the
+	// go command does before it first runs a toolchain it downloaded.
+	if strings.HasPrefix(name, "golang.org/toolchain@") {
+		script += "\nfor d in /gobuild/mod/bin /gobuild/mod/pkg/tool; do [ ! -d \"$d\" ] || find \"$d\" -type f -exec chmod a+x {} +; done"
 	}
-	ctr := m.base.
-		WithEnvVariable("GOFLAGS", "").
-		WithEnvVariable("GOWORK", "off")
-	if !toolchain {
-		ctr = ctr.WithEnvVariable("GOSUMDB", "off")
-	}
-	d := ctr.
-		WithWorkdir("/").
+	d := dag.Container().From(toolImage).
+		WithMountedFile("/gobuild/gohdr", hdrTool()).
+		WithMountedFile("/gobuild/mod.zip", m.all.File(zipFile)).
 		WithExec([]string{"sh", "-c", script}, noNest).
-		Directory(path.Join(m.root, name))
+		Directory("/gobuild/mod")
 	if m.dirs == nil {
 		m.dirs = map[string]*dagger.Directory{}
 	}

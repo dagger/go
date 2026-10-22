@@ -6,7 +6,8 @@ import "dagger/gobuild/internal/dagger"
 // out a header pack, the go module's scan of each Go file up to the end of its
 // imports, for the plan. "gohdr weigh" weighs the plan's steps by the Go
 // source they compile. "gohdr cc" answers the plan's C compiler probes.
-// "gohdr linkid" makes a link's build ID.
+// "gohdr linkid" makes a link's build ID. "gohdr modunzip" extracts a
+// downloaded module, checking its checksum.
 func hdrTool() *dagger.File {
 	// A standalone tool, so it is built with a pinned toolchain, statically,
 	// and runs in whatever image the module builds with.
@@ -21,6 +22,7 @@ func hdrTool() *dagger.File {
 const hdrToolSrc = `package main
 
 import (
+	"archive/zip"
 	"bufio"
 	"bytes"
 	"crypto/sha256"
@@ -32,6 +34,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -331,6 +334,92 @@ func linkID(cfg, salt string) error {
 	return nil
 }
 
+// modUnzip extracts a module zip, as the go command's download writes it,
+// into dir, the module's directory in the module cache, as the go command
+// extracts it: every file under the zip's "<module>@<version>/" prefix,
+// read-only. It first checks the zip's checksum, the go command's "h1:"
+// hash of the files it holds, against sum.
+func modUnzip(zipPath, prefix, dir, sum string) error {
+	z, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return err
+	}
+	defer z.Close()
+	// The checksum covers every entry, directories too, as the go command's
+	// does (golang.org/x/mod/sumdb/dirhash.HashZip); only files are written.
+	var names []string
+	files := map[string]*zip.File{}
+	for _, f := range z.File {
+		rel, ok := strings.CutPrefix(f.Name, prefix+"/")
+		if !ok || (rel != "" && !filepath.IsLocal(strings.TrimSuffix(rel, "/"))) {
+			return fmt.Errorf("%s: unexpected file %q", zipPath, f.Name)
+		}
+		names = append(names, f.Name)
+		files[f.Name] = f
+	}
+	sort.Strings(names)
+	summary := sha256.New()
+	for _, name := range names {
+		r, err := files[name].Open()
+		if err != nil {
+			return err
+		}
+		h := sha256.New()
+		_, err = io.Copy(h, r)
+		r.Close()
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(summary, "%x  %s\n", h.Sum(nil), name)
+	}
+	if got := "h1:" + base64.StdEncoding.EncodeToString(summary.Sum(nil)); got != sum {
+		return fmt.Errorf("%s: checksum %s, not %s as the build verified", prefix, got, sum)
+	}
+	for _, name := range names {
+		if strings.HasSuffix(name, "/") {
+			continue
+		}
+		dst := filepath.Join(dir, strings.TrimPrefix(name, prefix+"/"))
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
+		r, err := files[name].Open()
+		if err != nil {
+			return err
+		}
+		w, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o444)
+		if err != nil {
+			r.Close()
+			return err
+		}
+		_, err = io.Copy(w, r)
+		r.Close()
+		if cerr := w.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			return err
+		}
+	}
+	// Read-only, as the go command leaves them, deepest first.
+	var dirs []string
+	err = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && d.IsDir() {
+			dirs = append(dirs, p)
+		}
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	for i := len(dirs) - 1; i >= 0; i-- {
+		if err := os.Chmod(dirs[i], 0o555); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func main() {
 	args := os.Args[1:]
 	var err error
@@ -343,8 +432,10 @@ func main() {
 		err = cc(args[1])
 	case len(args) == 3 && args[0] == "linkid":
 		err = linkID(args[1], args[2])
+	case len(args) == 5 && args[0] == "modunzip":
+		err = modUnzip(args[1], args[2], args[3], args[4])
 	default:
-		err = fmt.Errorf("usage: gohdr unpack <pack> <dir>, gohdr weigh <plan>, gohdr cc <plan>, or gohdr linkid <importcfg> <salt>")
+		err = fmt.Errorf("usage: gohdr unpack <pack> <dir>, gohdr weigh <plan>, gohdr cc <plan>, gohdr linkid <importcfg> <salt>, or gohdr modunzip <zip> <module>@<version> <dir> <checksum>")
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gohdr:", err)
