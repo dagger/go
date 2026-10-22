@@ -452,6 +452,163 @@ func TestSourcePosition(t *testing.T) {
 	}
 }
 
+// A go test -c plan: the test main's work directory is made first, its
+// header comes after the packages it imports, its compile reads the
+// _testmain.go the go command writes, and its link's output stays in its
+// work directory, with no move.
+func TestParsePlanTest(t *testing.T) {
+	plan := strings.Join([]string{
+		"mkdir -p $WORK/b001/",
+		"mkdir -p $WORK/b002/",
+		"",
+		"#",
+		"# example.com/x",
+		"#",
+		"",
+		"cat >$WORK/b002/importcfg << 'EOF' # internal",
+		"# import config",
+		"EOF",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b002/_pkg_.a -trimpath \"$WORK/b002=>\" -p example.com/x -importcfg $WORK/b002/importcfg -pack ./x.go ./x_test.go",
+		"",
+		"#",
+		"# example.com/x.test",
+		"#",
+		"",
+		"cat >$WORK/b001/importcfg << 'EOF' # internal",
+		"# import config",
+		"packagefile example.com/x=$WORK/b002/_pkg_.a",
+		"EOF",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -trimpath \"$WORK/b001=>\" -p main -importcfg $WORK/b001/importcfg -pack $WORK/b001/_testmain.go",
+		"cat >$WORK/b001/importcfg.link << 'EOF' # internal",
+		"packagefile example.com/x.test=$WORK/b001/_pkg_.a",
+		"packagefile example.com/x=$WORK/b002/_pkg_.a",
+		"EOF",
+		"cd .",
+		"/usr/local/go/pkg/tool/linux_amd64/link -o $WORK/b001/x.test -importcfg $WORK/b001/importcfg.link -buildmode=exe -buildid=a/b/c/d $WORK/b001/_pkg_.a",
+	}, "\n")
+	blocks, err := parsePlan(plan, testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	main, x := blocks[mainID], blocks["b002"]
+	if main.importPath != "example.com/x.test" || x.importPath != "example.com/x" {
+		t.Fatalf("headers: %q, %q", main.importPath, x.importPath)
+	}
+	if !main.isLink || main.out != "x.test" {
+		t.Errorf("test link: isLink %v, out %q", main.isLink, main.out)
+	}
+	if !reflect.DeepEqual(main.deps, []string{"b002"}) || len(x.deps) != 0 {
+		t.Errorf("deps: main %v, x %v", main.deps, x.deps)
+	}
+	for _, l := range x.lines {
+		if strings.Contains(l, "$WORK/b001") {
+			t.Errorf("a test main line landed in the package's block: %q", l)
+		}
+	}
+	if !reflect.DeepEqual(x.srcFiles, []string{"x.go", "x_test.go"}) {
+		t.Errorf("package inputs: %v", x.srcFiles)
+	}
+}
+
+// With -cover, a test main's cover run comes after the other packages' steps
+// and before its header, and with -coverpkg its block is not b001: its steps
+// are its own wherever they come, and the block that links is the main one.
+func TestParsePlanTestCover(t *testing.T) {
+	plan := strings.Join([]string{
+		"mkdir -p $WORK/b002/",
+		"mkdir -p $WORK/b003/",
+		"cd $WORK/b003/",
+		"/usr/local/go/pkg/tool/linux_amd64/cover -pkgcfg ./pkgcfg.txt -mode set -var goCover_x -outfilelist ./coveroutfiles.txt /src/x.go",
+		"",
+		"#",
+		"# example.com/x",
+		"#",
+		"",
+		"cat >$WORK/b003/importcfg << 'EOF' # internal",
+		"# import config",
+		"EOF",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b003/_pkg_.a -trimpath \"$WORK/b003=>\" -p example.com/x -importcfg $WORK/b003/importcfg -pack $WORK/b003/x.cover.go ./x_test.go",
+		"echo '{\"OutConfig\":\"$WORK/b002/coveragecfg\"}' > $WORK/b002/pkgcfg.txt # internal",
+		"cd $WORK/b002/",
+		"/usr/local/go/pkg/tool/linux_amd64/cover -pkgcfg ./pkgcfg.txt -mode testmain -var goCover_m -outfilelist ./coveroutfiles.txt ./_testmain.go",
+		"",
+		"#",
+		"# example.com/x.test",
+		"#",
+		"",
+		"cat >$WORK/b002/importcfg << 'EOF' # internal",
+		"# import config",
+		"packagefile example.com/x=$WORK/b003/_pkg_.a",
+		"EOF",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b002/_pkg_.a -trimpath \"$WORK/b002=>\" -p main -importcfg $WORK/b002/importcfg -pack $WORK/b002/_testmain.cover.go",
+		"cat >$WORK/b002/importcfg.link << 'EOF' # internal",
+		"packagefile example.com/x.test=$WORK/b002/_pkg_.a",
+		"packagefile example.com/x=$WORK/b003/_pkg_.a",
+		"EOF",
+		"cd .",
+		"/usr/local/go/pkg/tool/linux_amd64/link -o $WORK/b002/x.test -importcfg $WORK/b002/importcfg.link -buildmode=exe -buildid=a/b/c/d $WORK/b002/_pkg_.a",
+	}, "\n")
+	blocks, err := parsePlan(plan, testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	main, x := blocks["b002"], blocks["b003"]
+	if linkID(blocks) != "b002" || !main.isLink || main.out != "x.test" {
+		t.Fatalf("link: %s, isLink %v, out %q", linkID(blocks), main.isLink, main.out)
+	}
+	if main.importPath != "example.com/x.test" || x.importPath != "example.com/x" {
+		t.Fatalf("headers: %q, %q", main.importPath, x.importPath)
+	}
+	if !reflect.DeepEqual(main.deps, []string{"b003"}) || len(x.deps) != 0 {
+		t.Errorf("deps: main %v, x %v", main.deps, x.deps)
+	}
+	for _, l := range x.lines {
+		if strings.Contains(l, "$WORK/b002") {
+			t.Errorf("a test main line landed in the package's block: %q", l)
+		}
+	}
+	// The cover run gets _testmain.go's whole path, as from the go command,
+	// which wrote "./" for the directory it runs in.
+	if !slices.ContainsFunc(main.lines, func(l string) bool {
+		return strings.Contains(l, "/cover ") && strings.HasSuffix(l, " $WORK/b002/_testmain.go") && strings.Contains(l, " -pkgcfg $WORK/b002/pkgcfg.txt ")
+	}) {
+		t.Errorf("the test main's cover run kept its ./ paths: %q", main.lines)
+	}
+}
+
+// A heredoc line that names the linker, such as an embedded file's in an
+// embedcfg, is not a link: the main package is the one that runs the linker.
+func TestParsePlanLinkIsTheLinker(t *testing.T) {
+	plan := strings.Join([]string{
+		"mkdir -p $WORK/b002/",
+		"",
+		"#",
+		"# example.com/m/assets",
+		"#",
+		"",
+		"cat >$WORK/b002/embedcfg << 'EOF' # internal",
+		"{",
+		"\t\"Patterns\": {",
+		"\t\t\"pkg/tool/linux_amd64/link data.txt\": [",
+		"\t\t\t\"pkg/tool/linux_amd64/link data.txt\"",
+		"\t\t]",
+		"\t},",
+		"\t\"Files\": {",
+		"\t\t\"pkg/tool/linux_amd64/link data.txt\": \"/src/assets/pkg/tool/linux_amd64/link data.txt\"",
+		"\t}",
+		"}EOF",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b002/_pkg_.a -trimpath \"$WORK/b002=>\" -p example.com/m/assets -embedcfg $WORK/b002/embedcfg -pack ./assets/assets.go",
+		mainLink("/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main -pack ./main.go"),
+	}, "\n")
+	blocks, err := parsePlan(plan, testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linkID(blocks) != mainID || blocks["b002"].isLink {
+		t.Errorf("link: %s, assets isLink %v", linkID(blocks), blocks["b002"].isLink)
+	}
+}
+
 // A work file go hands the cgo tool from a source directory, printed as
 // "./$WORK/...", is the work file: an input of no source file, run at the
 // work path.

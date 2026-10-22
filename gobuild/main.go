@@ -71,18 +71,82 @@ func (m *Gobuild) Binary(
 	// +optional
 	flags []string,
 ) (*dagger.Directory, error) {
-	cwd := path.Join(mountPath, workdir)
-	b, err := newBuild(ctx, base, image, source, mountPath, cwd, flags)
+	blocks, linked, err := run(ctx, base, image, source, headers, mountPath, workdir, pkg, flags, false)
 	if err != nil {
 		return nil, err
 	}
-	plan, weights, cc, err := b.plan(ctx, headers, flags, pkg)
+	out := dag.Directory().WithFile(output, linked.file)
+	if blocks[linkID(blocks)].exportsHeader() {
+		// cgo writes the header only for a package that exports something,
+		// and go build installs it only if it was written.
+		names, err := linked.dir.Entries(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if slices.Contains(names, cgoHeader) {
+			out = out.WithFile(strings.TrimSuffix(output, path.Ext(output))+".h", linked.dir.File(cgoHeader))
+		}
+	}
+	return out, nil
+}
+
+// TestBinary builds the test binary of package pkg as "go test -c" would,
+// one exec per package as Binary builds a binary: the package compiled with
+// its test files, its external test package, the packages it is imported
+// through recompiled against it, and the test main the go command writes,
+// linked. Unlike go test -c, it does not run go vet, which is left to the
+// lint checks. The binary's Go build ID is a hash of what its link reads,
+// not the one go test computes.
+func (m *Gobuild) TestBinary(
+	ctx context.Context,
+	// The Go container to build in, as for Binary.
+	base *dagger.Container,
+	// The image base was made from, as for Binary.
+	// +optional
+	image string,
+	// The source tree, with the package's test files.
+	source *dagger.Directory,
+	// The header pack of source's Go files, test files included, and go.mod
+	// files, from the go module's scan.
+	headers *dagger.File,
+	// Where source is mounted.
+	mountPath string,
+	// The directory to run go test in, relative to mountPath.
+	// +default="."
+	workdir string,
+	// The go test package argument, e.g. "." or "./pkg/foo".
+	pkg string,
+	// Flags for go test -c, before the package, e.g. -race or -ldflags.
+	// +optional
+	flags []string,
+) (*dagger.File, error) {
+	_, linked, err := run(ctx, base, image, source, headers, mountPath, workdir, pkg, flags, true)
 	if err != nil {
 		return nil, err
+	}
+	return linked.file, nil
+}
+
+// run builds pkg's binary, or with test its test binary, and returns the
+// plan's blocks and the link's result.
+func run(ctx context.Context, base *dagger.Container, image string, source *dagger.Directory, headers *dagger.File, mountPath, workdir, pkg string, flags []string, test bool) (map[string]*block, *result, error) {
+	cwd := path.Join(mountPath, workdir)
+	if test {
+		// Vet is go test's, not the binary's, and is left to the lint
+		// checks: the per-package build doesn't replay it.
+		flags = append([]string{"-vet=off"}, flags...)
+	}
+	b, err := newBuild(ctx, base, image, source, mountPath, cwd, flags)
+	if err != nil {
+		return nil, nil, err
+	}
+	plan, weights, cc, err := b.plan(ctx, headers, flags, pkg, test)
+	if err != nil {
+		return nil, nil, err
 	}
 	blocks, err := parsePlan(plan, b.roots)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for _, bl := range blocks {
 		bl.addCFlags(cc)
@@ -90,7 +154,7 @@ func (m *Gobuild) Binary(
 	parts, names := heavyTiers(blocks, weights)
 	heights := heightsOf(blocks, outsideSet(blocks), weights)
 	if err := expandHeaders(ctx, b.mods, blocks); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// Go 1.25 and later run "go tool pack" for packages with assembly, the
 	// runtime among the first: build the tool now, not when the runtime
@@ -99,12 +163,17 @@ func (m *Gobuild) Binary(
 		go b.tools.Sync(ctx)
 	}
 	w := &walker{base: b.base, tools: b.tools, src: source, mods: b.mods, roots: b.roots}
+	if test {
+		if w.testmain, err = b.testmain(ctx, headers, flags, pkg); err != nil {
+			return nil, nil, fmt.Errorf("test main: %w", err)
+		}
+	}
 	// A PGO profile is preprocessed first: every compile reads it, in the
 	// tiers and in the walk.
 	for _, bl := range blocks {
 		if bl.isProfile {
 			if w.profile, err = b.profileStep(ctx, bl, blocks); err != nil {
-				return nil, fmt.Errorf("pgo profile: %w", err)
+				return nil, nil, fmt.Errorf("pgo profile: %w", err)
 			}
 		}
 	}
@@ -162,22 +231,9 @@ func (m *Gobuild) Binary(
 	}
 	results, err := w.walk(ctx, nodes)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	linked := results[mainID]
-	out := dag.Directory().WithFile(output, linked.file)
-	if blocks[mainID].exportsHeader() {
-		// cgo writes the header only for a package that exports something,
-		// and go build installs it only if it was written.
-		names, err := linked.dir.Entries(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if slices.Contains(names, cgoHeader) {
-			out = out.WithFile(strings.TrimSuffix(output, path.Ext(output))+".h", linked.dir.File(cgoHeader))
-		}
-	}
-	return out, nil
+	return blocks, results[linkID(blocks)], nil
 }
 
 // tier builds a tier's packages in one exec: gohdr runs their scripts in
@@ -430,8 +486,11 @@ func canonical(ctx context.Context, ctr *dagger.Container, image string) (*dagge
 // With it come the plan's step weights, by step id, from "gohdr weigh": for
 // the source's packages they weigh headers, so only the others' are used;
 // and the answers to its C compiler probes, from "gohdr cc".
-func (b *build) plan(ctx context.Context, headers *dagger.File, flags []string, pkg string) (string, map[string]int64, ccInfo, error) {
+func (b *build) plan(ctx context.Context, headers *dagger.File, flags []string, pkg string, test bool) (string, map[string]int64, ccInfo, error) {
 	cmd := []string{"go", "build", "-n"}
+	if test {
+		cmd = []string{"go", "test", "-c", "-n"}
+	}
 	cmd = append(cmd, flags...)
 	cmd = append(cmd, "-o", planOut+"/out", pkg)
 	quoted := make([]string, len(cmd))
@@ -477,6 +536,37 @@ func (b *build) plan(ctx context.Context, headers *dagger.File, flags []string, 
 		weights[id] = v
 	}
 	return plan, weights, parseCC(ccOut), nil
+}
+
+// testmain is the _testmain.go the go command writes for pkg's test binary.
+// A plan never holds it, so go test runs as far as writing it: before the
+// go command runs any tool, which -toolexec=false then stops. It reads the
+// plan's view of the source with pkg's own test files whole, as the test
+// names and examples come from them, so it runs again when they change.
+func (b *build) testmain(ctx context.Context, headers *dagger.File, flags []string, pkg string) (*dagger.File, error) {
+	dir := strings.TrimPrefix(strings.TrimPrefix(path.Join(b.roots.Cwd, pkg), b.roots.Src), "/")
+	tests := b.src.Filter(dagger.DirectoryFilterOpts{Include: []string{path.Join(dir, "*_test.go")}})
+	cmd := []string{"go", "test", "-c", "-work", "-toolexec=false"}
+	cmd = append(cmd, flags...)
+	cmd = append(cmd, "-o", "/dev/null", pkg)
+	quoted := make([]string, len(cmd))
+	for i, c := range cmd {
+		quoted[i] = shQuote(c)
+	}
+	return b.base.
+		WithMountedFile("/gobuild/gohdr", hdrTool()).
+		WithMountedDirectory(b.roots.Mod, b.mods).
+		WithMountedDirectory(b.roots.Src, b.src.Filter(dagger.DirectoryFilterOpts{Exclude: []string{"**/*.go"}})).
+		WithMountedFile("/gobuild/src.hdr", headers).
+		WithMountedDirectory("/gobuild/tests", tests).
+		WithEnvVariable("GOCACHE", "/gobuild/plancache").
+		WithExec([]string{"sh", "-c", "/gobuild/gohdr unpack /gobuild/src.hdr " + shQuote(b.roots.Src) +
+			" && cp -R /gobuild/tests/. " + shQuote(b.roots.Src) + "/" +
+			" && cd " + shQuote(b.roots.Cwd) + " && { " + strings.Join(quoted, " ") + " 2> /gobuild/testmain.err; " +
+			`work=$(sed -n 's/^WORK=//p' /gobuild/testmain.err); ` +
+			`set -- "$work"/b*/_testmain.go; [ -f "$1" ] || { cat /gobuild/testmain.err >&2; exit 1; }; ` +
+			`cp "$1" /gobuild/_testmain.go; }`}, noNest).
+		File("/gobuild/_testmain.go").Sync(ctx)
 }
 
 // planError is a failed plan's error with go build's own message first, then

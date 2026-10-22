@@ -10,3 +10,6 @@ type Gobuild = core.Gobuild
 
 // GobuildBinaryOpts contains options for Gobuild.Binary
 type GobuildBinaryOpts = core.GobuildBinaryOpts
+
+// GobuildTestBinaryOpts contains options for Gobuild.TestBinary
+type GobuildTestBinaryOpts = core.GobuildTestBinaryOpts

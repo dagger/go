@@ -630,6 +630,109 @@ type GoDev {
   }
 
   """
+  A package's test binary is the one go test -c builds without vet, byte for
+  byte but for its build IDs, with and without -race and an -ldflags stamp,
+  -cover and -coverpkg, and for packages whose test files hold only an
+  aliased testing import, a benchmark or a TestMain:
+  the package with its test files, its external test package, a dependency
+  only its tests import, an embed in a test file, and a package that imports
+  it, recompiled against its test variant. The binaries list the same tests
+  and pass and fail the same ones; -race finds the race in TestRace.
+  """
+  testBinaryCheck: Void @check {
+    let source = directory
+      .withNewFile("go.mod", "module example.com/tb\n\ngo 1.26.1\n")
+      .withNewFile("lib/lib.go", "package lib\n\nvar stamp = \"unset\"\n\n// Answer is the answer.\nfunc Answer() int { return 42 }\n")
+      .withNewFile("lib/fixture.txt", "embedded in a test\n")
+      .withNewFile("lib/lib_test.go", "package lib\n\nimport (\n\t_ \"embed\"\n\t\"testing\"\n\n\t\"example.com/tb/testonly\"\n)\n\n//go:embed fixture.txt\nvar fixture string\n\nfunc TestAnswer(t *testing.T) {\n\tif Answer() != testonly.Want() || fixture != \"embedded in a test\\n\" {\n\t\tt.Fatal(\"wrong\")\n\t}\n}\n\nfunc TestStamp(t *testing.T) { t.Log(\"stamp=\" + stamp) }\n\nfunc TestFails(t *testing.T) { t.Fatal(\"fails on purpose\") }\n\nfunc TestRace(t *testing.T) {\n\tn := 0\n\tdone := make(chan bool)\n\tgo func() { n++; done <- true }()\n\tn++\n\t<-done\n}\n")
+      .withNewFile("lib/ext_test.go", "package lib_test\n\nimport (\n\t\"testing\"\n\n\t\"example.com/tb/lib\"\n\t\"example.com/tb/user\"\n)\n\nfunc TestUser(t *testing.T) {\n\tif user.Twice() != 2*lib.Answer() {\n\t\tt.Fatal(\"wrong\")\n\t}\n}\n")
+      .withNewFile("testonly/testonly.go", "package testonly\n\n// Want is what the test wants.\nfunc Want() int { return 42 }\n")
+      .withNewFile("user/user.go", "package user\n\nimport \"example.com/tb/lib\"\n\n// Twice is twice the answer.\nfunc Twice() int { return 2 * lib.Answer() }\n")
+      # Test files go test -c builds whatever they hold, in command packages,
+      # which are package keys whatever their tests.
+      .withNewFile("alias/main.go", goMain("alias"))
+      .withNewFile("alias/alias_test.go", "package main\n\nimport t \"testing\"\n\nfunc TestAlias(x *t.T) {}\n")
+      .withNewFile("bench/main.go", goMain("bench"))
+      .withNewFile("bench/bench_test.go", "package main\n\nimport \"testing\"\n\nfunc BenchmarkNothing(b *testing.B) {}\n")
+      .withNewFile("tmain/main.go", goMain("tmain"))
+      .withNewFile("tmain/main_test.go", "package main\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestMain(m *testing.M) { os.Exit(m.Run()) }\n")
+    let ws = source.asWorkspace
+    let stamp = "-ldflags=-X example.com/tb/lib.stamp=STAMPED"
+    let cgo = container
+      .from("golang:1.26.1-alpine")
+      .withExec(["apk", "add", "--no-cache", "build-base", "binutils"])
+      .withEnvVariable("CGO_ENABLED", "1")
+    # Each variant is "<package>;<flag>;...": -race is built with cgo.
+    let variants = ["lib", "lib;-race;" + stamp, "lib;-cover", "lib;-coverpkg=./...", "alias", "bench", "tmain"]
+    let failures = variants.map { variant =>
+      let pkg = variant.split(";").takeFirst(1).join("")
+      let flags = variant.split(";").dropFirst(1)
+      let race = flags.contains("-race")
+      let tool = if (race) { go(base: cgo, buildFlags: flags) } else { go(version: "1.26.1", buildFlags: flags) }
+      let built = tool.packages(ws).get(key: pkg).testBinary(ws)
+      let compared = cgo
+        .withEnvVariable("CGO_ENABLED", if (race) { "1" } else { "0" })
+        .withDirectory("/src", source)
+        .withWorkdir("/src")
+        .withFile("/module/lib.test", built)
+        .withExec(["go", "test", "-c", "-vet=off"] + flags + ["-o", "/plain/lib.test", "./" + pkg])
+        .withExec(["sh", "-c", """
+          set -e
+          for b in plain module; do
+            objcopy --remove-section=.note.go.buildid --remove-section=.note.gnu.build-id /$b/lib.test /$b/stripped
+            /$b/lib.test -test.list . > /$b/list
+            /$b/lib.test -test.v > /$b/run 2>&1 || true
+            grep -E '^(--- (PASS|FAIL)|ok|FAIL)|stamp=|DATA RACE' /$b/run | sed 's/ ([0-9.]*s)$//' | sort > /$b/results
+          done
+          cmp -s /plain/stripped /module/stripped || echo "the bytes differ"
+          cmp -s /plain/list /module/list || echo "the test lists differ"
+          cmp -s /plain/results /module/results || { echo "the results differ:"; cat /plain/results /module/results; }
+          cat /module/results
+          """])
+        .stdout
+      let raced = compared.contains("DATA RACE")
+      let stamped = compared.contains("stamp=STAMPED")
+      if (compared.contains(" differ")) {
+        variant + ": " + compared
+      } else if (race and (raced == false or stamped == false)) {
+        variant + ": -race or the stamp did not reach the test binary: " + compared
+      } else if (pkg == "lib" and (compared.contains("--- FAIL: TestFails") == false or compared.contains("--- PASS: TestUser") == false)) {
+        variant + ": the test binary did not run its tests: " + compared
+      } else {
+        ""
+      }
+    }.filter { failure => failure != "" }
+    assert(failures.length == 0, failures.join("\n"))
+
+    # A platform's test binary is go test -c's for that GOOS/GOARCH, named
+    # as go test names it there.
+    let platforms = go(version: "1.26.1").packages(ws).get(key: "lib").platforms
+    let crossed = cgo
+      .withEnvVariable("CGO_ENABLED", "0")
+      .withEnvVariable("GOARCH", "arm64")
+      .withDirectory("/src", source)
+      .withWorkdir("/src")
+      .withFile("/module/lib.test", platforms.get(key: "linux/arm64").testBinary(ws))
+      .withExec(["go", "test", "-c", "-vet=off", "-o", "/plain/lib.test", "./lib"])
+      .withExec(["sh", "-c", """
+        # objcopy reads only the host's ELF: zero the build ID notes where
+        # readelf, which reads any, finds them.
+        for b in plain module; do
+          cp /$b/lib.test /$b/stripped
+          readelf -S -W /$b/lib.test | sed 's/^ *\[ *[0-9]*\]//' | awk '$1 == ".note.go.buildid" || $1 == ".note.gnu.build-id" {print $4, $5}' | while read off size; do
+            dd if=/dev/zero of=/$b/stripped bs=1 seek=$((0x$off)) count=$((0x$size)) conv=notrunc 2>/dev/null
+          done
+        done
+        cmp -s /plain/stripped /module/stripped && echo same || echo "the linux/arm64 test binaries differ"
+        """])
+      .stdout
+    assert(crossed.trimSpace == "same", crossed)
+    let windows = platforms.get(key: "windows/amd64").testBinary(ws).name
+    assert(windows == "lib.test.exe", "the Windows test binary is named " + windows)
+    null
+  }
+
+  """
   A module that vendors its dependencies is built and tested from its vendor
   directory: Go's vendor mode needs vendor/modules.txt mounted, and nothing
   is downloaded, as the fixture's dependency exists nowhere else.

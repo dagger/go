@@ -134,6 +134,56 @@ func (r *Gobuild) UnmarshalJSON(bs []byte) error {
 	return nil
 }
 
+// GobuildTestBinaryOpts contains options for Gobuild.TestBinary
+type GobuildTestBinaryOpts struct {
+	// The image base was made from, as for Binary.
+	Image string
+	// The directory to run go test in, relative to mountPath.
+	//
+	// Default: "."
+	Workdir string
+	// Flags for go test -c, before the package, e.g. -race or -ldflags.
+	Flags []string
+}
+
+// TestBinary builds the test binary of package pkg as "go test -c" would,
+// one exec per package as Binary builds a binary: the package compiled with
+// its test files, its external test package, the packages it is imported
+// through recompiled against it, and the test main the go command writes,
+// linked. Unlike go test -c, it does not run go vet, which is left to the
+// lint checks. The binary's Go build ID is a hash of what its link reads,
+// not the one go test computes.
+func (r *Gobuild) TestBinary(base *Container, source *Directory, headers *File, mountPath string, pkg string, opts ...GobuildTestBinaryOpts) *File {
+	assertNotNil("base", base)
+	assertNotNil("source", source)
+	assertNotNil("headers", headers)
+	q := r.query.Select("testBinary")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `image` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Image) {
+			q = q.Arg("image", opts[i].Image)
+		}
+		// `workdir` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Workdir) {
+			q = q.Arg("workdir", opts[i].Workdir)
+		}
+		// `flags` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Flags) {
+			q = q.Arg("flags", opts[i].Flags)
+		}
+	}
+	q = q.Arg("base", base)
+	q = q.Arg("source", source)
+	q = q.Arg("headers", headers)
+	q = q.Arg("mountPath", mountPath)
+	q = q.Arg("pkg", pkg)
+
+	return &File{
+		query:     q,
+		refetchID: r.refetchID,
+	}
+}
+
 func (r *Query) Gobuild() *Gobuild { // gobuild (../../../../:0:0)
 	q := r.query.Select("gobuild")
 

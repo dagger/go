@@ -35,6 +35,8 @@ type node struct {
 	DepNames []string `json:"depNames"`
 	// Profile is set when the package's compile reads the PGO profile.
 	Profile bool `json:"profile,omitempty"`
+	// Link is set for the main package, which links.
+	Link bool `json:"link,omitempty"`
 }
 
 // toNode renders a block for a walk; outside holds the blocks tiers built,
@@ -49,7 +51,7 @@ func toNode(b *block, blocks map[string]*block, outside map[string]string, conc 
 	sort.Slice(deps, func(i, j int) bool { return blocks[deps[i]].name < blocks[deps[j]].name })
 	n := &node{ID: b.id, Name: b.name, ImportPath: b.importPath, Deps: deps,
 		SrcFiles: b.srcFiles, ModFiles: b.modFiles, Output: b.output(),
-		Script: b.script(blocks, outside, conc), Profile: b.profile != ""}
+		Script: b.script(blocks, outside, conc), Profile: b.profile != "", Link: b.isLink}
 	seen := map[string]bool{}
 	for _, d := range deps {
 		n.DepNames = append(n.DepNames, blocks[d].name)
@@ -77,6 +79,9 @@ type walker struct {
 	// profile is the preprocessed PGO profile, mounted for packages whose
 	// compile reads it; nil without one.
 	profile *profileOutput
+	// testmain is a test binary's _testmain.go, which its main package
+	// compiles; nil for a binary.
+	testmain *dagger.File
 }
 
 // profileOutput is the PGO profile step's output and where scripts read it.
@@ -150,6 +155,9 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 			}
 			if n.Profile {
 				ctr = ctr.WithMountedDirectory(w.profile.path, w.profile.dir, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
+			}
+			if n.Link && w.testmain != nil {
+				ctr = ctr.WithFile("/work/"+n.Name+"/_testmain.go", w.testmain)
 			}
 			if len(n.SrcFiles) > 0 {
 				srcDir, at := selected(w.src, n.SrcFiles)

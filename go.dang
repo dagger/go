@@ -527,6 +527,17 @@ type GoPackage {
   }
 
   """
+  This package's test binary for the engine's platform, as go test -c builds
+  it. The package must have test files.
+
+  Unlike go test -c, it does not run go vet on the package: vet is left to
+  the lint checks, such as golangci-lint's.
+  """
+  testBinary(ws: Workspace!): File! {
+    module(ws).testBinaryFile(ws, gomod.hostPlatform, path)
+  }
+
+  """
   Platforms this package can be built for, keyed by GOOS/GOARCH.
   """
   platforms: GoPlatforms! {
@@ -624,6 +635,14 @@ type GoPlatform {
   """
   binary(ws: Workspace!): File! {
     tool.packageModule(ws, path, mountPath).binaryFile(ws, name, path)
+  }
+
+  """
+  This package's test binary for this platform, as go test -c builds it,
+  but without go vet, which is left to the lint checks.
+  """
+  testBinary(ws: Workspace!): File! {
+    tool.packageModule(ws, path, mountPath).testBinaryFile(ws, name, path)
   }
 }
 
@@ -1279,6 +1298,48 @@ type GoModule {
       raise "Go package " + pkgPath + " is not a main package selected by build"
     }
     buildOutputs(ws, platform, rel, binaryFileName(ws, pkgPath, platform))
+  }
+
+  # One package's test binary for a platform, named as go test -c names it.
+  # A gc build runs one cached exec per package, as a binary's does.
+  let testBinaryFile(ws: Workspace!, platform: String!, pkgPath: String!): File! {
+    let rel = relativeDir(pkgPath)
+    # go test -c's own rule: a package with test files has a test binary,
+    # whatever they hold.
+    if (lib.at(path).testDirectories(ws).contains(pkgPath) == false) {
+      raise "Go package " + pkgPath + " has no test files"
+    }
+    let name = if (platform.hasPrefix("windows/")) {
+      binaryFileName(ws, pkgPath, platform).trimSuffix(".exe") + ".test.exe"
+    } else {
+      binaryFileName(ws, pkgPath, platform) + ".test"
+    }
+    let ctr = platformBase(ws, platform)
+    let flags = buildFlags + (ctr.envVariable("GOFLAGS") ?? "").split(" ").filter { f => f != "" }
+    let out = if (gccgo(flags)) {
+      ctr
+        .withoutMount("/go/pkg/mod")
+        .withoutMount("/root/.cache/go-build")
+        .withDirectory(".", source(ws, test: true))
+        .withWorkdir(path)
+        .withExec(["go", "test", "-c", "-vet=off"] + buildFlags + ["-o", "/out/" + name, packageArg(rel)])
+        .file("/out/" + name)
+    } else {
+      gobuild.testBinary(
+        base: ctr,
+        image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
+        source: source(ws, test: true),
+        headers: lib.scan(ws).sync.file("_headers_.gohdr"),
+        mountPath: mountPath,
+        workdir: path,
+        pkg: packageArg(rel),
+        flags: buildFlags,
+      )
+    }
+    out.sync rescue {
+      err: Error => raise "Go test binary " + packagePath(rel) + " for " + platform + ": " + err.message
+    }
+    out
   }
 
   # The binaries of the main packages among pkgPaths, one build each: they

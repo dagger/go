@@ -35,6 +35,9 @@ type block struct {
 	modFiles   []string // relative to roots.Mod; may hold "<dir>/**" patterns
 	// isLink marks the main package's block (b001), which compiles and links.
 	isLink bool
+	// linkAt is 1 plus the index in lines of the command that runs the
+	// linker, or 0: heredoc data that names the linker is no command.
+	linkAt int
 	// out is the main package's output under its work directory, from the
 	// plan's last move of it, e.g. exe/a.out or exe/a.out.so.
 	out string
@@ -52,11 +55,15 @@ var (
 	reMkdir       = regexp.MustCompile(`^mkdir -p \$WORK/(b\d+)/`)
 	reWorkRef     = regexp.MustCompile(`\$WORK/(b\d+)`)
 	reRelFile     = regexp.MustCompile(`(^|\s)\./([^\s"';]+)`)
+	reDotSlash    = regexp.MustCompile(`(^|\s)\./`)
 	reBuildID     = regexp.MustCompile(`\s-buildid[ =]\S+`)
 	reBuildIDStep = regexp.MustCompile(`^(go tool buildid|\S+/buildid) -w `)
 	reConc        = regexp.MustCompile(`\s-c=\d+`)
 	// The Go compiler, run directly or through a -toolexec program.
-	reCompile    = regexp.MustCompile(`(/pkg/tool/[^/\s]+/compile) `)
+	reCompile = regexp.MustCompile(`(/pkg/tool/[^/\s]+/compile) `)
+	// The Go linker, run directly or through a -toolexec program. Only a
+	// command runs it: parsePlan keeps heredoc data, which may name it, out.
+	reLink       = regexp.MustCompile(`/pkg/tool/[^/\s]+/link `)
 	reDepArchive = regexp.MustCompile(`\$WORK/(b\d+)/_pkg_\.a`)
 	// cat >TARGET << 'EOF' [# internal]
 	reHeredoc = regexp.MustCompile(`^cat >(\S+) << 'EOF'( # internal)?$`)
@@ -65,6 +72,8 @@ var (
 	// The link output's move to the go build -o path: exe/a.out, or
 	// exe/a.out.so for a plugin, exe/a.out.exe for Windows...
 	reLinkOut = regexp.MustCompile(`^mv \$WORK/(b\d+)/(exe/\S+) `)
+	// A test link's output, which no move follows: $WORK/bNNN/<pkg>.test.
+	reTestLinkOut = regexp.MustCompile(`/link -o \$WORK/(b\d+)/([^/\s]+) `)
 	// The go command's build ID for a link, before any of the call's own
 	// -ldflags, and the link's import config.
 	reLinkBuildID = regexp.MustCompile(` -buildid=\S+`)
@@ -78,8 +87,20 @@ var (
 // mkdir and mv for it are dropped: the binary is read from the link's exec.
 const planOut = "/gobuild/out"
 
-// mainID is the block id of the main package, compiled and linked in one exec.
+// mainID is the block id of a binary's main package, compiled and linked in
+// one exec. A test binary's main package is the one that links, b001 or,
+// with -coverpkg, another.
 const mainID = "b001"
+
+// linkID is the id of the block that links: the main package's.
+func linkID(blocks map[string]*block) string {
+	for id, b := range blocks {
+		if b.isLink {
+			return id
+		}
+	}
+	return mainID
+}
 
 func stableName(importPath string) string {
 	sum := sha256.Sum256([]byte(importPath))
@@ -93,6 +114,7 @@ func parsePlan(plan string, r roots) (map[string]*block, error) {
 	var cur *block
 	cwd := r.Cwd
 	inEmbedcfg := false
+	inHeredoc := false
 	var embedcfg strings.Builder
 	// A package's header ("#", "# importpath", "#") comes before the mkdir
 	// of its work directory in some Go releases (1.24) and after it in
@@ -115,6 +137,26 @@ func parsePlan(plan string, r roots) (map[string]*block, error) {
 			// kept in place it would land in the previous block's script.
 			i += 2
 			continue
+		}
+		// A heredoc's lines are data, not commands, up to its EOF, which
+		// may end its last line.
+		content := inHeredoc
+		if inHeredoc {
+			inHeredoc = !strings.HasSuffix(line, "EOF")
+		} else if reHeredoc.MatchString(line) {
+			inHeredoc = true
+		}
+		// A test binary's main package has its work directory made before
+		// any other's, and its steps (with -cover, a cover run before its
+		// header) come long after: a line working in a block that has no
+		// header yet is that block's, and a header waiting names it.
+		if m := reWorkRef.FindStringSubmatch(line); m != nil && !content {
+			if b, ok := blocks[m[1]]; ok && b.importPath == "" && b != cur {
+				cur = b
+				if pending != "" {
+					b.importPath, pending = pending, ""
+				}
+			}
 		}
 		if m := reMkdir.FindStringSubmatch(line); m != nil {
 			b, ok := blocks[m[1]]
@@ -155,6 +197,13 @@ func parsePlan(plan string, r roots) (map[string]*block, error) {
 					cwd = r.Cwd
 				}
 			}
+		} else if strings.HasPrefix(cwd, "$WORK/") && strings.Contains(line, "/cover ") {
+			// The go command prints a path under the directory a command
+			// runs in as "./", and runs it whole. The cover tool writes
+			// the path it is given, a test main's _testmain.go, into the
+			// line directives of what it generates, which -trimpath then
+			// maps: it gets the whole path, as from the go command.
+			line = reDotSlash.ReplaceAllString(line, "${1}"+strings.ReplaceAll(strings.TrimSuffix(cwd, "/"), "$", "$$")+"/")
 		}
 		// An embedcfg heredoc lists the files a package embeds, whatever
 		// their extension, as JSON that may span lines; the go command
@@ -192,6 +241,9 @@ func parsePlan(plan string, r roots) (map[string]*block, error) {
 			cur.isProfile = true
 		}
 		cur.lines = append(cur.lines, line)
+		if !content && reLink.MatchString(line) {
+			cur.linkAt = len(cur.lines)
+		}
 		// A directory change names where the next commands run, not an
 		// input.
 		if !strings.HasPrefix(line, "cd ") {
@@ -259,13 +311,32 @@ var errUnsupported = errors.New("unsupported for a per-package build")
 
 // markLink marks the main package's block, which ends with the link.
 func markLink(blocks map[string]*block) error {
-	main, ok := blocks[mainID]
+	var links []string
+	for id, b := range blocks {
+		if b.linkAt > 0 {
+			links = append(links, id)
+		}
+	}
+	if len(links) > 1 {
+		sort.Strings(links)
+		return fmt.Errorf("%w: several links in the plan: %s", errUnsupported, strings.Join(links, ", "))
+	}
+	id := mainID
+	if len(links) == 1 {
+		id = links[0]
+	}
+	main, ok := blocks[id]
 	if !ok {
 		return fmt.Errorf("%w: no main package in the plan", errUnsupported)
 	}
 	main.isLink = true
 	if main.linkLine() == "" {
 		return fmt.Errorf("%w: no link step for %s", errUnsupported, main.importPath)
+	}
+	// A test link writes the test binary where it stays; go test copies it
+	// to -o itself.
+	if m := reTestLinkOut.FindStringSubmatch(main.linkLine()); main.out == "" && m != nil && m[1] == id {
+		main.out = m[2]
 	}
 	if main.out == "" {
 		return fmt.Errorf("%w: no link output for %s", errUnsupported, main.importPath)
@@ -438,7 +509,7 @@ func (b *block) script(blocks map[string]*block, outside map[string]string, conc
 		if isCd(l) && !needed[i] && (!b.cgo || carried) {
 			continue
 		}
-		link := b.isLink && strings.Contains(l, "/link ")
+		link := b.isLink && i == b.linkAt-1
 		if !link {
 			l = reBuildID.ReplaceAllString(l, "")
 		}
@@ -735,15 +806,10 @@ func quoteArg(s string) string {
 
 // linkLine is the plan's link command, or "" for a block that doesn't link.
 func (b *block) linkLine() string {
-	if !b.isLink {
+	if !b.isLink || b.linkAt == 0 {
 		return ""
 	}
-	for _, l := range b.lines {
-		if strings.Contains(l, "/link ") {
-			return l
-		}
-	}
-	return ""
+	return b.lines[b.linkAt-1]
 }
 
 // cgoHeader is the C header cgo writes for a package's exported functions.
