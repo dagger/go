@@ -718,6 +718,55 @@ type GoDev {
     null
   }
 
+  # The PGO shapes pgoCheck builds: a profile go finds as default.pgo, one a
+  # -pgo flag names in the source, and one it names outside the source.
+  let pgoShapes: [String!]! = ["base"]
+
+  """
+  A PGO build is the one plain go build makes, byte for byte but for its
+  build IDs and with the same profile recorded, whether go finds the
+  profile as the main package's default.pgo, a -pgo flag names it in the
+  source, or a -pgo flag names it in the base image.
+  """
+  pgoCheck: Void @check {
+    let base = container.from("golang:1.26.1-alpine")
+      .withExec(["apk", "add", "--no-cache", "binutils"])
+      .withEnvVariable("CGO_ENABLED", "0")
+    let program = directory
+      .withNewFile("go.mod", "module example.com/pgo\n\ngo 1.26.1\n")
+      .withNewFile("main.go", "package main\n\nimport (\n\t\"fmt\"\n\t\"os\"\n\t\"runtime/pprof\"\n\t\"time\"\n)\n\nvar sink uint64\n\nfunc main() {\n\tif len(os.Args) > 1 {\n\t\tf, _ := os.Create(os.Args[1])\n\t\tpprof.StartCPUProfile(f)\n\t\tend := time.Now().Add(time.Second)\n\t\tfor time.Now().Before(end) {\n\t\t\tfor i := uint64(0); i < 100000; i++ {\n\t\t\t\tsink += i * i\n\t\t\t}\n\t\t}\n\t\tpprof.StopCPUProfile()\n\t\tf.Close()\n\t}\n\tfmt.Println(\"ok\")\n}\n")
+    let profile = base.withDirectory("/src", program).withWorkdir("/src")
+      .withExec(["go", "build", "-o", "/profiler", "."])
+      .withExec(["/profiler", "/profile.pprof"])
+      .file("/profile.pprof")
+    let source = program.withFile("default.pgo", profile)
+    let ws = source.asWorkspace
+    let withProfile = base.withFile("/profile.pprof", profile)
+    let failures = pgoShapes.map { shape =>
+      let flags = if (shape == "flag") { ["-pgo=default.pgo"] } else if (shape == "base") { ["-pgo=/profile.pprof"] } else { [] }
+      let built = {
+        withProfile.withFile("/module/pgo", go(base: withProfile, buildFlags: flags).packages(ws).get(key: ".").binary(ws)).sync
+      } rescue {
+        err: Error => withProfile.withNewFile("/module/error", err.message)
+      }
+      let compared = built
+        .withDirectory("/src", source)
+        .withWorkdir("/src")
+        .withExec(["go", "build"] + flags + ["-o", "/plain/pgo", "."])
+        .withExec(["sh", "-c", """
+          if [ -f /module/error ]; then cat /module/error; exit 0; fi
+          for b in plain module; do go version -m /$b/pgo | grep -o 'pgo=[^ ]*' > /$b/setting || echo none > /$b/setting; done
+          cmp -s /plain/setting /module/setting || echo "go build recorded $(cat /plain/setting), the module $(cat /module/setting)"
+          for b in plain module; do objcopy --remove-section=.note.go.buildid --remove-section=.note.gnu.build-id /$b/pgo /$b/stripped; done
+          cmp -s /plain/stripped /module/stripped || echo "the bytes differ"
+          """])
+        .stdout
+      if (compared.trimSpace == "") { "" } else { shape + ": " + compared.trimSpace }
+    }.filter { failure => failure != "" }
+    assert(failures.length == 0, failures.join("\n"))
+    null
+  }
+
   """
   The goflags setting reaches Go commands as GOFLAGS, so build tags select
   source files without a custom base container.

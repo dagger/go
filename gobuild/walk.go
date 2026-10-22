@@ -506,5 +506,7 @@ func closedSet(blocks map[string]*block, property func(*block) bool) map[string]
 // outsideSet is the packages that read nothing from the source, down to
 // their dependencies.
 func outsideSet(blocks map[string]*block) map[string]bool {
-	return closedSet(blocks, func(b *block) bool { return len(b.srcFiles) == 0 && !b.isLink })
+	// The PGO profile's preprocessing runs on its own, before anything that
+	// reads it, even when the profile is outside the source.
+	return closedSet(blocks, func(b *block) bool { return len(b.srcFiles) == 0 && !b.isLink && !b.isProfile })
 }

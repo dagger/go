@@ -474,3 +474,24 @@ func TestParsePlanCgoCoverWorkFile(t *testing.T) {
 		}
 	}
 }
+
+// A profile outside the source, such as one a -pgo flag names in the base
+// image, is preprocessed on its own like any other, not in a tier.
+func TestProfileOutsideTheSource(t *testing.T) {
+	plan := strings.Join([]string{
+		"mkdir -p $WORK/b002/",
+		"/usr/local/go/pkg/tool/linux_amd64/preprofile -o $WORK/b002/pgo.preprofile -i /profile.pprof",
+	}, "\n") + "\n" + mainLink(
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main -pgoprofile=$WORK/b002/pgo.preprofile -pack ./main.go",
+	)
+	blocks, err := parsePlan(plan, testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := blocks["b002"]; !p.isProfile || len(p.srcFiles) != 0 {
+		t.Fatalf("profile step: %+v", p)
+	}
+	if outsideSet(blocks)["b002"] {
+		t.Error("the profile step is in the outside set, which tiers build")
+	}
+}
