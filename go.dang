@@ -1243,10 +1243,11 @@ type GoModule {
   let perPackageBuild(ws: Workspace!, ctr: Container!, pkg: String!, name: String!): Directory! {
     gobuild.binary(
       base: ctr,
-      # The toolchain image the base starts from, so package execs can run in
-      # it without the base's project-specific setup; a custom base is used
-      # as it is.
+      # The toolchain image the base starts from, or the custom base it was
+      # made from, so package execs can run in it without the base's
+      # project-specific setup.
       image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
+      from: if (baseImage == null) { null } else { baseImage.withoutEntrypoint },
       source: source(ws),
       headers: lib.scan(ws).sync.file("_headers_.gohdr"),
       mountPath: mountPath,
@@ -1328,6 +1329,7 @@ type GoModule {
       gobuild.testBinary(
         base: ctr,
         image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
+        from: if (baseImage == null) { null } else { baseImage.withoutEntrypoint },
         source: source(ws, test: true),
         headers: lib.scan(ws).sync.file("_headers_.gohdr"),
         mountPath: mountPath,

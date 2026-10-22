@@ -48,6 +48,10 @@ func (m *Gobuild) Binary(
 	// projects with the same image and settings share them.
 	// +optional
 	image string,
+	// The custom container base was made from, as image is for an image:
+	// package execs run in it with base's environment alone.
+	// +optional
+	from *dagger.Container,
 	// The source tree.
 	source *dagger.Directory,
 	// The header pack of source's Go files and go.mod files, from the go
@@ -67,7 +71,7 @@ func (m *Gobuild) Binary(
 	// +optional
 	flags []string,
 ) (*dagger.Directory, error) {
-	blocks, linked, err := run(ctx, base, image, source, headers, mountPath, workdir, pkg, flags, false)
+	blocks, linked, err := run(ctx, base, image, from, source, headers, mountPath, workdir, pkg, flags, false)
 	if err != nil {
 		return nil, err
 	}
@@ -100,6 +104,9 @@ func (m *Gobuild) TestBinary(
 	// The image base was made from, as for Binary.
 	// +optional
 	image string,
+	// The custom container base was made from, as for Binary.
+	// +optional
+	from *dagger.Container,
 	// The source tree, with the package's test files.
 	source *dagger.Directory,
 	// The header pack of source's Go files, test files included, and go.mod
@@ -116,7 +123,7 @@ func (m *Gobuild) TestBinary(
 	// +optional
 	flags []string,
 ) (*dagger.File, error) {
-	_, linked, err := run(ctx, base, image, source, headers, mountPath, workdir, pkg, flags, true)
+	_, linked, err := run(ctx, base, image, from, source, headers, mountPath, workdir, pkg, flags, true)
 	if err != nil {
 		return nil, err
 	}
@@ -125,14 +132,14 @@ func (m *Gobuild) TestBinary(
 
 // run builds pkg's binary, or with test its test binary, and returns the
 // plan's blocks and the link's result.
-func run(ctx context.Context, base *dagger.Container, image string, source *dagger.Directory, headers *dagger.File, mountPath, workdir, pkg string, flags []string, test bool) (map[string]*block, *result, error) {
+func run(ctx context.Context, base *dagger.Container, image string, from *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir, pkg string, flags []string, test bool) (map[string]*block, *result, error) {
 	cwd := path.Join(mountPath, workdir)
 	if test {
 		// Vet is go test's, not the binary's, and is left to the lint
 		// checks: the per-package build doesn't replay it.
 		flags = append([]string{"-vet=off"}, flags...)
 	}
-	b, err := newBuild(ctx, base, image, source, mountPath, cwd, flags)
+	b, err := newBuild(ctx, base, image, from, source, mountPath, cwd, flags)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -225,7 +232,16 @@ type build struct {
 	roots roots
 }
 
-func newBuild(ctx context.Context, ctr *dagger.Container, image string, source *dagger.Directory, mountPath, cwd string, flags []string) (*build, error) {
+func newBuild(ctx context.Context, ctr *dagger.Container, image string, from *dagger.Container, source *dagger.Directory, mountPath, cwd string, flags []string) (*build, error) {
+	var err error
+	if image != "" {
+		from = dag.Container().From(image)
+	}
+	if from != nil {
+		if ctr, err = canonical(ctx, ctr, from); err != nil {
+			return nil, err
+		}
+	}
 	// The Go caches' volumes are dropped: they would shadow the module
 	// sources mounted per package, and live on one engine. A custom base's
 	// other mounts, such as a toolchain or headers, stay.
@@ -246,11 +262,6 @@ func newBuild(ctx context.Context, ctr *dagger.Container, image string, source *
 	for _, m := range mounts {
 		if caches[m] {
 			ctr = ctr.WithoutMount(m)
-		}
-	}
-	if image != "" {
-		if ctr, err = canonical(ctx, ctr, image); err != nil {
-			return nil, err
 		}
 	}
 	gomodcache, err := ctr.EnvVariable(ctx, "GOMODCACHE")
@@ -353,8 +364,8 @@ fi
 	return b, nil
 }
 
-// canonical is image with ctr's environment and nothing else.
-func canonical(ctx context.Context, ctr *dagger.Container, image string) (*dagger.Container, error) {
+// canonical is from with ctr's environment and nothing else of ctr's.
+func canonical(ctx context.Context, ctr *dagger.Container, from *dagger.Container) (*dagger.Container, error) {
 	vars, err := ctr.EnvVariables(ctx)
 	if err != nil {
 		return nil, err
@@ -373,7 +384,7 @@ func canonical(ctx context.Context, ctr *dagger.Container, image string) (*dagge
 		}()
 	}
 	wg.Wait()
-	out := dag.Container().From(image)
+	out := from
 	for i := range vars {
 		if errs[i] != nil {
 			return nil, errs[i]

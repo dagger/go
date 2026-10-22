@@ -35,6 +35,9 @@ type GobuildBinaryOpts struct {
 	// made (a workdir at the project's mount path, its cache mounts), and
 	// projects with the same image and settings share them.
 	Image string
+	// The custom container base was made from, as image is for an image:
+	// package execs run in it with base's environment alone.
+	From *Container
 	// The directory to run go build in, relative to mountPath.
 	//
 	// Default: "."
@@ -56,6 +59,10 @@ func (r *Gobuild) Binary(base *Container, source *Directory, headers *File, moun
 		// `image` optional argument
 		if !querybuilder.IsZeroValue(opts[i].Image) {
 			q = q.Arg("image", opts[i].Image)
+		}
+		// `from` optional argument
+		if !querybuilder.IsZeroValue(opts[i].From) {
+			q = q.Arg("from", opts[i].From)
 		}
 		// `workdir` optional argument
 		if !querybuilder.IsZeroValue(opts[i].Workdir) {
@@ -138,6 +145,8 @@ func (r *Gobuild) UnmarshalJSON(bs []byte) error {
 type GobuildTestBinaryOpts struct {
 	// The image base was made from, as for Binary.
 	Image string
+	// The custom container base was made from, as for Binary.
+	From *Container
 	// The directory to run go test in, relative to mountPath.
 	//
 	// Default: "."
@@ -162,6 +171,10 @@ func (r *Gobuild) TestBinary(base *Container, source *Directory, headers *File, 
 		// `image` optional argument
 		if !querybuilder.IsZeroValue(opts[i].Image) {
 			q = q.Arg("image", opts[i].Image)
+		}
+		// `from` optional argument
+		if !querybuilder.IsZeroValue(opts[i].From) {
+			q = q.Arg("from", opts[i].From)
 		}
 		// `workdir` optional argument
 		if !querybuilder.IsZeroValue(opts[i].Workdir) {

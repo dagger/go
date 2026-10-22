@@ -1133,6 +1133,16 @@ type GoDev {
 
     mod.test(ws)
 
+    # A custom base may carry Go caches in volumes of its own. The
+    # per-package build leaves them out, as it does the module's: they
+    # would shadow the module sources each package mounts, and live on one
+    # engine.
+    let cached = base
+      .withMountedCache("/go/pkg/mod", cacheVolume("go-dev-custom-base-mod"))
+      .withMountedCache("/root/.cache/go-build", cacheVolume("go-dev-custom-base-build"))
+    let built = go(base: cached).packages(ws).get(key: baseFixturePath + "/cmd/writegenerated").binary(ws)
+    assert(built.size > 0, "a custom base with Go cache volumes built an empty binary")
+
     let changes = mod.generate(ws)
     assert(
       containsPath(changes.addedPaths, baseGeneratedFilePath),

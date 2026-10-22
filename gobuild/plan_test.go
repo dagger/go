@@ -222,13 +222,16 @@ func TestParsePlanCdIsNotAnInput(t *testing.T) {
 	}
 }
 
-// A cgo step keeps the directory changes the plan prints, but not the one
-// carried in from the step before, which would tie it to the project.
+// A cgo step keeps the plan's changes to its package's directory, but not the
+// one carried in from the step before or one back to the build's directory,
+// which would tie it to the project.
 func TestCgoScriptDropsCarriedDirectory(t *testing.T) {
 	plan := mainLink(
 		"cd /usr/local/go/src/runtime/cgo",
 		"TERM='dumb' /usr/local/go/pkg/tool/linux_amd64/cgo -objdir $WORK/b001/ -importpath runtime/cgo -- -I $WORK/b001/ ./cgo.go",
 		"TERM='dumb' gcc -I . -o $WORK/b001/_x001.o -c gcc_linux.c",
+		"cd /proj/sub",
+		"TERM='dumb' gcc -I /usr/local/go/src/runtime/cgo -o $WORK/b001/_cgo_.o $WORK/b001/_cgo_main.o $WORK/b001/_x001.o",
 	)
 	blocks, err := parsePlan(plan, roots{Src: "/proj", Mod: "/go/pkg/mod", Cwd: "/proj/sub"})
 	if err != nil {

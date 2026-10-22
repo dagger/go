@@ -517,12 +517,12 @@ func (b *block) script(blocks map[string]*block, conc string) string {
 	heredocTarget := ""
 	needed := cdNeeded(b.lines)
 	for i, l := range b.lines {
-		// A cgo package's C compiles name its files by bare names in the
-		// directory the plan changed to, so it keeps every change the plan
-		// prints; the one carried in from the previous step stays only when
-		// needed, as elsewhere, so it doesn't tie the step to the project.
-		carried := strings.HasPrefix(l, "mkdir -p ")
-		if isCd(l) && !needed[i] && (!b.cgo || carried) {
+		// A cgo package's C compiles name its files by bare names in its
+		// directory, so it keeps every change the plan prints to it; any
+		// other change stays only when needed, as elsewhere, such as the
+		// one carried in from the previous step or one back to the build's
+		// directory, so it doesn't tie the step to the project.
+		if isCd(l) && !needed[i] && (!b.cgo || !cdTo(l, b.dir)) {
 			continue
 		}
 		link := b.isLink && i == b.linkAt-1
@@ -596,6 +596,12 @@ func (b *block) script(blocks map[string]*block, conc string) string {
 // "cd", or the "mkdir -p DIR && cd DIR" parsePlan starts each block with.
 func isCd(l string) bool {
 	return strings.HasPrefix(l, "cd ") || (strings.HasPrefix(l, "mkdir -p ") && strings.Contains(l, " && cd "))
+}
+
+// cdTo reports whether a plan line is the go command's own change to dir.
+func cdTo(l, dir string) bool {
+	w := shellWords(l)
+	return len(w) == 2 && w[0] == "cd" && w[1] == dir
 }
 
 // cdNeeded reports, by line index, which directory changes matter: the
