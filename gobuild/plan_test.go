@@ -66,7 +66,7 @@ func TestParsePlanCgo(t *testing.T) {
 	if b.out != "exe/a.out" {
 		t.Errorf("out: %q", b.out)
 	}
-	script := b.script(blocks, nil, soloCompileC)
+	script := b.script(blocks, soloCompileC)
 	if strings.Contains(script, "/dev/null || true") {
 		t.Error("a flag probe was kept")
 	}
@@ -75,6 +75,54 @@ func TestParsePlanCgo(t *testing.T) {
 	}
 	if strings.Contains(script, "$WORK") {
 		t.Errorf("$WORK left in the script:\n%s", script)
+	}
+}
+
+// A downloaded module's package with cgo or assembly can #include any file
+// of its module, by a relative path or through -I, which the plan never
+// names, so it reads the whole module; one without either reads only what
+// the plan names.
+func TestParsePlanModuleIncludes(t *testing.T) {
+	plan := strings.Join([]string{
+		"mkdir -p $WORK/b002/",
+		"",
+		"#",
+		"# example.com/dep/asm",
+		"#",
+		"",
+		"cd /go/pkg/mod/example.com/dep@v1.0.0/asm",
+		"/usr/local/go/pkg/tool/linux_amd64/asm -p example.com/dep/asm -trimpath \"$WORK/b002=>\" -I $WORK/b002/ -I /usr/local/go/pkg/include -o $WORK/b002/value_amd64.o ./value_amd64.s",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b002/_pkg_.a -trimpath \"$WORK/b002=>\" -p example.com/dep/asm -pack ./value.go",
+		"mkdir -p $WORK/b003/",
+		"",
+		"#",
+		"# example.com/dep/cgo",
+		"#",
+		"",
+		"cd /go/pkg/mod/example.com/dep@v1.0.0/cgo",
+		"TERM='dumb' CGO_LDFLAGS='' /usr/local/go/pkg/tool/linux_amd64/cgo -objdir $WORK/b003/ -importpath example.com/dep/cgo -- -I $WORK/b003/ -O2 -g ./value.go",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b003/_pkg_.a -trimpath \"$WORK/b003=>\" -p example.com/dep/cgo -pack $WORK/b003/_cgo_gotypes.go $WORK/b003/value.cgo1.go",
+		"mkdir -p $WORK/b004/",
+		"",
+		"#",
+		"# example.com/other/pure",
+		"#",
+		"",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b004/_pkg_.a -trimpath \"$WORK/b004=>\" -p example.com/other/pure -pack /go/pkg/mod/example.com/other@v1.0.0/pure/pure.go",
+	}, "\n") + "\n" + mainLink(
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main -importcfg $WORK/b001/importcfg -pack ./main.go",
+	)
+	blocks, err := parsePlan(plan, testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"b002", "b003"} {
+		if b := blocks[id]; !slices.Contains(b.modFiles, "example.com/dep@v1.0.0/**") {
+			t.Errorf("%s (%s) modFiles: %q", id, b.importPath, b.modFiles)
+		}
+	}
+	if b := blocks["b004"]; !slices.Equal(b.modFiles, []string{"example.com/other@v1.0.0/pure/pure.go"}) {
+		t.Errorf("b004 modFiles: %q", b.modFiles)
 	}
 }
 
@@ -95,8 +143,8 @@ func TestParsePlanEmbedcfg(t *testing.T) {
 }
 
 // A PGO profile's preprocessing has no package header, and every compile
-// reads its output: it isn't a dependency, so it doesn't pull the packages
-// that read it out of their tiers.
+// reads its output: it isn't a dependency, so the standard library and
+// dependencies that read it stay outside the source.
 func TestParsePlanProfile(t *testing.T) {
 	plan := strings.Join([]string{
 		"mkdir -p $WORK/b002/",
@@ -186,7 +234,7 @@ func TestCgoScriptDropsCarriedDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := blocks["b001"].script(blocks, nil, soloCompileC)
+	script := blocks["b001"].script(blocks, soloCompileC)
 	if strings.Contains(script, "/proj/sub") {
 		t.Errorf("the project's directory is in the script:\n%s", script)
 	}
@@ -209,7 +257,7 @@ func TestParsePlanQuotedDirectory(t *testing.T) {
 	if !slices.Contains(b.srcFiles, "my dir/main.go") {
 		t.Errorf("srcFiles: %q", b.srcFiles)
 	}
-	if script := b.script(blocks, nil, soloCompileC); !strings.Contains(script, "cd '/src/my dir'") {
+	if script := b.script(blocks, soloCompileC); !strings.Contains(script, "cd '/src/my dir'") {
 		t.Errorf("the directory isn't quoted:\n%s", script)
 	}
 }
@@ -326,7 +374,7 @@ func TestScriptKeepsLinkDirectory(t *testing.T) {
 	if b.cgo {
 		t.Fatal("no cgo step here")
 	}
-	script := b.script(blocks, nil, soloCompileC)
+	script := b.script(blocks, soloCompileC)
 	if !strings.Contains(script, "cd /work/"+b.name+"/exe/\n") || !strings.Contains(script, "link -o a.out.so ") {
 		t.Errorf("the link's directory change was dropped:\n%s", script)
 	}
@@ -340,7 +388,7 @@ func TestScriptCompileConcurrency(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return blocks["b001"].script(blocks, nil, soloCompileC)
+		return blocks["b001"].script(blocks, soloCompileC)
 	}
 	with := script("/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main -c=4 -nolocalimports -pack ./main.go")
 	without := script("/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main -nolocalimports -pack ./main.go")
@@ -363,7 +411,7 @@ func TestScriptLinkBuildID(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := blocks["b001"]
-	script := b.script(blocks, nil, soloCompileC)
+	script := b.script(blocks, soloCompileC)
 	if !strings.Contains(script, "id=$(/gobuild/gohdr linkid /work/"+b.name+"/importcfg.link ") ||
 		!strings.Contains(script, " -buildid=$id -X main.v=1 ") || strings.Contains(script, "Plan") {
 		t.Errorf("link build ID:\n%s", script)
@@ -372,7 +420,7 @@ func TestScriptLinkBuildID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s := user["b001"].script(user, nil, soloCompileC); !strings.Contains(s, " -buildid=$id -buildid= ") {
+	if s := user["b001"].script(user, soloCompileC); !strings.Contains(s, " -buildid=$id -buildid= ") {
 		t.Errorf("the call's own -buildid was dropped:\n%s", s)
 	}
 }
@@ -633,7 +681,7 @@ func TestParsePlanCgoCoverWorkFile(t *testing.T) {
 }
 
 // A profile outside the source, such as one a -pgo flag names in the base
-// image, is preprocessed on its own like any other, not in a tier.
+// image, is preprocessed on its own like any other, not as a package.
 func TestProfileOutsideTheSource(t *testing.T) {
 	plan := strings.Join([]string{
 		"mkdir -p $WORK/b002/",
@@ -649,6 +697,6 @@ func TestProfileOutsideTheSource(t *testing.T) {
 		t.Fatalf("profile step: %+v", p)
 	}
 	if outsideSet(blocks)["b002"] {
-		t.Error("the profile step is in the outside set, which tiers build")
+		t.Error("the profile step is in the outside set, which builds packages")
 	}
 }

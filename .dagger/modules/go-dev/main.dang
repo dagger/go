@@ -782,6 +782,44 @@ type GoDev {
   }
 
   """
+  A downloaded dependency's cgo and assembly #include files from elsewhere in
+  its module, including a testdata directory, which no plan line names: each
+  package's exec still has them, and the binary runs. The dependency comes
+  from a file proxy in the base, as from any module proxy.
+  """
+  depIncludesCheck: Void @check {
+    let dep = directory
+      .withNewFile("go.mod", "module example.com/incdep\n\ngo 1.25\n")
+      .withNewFile("shared/value.h", "#define CGO_VALUE 42\n")
+      .withNewFile("cgo/value.go", "package cgo\n\n// #include \"../shared/value.h\"\n// static int value(void) { return CGO_VALUE; }\nimport \"C\"\n\nfunc Value() int { return int(C.value()) }\n")
+      .withNewFile("testdata/value.inc", "#define ASM_VALUE $7\n")
+      .withNewFile("asm/value_amd64.go", "package asm\n\nfunc Value() int64\n")
+      .withNewFile("asm/value_amd64.s", "#include \"textflag.h\"\n#include \"../testdata/value.inc\"\n\nTEXT ·Value(SB), NOSPLIT, $0-8\n\tMOVQ ASM_VALUE, AX\n\tMOVQ AX, ret+0(FP)\n\tRET\n")
+      # Elsewhere than amd64 the assembly, and what it includes, isn't built.
+      .withNewFile("asm/value_other.go", "//go:build !amd64\n\npackage asm\n\nfunc Value() int64 { return 7 }\n")
+    let main = directory
+      .withNewFile("go.mod", "module example.com/depinc\n\ngo 1.25\n\nrequire example.com/incdep v1.0.0\n")
+      .withNewFile("main.go", "package main\n\nimport (\n\t\"fmt\"\n\n\t\"example.com/incdep/asm\"\n\t\"example.com/incdep/cgo\"\n)\n\nfunc main() { fmt.Println(cgo.Value(), asm.Value()) }\n")
+    # The proxy serves the module as go mod download fetches it, and the
+    # module's go.sum is written from it.
+    let made = cgoCxxBase
+      .withExec(["apk", "add", "--no-cache", "zip"])
+      .withDirectory("/z/example.com/incdep@v1.0.0", dep)
+      .withDirectory("/ws", main)
+      .withExec(["sh", "-c", "set -e; p=/proxy/example.com/incdep/@v; mkdir -p $p; cd /z; zip -qr $p/v1.0.0.zip example.com/incdep@v1.0.0; cp example.com/incdep@v1.0.0/go.mod $p/v1.0.0.mod; printf 'v1.0.0\\n' > $p/list; printf '{\"Version\":\"v1.0.0\"}' > $p/v1.0.0.info; cd /ws; GOPROXY=file:///proxy GOSUMDB=off go mod tidy"])
+    let base = cgoCxxBase
+      .withDirectory("/proxy", made.directory("/proxy"))
+      .withEnvVariable("GOPROXY", "file:///proxy")
+      .withEnvVariable("GOSUMDB", "off")
+      .withEnvVariable("CGO_ENABLED", "1")
+    let ws = made.directory("/ws").asWorkspace
+    let built = go(base: base).packages(ws).get(key: ".").binary(ws)
+    let out = base.withFile("/usr/local/bin/depinc", built).withExec(["depinc"]).stdout
+    assert(out == "42 7\n", "the dependency's included values: " + out)
+    null
+  }
+
+  """
   A cgo main package builds with -cover as plain go build -cover builds it,
   byte for byte but for its build IDs, and runs: go hands the cgo tool the
   cover tool's output from its work directory.

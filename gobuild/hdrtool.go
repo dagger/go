@@ -6,8 +6,7 @@ import "dagger/gobuild/internal/dagger"
 // out a header pack, the go module's scan of each Go file up to the end of its
 // imports, for the plan. "gohdr weigh" weighs the plan's steps by the Go
 // source they compile. "gohdr cc" answers the plan's C compiler probes.
-// "gohdr run" builds a tier: it runs the plan's per-package scripts in one
-// container, in dependency order. "gohdr linkid" makes a link's build ID.
+// "gohdr linkid" makes a link's build ID.
 func hdrTool() *dagger.File {
 	// A standalone tool, so it is built with a pinned toolchain, statically,
 	// and runs in whatever image the module builds with.
@@ -26,7 +25,6 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -34,7 +32,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -98,98 +95,6 @@ func unpack(src, dst string) error {
 	}
 }
 
-type runNode struct {
-	Name   string
-	Pkg    string
-	Deps   []string
-	Output string
-	Script string
-	Height int64
-}
-
-type runSpec struct {
-	Lib   string
-	Nodes []runNode
-}
-
-// run builds every node of the spec in this container: each script once the
-// nodes it depends on are done, as many at once as there are CPUs, the
-// highest first: the spec's height is the heaviest chain of packages that
-// import the node, in this tier or a later one, weighed as weigh does. Each
-// output is linked into the lib directory, where dependents read it.
-func run(specPath string) error {
-	data, err := os.ReadFile(specPath)
-	if err != nil {
-		return err
-	}
-	var spec runSpec
-	if err := json.Unmarshal(data, &spec); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(spec.Lib, 0o755); err != nil {
-		return err
-	}
-	nodes := map[string]*runNode{}
-	for i := range spec.Nodes {
-		nodes[spec.Nodes[i].Name] = &spec.Nodes[i]
-	}
-	dependents := map[string][]string{}
-	pending := map[string]int{}
-	for _, n := range spec.Nodes {
-		for _, d := range n.Deps {
-			if _, ok := nodes[d]; ok {
-				dependents[d] = append(dependents[d], n.Name)
-				pending[n.Name]++
-			}
-		}
-	}
-	type result struct {
-		name string
-		out  []byte
-		err  error
-	}
-	results := make(chan result)
-	var ready []string
-	for name := range nodes {
-		if pending[name] == 0 {
-			ready = append(ready, name)
-		}
-	}
-	jobs := runtime.NumCPU()
-	running, finished := 0, 0
-	for finished < len(nodes) {
-		sort.Slice(ready, func(i, j int) bool {
-			if hi, hj := nodes[ready[i]].Height, nodes[ready[j]].Height; hi != hj {
-				return hi > hj
-			}
-			return ready[i] < ready[j]
-		})
-		for running < jobs && len(ready) > 0 {
-			n := nodes[ready[0]]
-			ready = ready[1:]
-			running++
-			go func() {
-				out, err := runOne(n, spec.Lib)
-				results <- result{n.Name, out, err}
-			}()
-		}
-		r := <-results
-		running--
-		finished++
-		n := nodes[r.name]
-		if r.err != nil {
-			os.Stderr.Write(r.out)
-			return fmt.Errorf("%s: %v", n.Pkg, r.err)
-		}
-		for _, up := range dependents[r.name] {
-			if pending[up]--; pending[up] == 0 {
-				ready = append(ready, up)
-			}
-		}
-	}
-	return nil
-}
-
 // weigh prints a line "<step> <weight>" for each step (bNNN) of a go build
 // -n plan: the bytes of Go source the step's lines name, plus a fixed cost
 // for starting a compile, a stand-in for its compile time. A relative file is
@@ -246,30 +151,6 @@ func weigh(planPath string) error {
 		fmt.Fprintf(w, "%s %d\n", step, weights[step])
 	}
 	return w.Flush()
-}
-
-// runOne runs one node's script and links its output into lib.
-func runOne(n *runNode, lib string) ([]byte, error) {
-	script := filepath.Join(os.TempDir(), n.Name+".sh")
-	if err := os.WriteFile(script, []byte(n.Script), 0o644); err != nil {
-		return nil, err
-	}
-	out, err := exec.Command("sh", script).CombinedOutput()
-	if err != nil {
-		return out, err
-	}
-	src := filepath.Join("/work", n.Name, n.Output)
-	dst := filepath.Join(lib, n.Name+".a")
-	if err := os.Link(src, dst); err != nil {
-		data, err := os.ReadFile(src)
-		if err != nil {
-			return out, err
-		}
-		if err := os.WriteFile(dst, data, 0o644); err != nil {
-			return out, err
-		}
-	}
-	return out, nil
 }
 
 // probedFlags are the C compiler flags the go command adds only when a probe
@@ -456,8 +337,6 @@ func main() {
 	switch {
 	case len(args) == 3 && args[0] == "unpack":
 		err = unpack(args[1], args[2])
-	case len(args) == 2 && args[0] == "run":
-		err = run(args[1])
 	case len(args) == 2 && args[0] == "weigh":
 		err = weigh(args[1])
 	case len(args) == 2 && args[0] == "cc":
@@ -465,7 +344,7 @@ func main() {
 	case len(args) == 3 && args[0] == "linkid":
 		err = linkID(args[1], args[2])
 	default:
-		err = fmt.Errorf("usage: gohdr unpack <pack> <dir>, gohdr run <spec>, gohdr weigh <plan>, gohdr cc <plan>, or gohdr linkid <importcfg> <salt>")
+		err = fmt.Errorf("usage: gohdr unpack <pack> <dir>, gohdr weigh <plan>, gohdr cc <plan>, or gohdr linkid <importcfg> <salt>")
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gohdr:", err)

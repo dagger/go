@@ -4,22 +4,18 @@
 //
 // It replays the go command's own plan, "go build -n", made from a header
 // pack of the source, so an edit inside function bodies doesn't re-plan.
-// Packages outside the source (the standard library and dependencies) are
-// built in tiers, one exec each, so an unchanged dependency graph is a
-// cache hit and a cold one costs a container or two: the heavy tail of
-// their heaviest chain, when there is one, builds in a tier of its own.
-// Workspace packages are built one exec each, and a package whose archive
-// comes out unchanged leaves its dependents cached.
+// Every package, the standard library and dependencies included, is built
+// in an exec of its own that reads only the archives of what it imports, so
+// builds that compile the same package the same way share it, and a package
+// whose archive comes out unchanged leaves its dependents cached.
 package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"path"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -151,8 +147,6 @@ func run(ctx context.Context, base *dagger.Container, image string, source *dagg
 	for _, bl := range blocks {
 		bl.addCFlags(cc)
 	}
-	parts, names := heavyTiers(blocks, weights)
-	heights := heightsOf(blocks, outsideSet(blocks), weights)
 	if err := expandHeaders(ctx, b.mods, blocks); err != nil {
 		return nil, nil, err
 	}
@@ -168,8 +162,7 @@ func run(ctx context.Context, base *dagger.Container, image string, source *dagg
 			return nil, nil, fmt.Errorf("test main: %w", err)
 		}
 	}
-	// A PGO profile is preprocessed first: every compile reads it, in the
-	// tiers and in the walk.
+	// A PGO profile is preprocessed first: every compile reads it.
 	for _, bl := range blocks {
 		if bl.isProfile {
 			if w.profile, err = b.profileStep(ctx, bl, blocks); err != nil {
@@ -177,118 +170,28 @@ func run(ctx context.Context, base *dagger.Container, image string, source *dagg
 			}
 		}
 	}
-	// The heavy tier starts once the light tier it reads is done, and each
-	// workspace package once the tiers it imports are.
-	outside := map[string]string{}
-	for k, part := range parts {
-		for id := range part {
-			outside[id] = names[k]
-		}
-	}
-	w.tiers = map[string]*tierResult{}
-	for _, name := range names {
-		w.tiers[name] = &tierResult{done: make(chan struct{})}
-	}
-	for k, part := range parts {
-		go func() {
-			r := w.tiers[names[k]]
-			defer close(r.done)
-			other := map[string]string{}
-			for id, t := range outside {
-				if t != names[k] {
-					other[id] = t
-				}
-			}
-			reads := map[string]bool{}
-			for id := range part {
-				for _, d := range blocks[id].deps {
-					if t, ok := other[d]; ok {
-						reads[t] = true
-					}
-				}
-			}
-			lower := map[string]*dagger.Directory{}
-			for t := range reads {
-				lt := w.tiers[t]
-				<-lt.done
-				if lt.err != nil {
-					r.err = lt.err
-					return
-				}
-				lower[t] = lt.dir
-			}
-			r.dir, r.err = b.tier(ctx, blocks, part, other, lower, heights, w.profile)
-			if r.err != nil {
-				r.err = fmt.Errorf("tier %s: %w", names[k], r.err)
-			}
-		}()
-	}
+	// Every package is its own exec, the standard library and dependencies
+	// as much as the workspace's, each reading only the archives of the
+	// packages it imports: its key is what it compiles, so every build that
+	// compiles the same package the same way shares it.
+	outside := outsideSet(blocks)
 	nodes := map[string]*node{}
 	for id, bl := range blocks {
-		if _, ok := outside[id]; !ok && !bl.isProfile {
-			nodes[id] = toNode(bl, blocks, outside, soloCompileC)
+		if bl.isProfile {
+			continue
 		}
+		conc := soloCompileC
+		if outside[id] {
+			conc = depCompileC
+		}
+		nodes[id] = toNode(bl, blocks, conc)
 	}
+	w.heights = heightsOf(blocks, weights)
 	results, err := w.walk(ctx, nodes)
 	if err != nil {
 		return nil, nil, err
 	}
 	return blocks, results[linkID(blocks)], nil
-}
-
-// tier builds a tier's packages in one exec: gohdr runs their scripts in
-// dependency order, as many at once as the machine has CPUs, the way go build
-// runs its own actions, so the tier costs one container, not one per package.
-// Its packages read each other's archives from /work/lib, and those of other
-// tiers (other, by package) from lower, mounted at /work/t/<tier>. It returns
-// the tier's archives, each named <name>.a. heights orders its packages, as
-// heightsOf describes.
-func (b *build) tier(ctx context.Context, blocks map[string]*block, part map[string]bool, other map[string]string, lower map[string]*dagger.Directory, heights map[string]int64, profile *profileOutput) (*dagger.Directory, error) {
-	type runNode struct {
-		Name, Pkg, Output, Script string
-		Deps                      []string
-		Height                    int64
-	}
-	spec := struct {
-		Lib   string
-		Nodes []runNode
-	}{Lib: "/work/lib"}
-	mods, tools, prof := false, false, false
-	for id := range part {
-		n := toNode(blocks[id], blocks, other, tierCompileC)
-		spec.Nodes = append(spec.Nodes, runNode{Name: n.Name, Pkg: n.ImportPath,
-			Output: n.Output, Script: n.Script, Deps: n.DepNames, Height: heights[id]})
-		mods = mods || len(n.ModFiles) > 0
-		tools = tools || n.Tools
-		prof = prof || n.Profile
-	}
-	// Sorted, so the same tier is the same exec.
-	sort.Slice(spec.Nodes, func(i, j int) bool { return spec.Nodes[i].Name < spec.Nodes[j].Name })
-	data, err := json.Marshal(spec)
-	if err != nil {
-		return nil, err
-	}
-	ctr := b.base.WithMountedFile("/gobuild/gohdr", hdrTool())
-	if mods {
-		ctr = ctr.WithMountedDirectory(b.roots.Mod, b.mods)
-	}
-	if tools {
-		ctr = ctr.WithMountedDirectory(toolsDir, b.tools, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
-	}
-	if prof {
-		ctr = ctr.WithMountedDirectory(profile.path, profile.dir, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
-	}
-	lowerNames := make([]string, 0, len(lower))
-	for t := range lower {
-		lowerNames = append(lowerNames, t)
-	}
-	sort.Strings(lowerNames)
-	for _, t := range lowerNames {
-		ctr = ctr.WithMountedDirectory("/work/t/"+t, lower[t], dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
-	}
-	return ctr.WithNewFile("/gobuild/tier.json", string(data)).
-		WithExec([]string{"/gobuild/gohdr", "run", "/gobuild/tier.json"}, noNest).
-		Directory("/work/lib").Sync(ctx)
 }
 
 // profileStep runs the plan's PGO profile preprocessing, from the profile in
@@ -303,7 +206,7 @@ func (b *build) profileStep(ctx context.Context, bl *block, blocks map[string]*b
 		ctr = ctr.WithMountedDirectory(b.roots.Mod, fileTree(b.mods, bl.modFiles))
 	}
 	out := "/work/" + bl.name
-	dir, err := ctr.WithExec([]string{"sh", "-c", bl.script(blocks, nil, soloCompileC)}, noNest).
+	dir, err := ctr.WithExec([]string{"sh", "-c", bl.script(blocks, soloCompileC)}, noNest).
 		Directory(out).Sync(ctx)
 	if err != nil {
 		return nil, err
@@ -483,9 +386,9 @@ func canonical(ctx context.Context, ctr *dagger.Container, image string) (*dagge
 // plan is go build's plan for pkg, made from headers, the header pack of the
 // source's Go files, and the source's other files whole. Both are keyed by
 // content, so an edit inside function bodies leaves the plan exec a cache hit.
-// With it come the plan's step weights, by step id, from "gohdr weigh": for
-// the source's packages they weigh headers, so only the others' are used;
-// and the answers to its C compiler probes, from "gohdr cc".
+// With it come the plan's step weights, by step id, from "gohdr weigh",
+// which order the execs waiting for a slot (for the source's packages they
+// weigh headers); and the answers to its C compiler probes, from "gohdr cc".
 func (b *build) plan(ctx context.Context, headers *dagger.File, flags []string, pkg string, test bool) (string, map[string]int64, ccInfo, error) {
 	cmd := []string{"go", "build", "-n"}
 	if test {

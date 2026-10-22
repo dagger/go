@@ -23,51 +23,34 @@ type node struct {
 	Deps       []string `json:"deps"`
 	SrcFiles   []string `json:"srcFiles,omitempty"`
 	ModFiles   []string `json:"modFiles,omitempty"`
-	// Tiers names the tiers whose output the package mounts whole.
-	Tiers []string `json:"tiers,omitempty"`
-	Tools bool     `json:"tools,omitempty"`
+	Tools      bool     `json:"tools,omitempty"`
 	// Gohdr is set when the script runs the helper's tool, as the link
 	// does for its build ID.
 	Gohdr  bool   `json:"gohdr,omitempty"`
 	Output string `json:"output"`
 	Script string `json:"script"`
-	// DepNames names every dependency, as a tier exec's spec lists them.
-	DepNames []string `json:"depNames"`
 	// Profile is set when the package's compile reads the PGO profile.
 	Profile bool `json:"profile,omitempty"`
 	// Link is set for the main package, which links.
 	Link bool `json:"link,omitempty"`
 }
 
-// toNode renders a block for a walk; outside holds the blocks tiers built,
-// by tier. A package reads its walked dependencies from /work/lib and those a
-// tier built from the tier's output, mounted whole at /work/t/<tier>: one mount,
-// not a copy of each archive. A dependency bump changes the tier and so every
-// package's key, which is fine: bumps are rare next to edits.
-func toNode(b *block, blocks map[string]*block, outside map[string]string, conc string) *node {
+// toNode renders a block for a walk. A package reads its dependencies'
+// archives from /work/lib, which holds those and nothing else.
+func toNode(b *block, blocks map[string]*block, conc string) *node {
 	// Dependencies in the order of their stable names, not of the plan's
 	// step numbers, which an edit elsewhere in the plan can renumber.
 	deps := append([]string(nil), b.deps...)
 	sort.Slice(deps, func(i, j int) bool { return blocks[deps[i]].name < blocks[deps[j]].name })
 	n := &node{ID: b.id, Name: b.name, ImportPath: b.importPath, Deps: deps,
 		SrcFiles: b.srcFiles, ModFiles: b.modFiles, Output: b.output(),
-		Script: b.script(blocks, outside, conc), Profile: b.profile != "", Link: b.isLink}
-	seen := map[string]bool{}
-	for _, d := range deps {
-		n.DepNames = append(n.DepNames, blocks[d].name)
-		if k, ok := outside[d]; ok && !seen[k] {
-			seen[k] = true
-			n.Tiers = append(n.Tiers, k)
-		}
-	}
-	sort.Strings(n.Tiers)
+		Script: b.script(blocks, conc), Profile: b.profile != "", Link: b.isLink}
 	n.Tools = strings.Contains(n.Script, toolsDir+"/")
 	n.Gohdr = strings.Contains(n.Script, "/gobuild/gohdr ")
 	return n
 }
 
-// walker runs a set of nodes, one exec each, each after its dependencies in
-// the set. Dependencies outside the set come from tiers.
+// walker runs a set of nodes, one exec each, each after its dependencies.
 type walker struct {
 	base  *dagger.Container
 	tools *dagger.Directory
@@ -75,7 +58,8 @@ type walker struct {
 	// mods is the module cache, evaluated: see fileTree.
 	mods  *dagger.Directory
 	roots roots
-	tiers map[string]*tierResult
+	// heights orders the execs waiting for a slot, as heightsOf describes.
+	heights map[string]int64
 	// profile is the preprocessed PGO profile, mounted for packages whose
 	// compile reads it; nil without one.
 	profile *profileOutput
@@ -93,13 +77,6 @@ type profileOutput struct {
 // packageConcurrency is how many package execs a walk runs at once.
 const packageConcurrency = 16
 
-// tierResult is a tier's archives, once its exec is done.
-type tierResult struct {
-	dir  *dagger.Directory
-	err  error // set before done closes
-	done chan struct{}
-}
-
 type result struct {
 	file *dagger.File
 	// dir is the package's evaluated work directory, which holds file.
@@ -113,7 +90,7 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 	for id := range nodes {
 		results[id] = &result{done: make(chan struct{})}
 	}
-	sem := make(chan struct{}, packageConcurrency)
+	slots := newGate(packageConcurrency)
 	var wg sync.WaitGroup
 	for id, n := range nodes {
 		wg.Add(1)
@@ -137,15 +114,6 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 			}
 			if len(depFiles) > 0 {
 				ctr = ctr.WithMountedDirectory("/work/lib", assemble(depFiles))
-			}
-			for _, k := range n.Tiers {
-				t := w.tiers[k]
-				<-t.done
-				if t.err != nil {
-					r.err = fmt.Errorf("tier %s: %w", k, t.err)
-					return
-				}
-				ctr = ctr.WithMountedDirectory("/work/t/"+k, t.dir, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
 			}
 			if n.Tools {
 				ctr = ctr.WithMountedDirectory(toolsDir, w.tools, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
@@ -174,8 +142,8 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 			} else {
 				ran = ctr.WithExec([]string{"sh", "-c", n.Script}, noNest)
 			}
-			sem <- struct{}{}
-			defer func() { <-sem }()
+			slots.acquire(w.heights[id])
+			defer slots.release()
 			// Evaluate the output directory first, then read the file from
 			// it: only a file read from an evaluated directory is keyed by its
 			// content, so a package whose archive came out unchanged leaves
@@ -264,9 +232,10 @@ func fileTree(dir *dagger.Directory, files []string) *dagger.Directory {
 }
 
 // expandHeaders replaces each module cache pattern with the files it
-// matches, so every module file a package reads is named and fileTree reads
-// files alone: "<module>/**/*.h" for assembly that may include any header in
-// its module, "<dir>/**" for a directory a C compile reads.
+// matches, but Go files, so every module file a package reads is named and
+// fileTree reads files alone: "<module>/**" for cgo or assembly that may
+// include any file in its module, "<dir>/**" for a directory a C compile
+// reads.
 func expandHeaders(ctx context.Context, mods *dagger.Directory, blocks map[string]*block) error {
 	found := map[string][]string{}
 	for _, b := range blocks {
@@ -293,8 +262,10 @@ func expandHeaders(ctx context.Context, mods *dagger.Directory, blocks map[strin
 				return
 			}
 			for _, h := range hs {
-				// A glob names directories too, with a trailing slash.
-				if !strings.HasSuffix(h, "/") {
+				// A glob names directories too, with a trailing slash. Go
+				// files are named one by one where they're read, so a
+				// pattern brings in what C and assembly include.
+				if !strings.HasSuffix(h, "/") && path.Ext(h) != ".go" {
 					matched[i] = append(matched[i], dir+"/"+h)
 				}
 			}
@@ -360,94 +331,13 @@ func commonDir(files []string) string {
 	return strings.Join(common, "/")
 }
 
-// heavyTiers splits the packages outside the source into tiers, each built
-// by one exec and named, stably, as the scripts that read it name it: light
-// and heavy, or deps alone. A tier's archives come out together when
-// its last package is done, so one outside tier holds every workspace
-// package back until the end of its heaviest chain of dependencies, which
-// often ends in a few big packages, such as a C library translated to Go.
-// The heavy tier is that tail: the biggest package on the heaviest chain,
-// and every outside package whose chain is longer than what precedes it.
-// The light tier is the rest, which the heavy one builds on. A workspace
-// package that imports nothing heavy starts when the light tier is done,
-// and builds while the tail does.
-//
-// It splits only a tail: the heavy tier at most a quarter of the outside
-// packages' weight, and its first package at least a quarter of the chain.
-// Otherwise, as when the heaviest chain is mostly the standard library, it
-// is the outside tier. Only the outside packages' weights decide it, so a
-// workspace edit never moves a package between tiers.
-func heavyTiers(blocks map[string]*block, weights map[string]int64) ([]map[string]bool, []string) {
-	outside := outsideSet(blocks)
-	chain := map[string]int64{}
-	var chainOf func(id string) int64
-	chainOf = func(id string) int64 {
-		if v, ok := chain[id]; ok {
-			return v
-		}
-		var below int64
-		for _, d := range blocks[id].deps {
-			below = max(below, chainOf(d))
-		}
-		chain[id] = weights[id] + below
-		return chain[id]
-	}
-	// Ties go by import path, which, unlike a step id, an edit elsewhere in
-	// the plan doesn't renumber.
-	longer := func(a, b string) bool {
-		if b == "" || chain[a] != chain[b] {
-			return b == "" || chain[a] > chain[b]
-		}
-		return blocks[a].importPath < blocks[b].importPath
-	}
-	var total int64
-	head := ""
-	for id := range outside {
-		chainOf(id)
-		total += weights[id]
-		if longer(id, head) {
-			head = id
-		}
-	}
-	big := head
-	for id := head; id != ""; {
-		if weights[id] > weights[big] {
-			big = id
-		}
-		next := ""
-		for _, d := range blocks[id].deps {
-			if longer(d, next) {
-				next = d
-			}
-		}
-		id = next
-	}
-	start := chain[big] - weights[big]
-	light, heavy := map[string]bool{}, map[string]bool{}
-	var heavyWeight int64
-	for id := range outside {
-		if chain[id] <= start {
-			light[id] = true
-		} else {
-			heavy[id] = true
-			heavyWeight += weights[id]
-		}
-	}
-	if 4*heavyWeight > total || 4*weights[big] < chain[head] {
-		return nonEmpty([]string{"deps"}, outside)
-	}
-	return nonEmpty([]string{"light", "heavy"}, light, heavy)
-}
-
-// heightsOf is each outside package's priority in its tier exec: its weight
-// plus the heaviest chain of outside packages that import it, across tiers,
-// so a tier starts first what a later tier's long chain waits for. Only the
-// outside packages' weights go in, so a workspace edit leaves a tier's spec,
-// and its exec, as they were.
-func heightsOf(blocks map[string]*block, outside map[string]bool, weights map[string]int64) map[string]int64 {
+// heightsOf is each package's priority for an exec slot: its weight plus
+// the heaviest chain of packages that import it, so the walk starts first
+// what a long chain waits for, as go build's own scheduler does.
+func heightsOf(blocks map[string]*block, weights map[string]int64) map[string]int64 {
 	dependents := map[string][]string{}
-	for id := range outside {
-		for _, d := range blocks[id].deps {
+	for id, b := range blocks {
+		for _, d := range b.deps {
 			dependents[d] = append(dependents[d], id)
 		}
 	}
@@ -464,23 +354,55 @@ func heightsOf(blocks map[string]*block, outside map[string]bool, weights map[st
 		heights[id] = weights[id] + above
 		return heights[id]
 	}
-	for id := range outside {
+	for id := range blocks {
 		heightOf(id)
 	}
 	return heights
 }
 
-// nonEmpty is the sets that hold a package, with their names.
-func nonEmpty(names []string, sets ...map[string]bool) ([]map[string]bool, []string) {
-	var out []map[string]bool
-	var outNames []string
-	for i, set := range sets {
-		if len(set) > 0 {
-			out = append(out, set)
-			outNames = append(outNames, names[i])
+// gate hands out n slots, each freed slot to the highest waiter.
+type gate struct {
+	mu      sync.Mutex
+	free    int
+	waiting []gateWaiter
+}
+
+type gateWaiter struct {
+	height int64
+	ready  chan struct{}
+}
+
+func newGate(n int) *gate { return &gate{free: n} }
+
+func (g *gate) acquire(height int64) {
+	g.mu.Lock()
+	if g.free > 0 {
+		g.free--
+		g.mu.Unlock()
+		return
+	}
+	ready := make(chan struct{})
+	g.waiting = append(g.waiting, gateWaiter{height, ready})
+	g.mu.Unlock()
+	<-ready
+}
+
+func (g *gate) release() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.waiting) == 0 {
+		g.free++
+		return
+	}
+	best := 0
+	for i, w := range g.waiting {
+		if w.height > g.waiting[best].height {
+			best = i
 		}
 	}
-	return out, outNames
+	w := g.waiting[best]
+	g.waiting = append(g.waiting[:best], g.waiting[best+1:]...)
+	close(w.ready)
 }
 
 // closedSet is every block that has property and whose dependencies all
@@ -512,7 +434,7 @@ func closedSet(blocks map[string]*block, property func(*block) bool) map[string]
 }
 
 // outsideSet is the packages that read nothing from the source, down to
-// their dependencies.
+// their dependencies: the standard library and dependencies.
 func outsideSet(blocks map[string]*block) map[string]bool {
 	// The PGO profile's preprocessing runs on its own, before anything that
 	// reads it, even when the profile is outside the source.

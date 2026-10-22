@@ -264,14 +264,18 @@ func parsePlan(plan string, r roots) (map[string]*block, error) {
 		return nil, err
 	}
 	for id, b := range blocks {
-		// Assembly can #include headers from elsewhere in its module, which
-		// the plan never names: mount every header of the module.
+		// Assembly and cgo's C compiles can #include files from anywhere in
+		// their module, which the plan never names: a downloaded module's
+		// package that has either mounts the whole module but its Go files.
+		// A module version never changes, so this costs no rebuilds.
+		withC := b.cgo
 		for _, f := range b.modFiles {
-			if path.Ext(f) == ".s" {
-				if i := strings.Index(f, "@"); i >= 0 {
-					if j := strings.Index(f[i:], "/"); j >= 0 {
-						b.modFiles = appendUniq(b.modFiles, f[:i+j]+"/**/*.h")
-					}
+			withC = withC || path.Ext(f) == ".s"
+		}
+		if withC {
+			for _, f := range b.modFiles {
+				if root := moduleRoot(f); root != "" {
+					b.modFiles = appendUniq(b.modFiles, root+"/**")
 				}
 			}
 		}
@@ -289,9 +293,8 @@ func parsePlan(plan string, r roots) (map[string]*block, error) {
 				}
 				seen[m[1]] = true
 				// The profile isn't a dependency: every compile reads it,
-				// and its output is mounted into every exec instead, so it
-				// doesn't pull the standard library and dependencies out
-				// of their tiers.
+				// and its output is mounted into every exec instead, so a
+				// package's dependencies are the packages it imports.
 				if blocks[m[1]].isProfile {
 					b.profile = m[1]
 					continue
@@ -304,6 +307,20 @@ func parsePlan(plan string, r roots) (map[string]*block, error) {
 		sort.Strings(b.modFiles)
 	}
 	return blocks, nil
+}
+
+// moduleRoot is the module directory a path in the module cache is in,
+// "<module>@<version>", or "" outside one.
+func moduleRoot(f string) string {
+	i := strings.Index(f, "@")
+	if i < 0 {
+		return ""
+	}
+	j := strings.Index(f[i:], "/")
+	if j < 0 {
+		return ""
+	}
+	return f[:i+j]
 }
 
 // errUnsupported marks what the per-package build doesn't do yet.
@@ -481,20 +498,19 @@ func appendUniq(xs []string, x string) []string {
 // is the same on every engine; the compiler's output doesn't depend on it,
 // and it uses 1 where its flags don't allow more. A package built in its
 // own exec mostly compiles alone, as the big packages at the end of a build
-// do, so it gets what go build passes on a 16-CPU machine. A tier runs as
-// many compiles at once as there are CPUs, so each gets 4: in dagger's
-// build, 16 there slowed the tiers more than it sped their packages.
+// do, so it gets what go build passes on a 16-CPU machine. The standard
+// library and dependencies build many at once, so each gets 4: in dagger's
+// build, 16 there slowed them more than it sped their packages.
 const (
 	soloCompileC = "16"
-	tierCompileC = "4"
+	depCompileC  = "4"
 )
 
 // script renders a block as one shell script for its exec. A dependency's
-// archive is read from /work/lib, or from /work/t/<tier> when a tier built
-// it (outside, by package). Archives get no Go build ID: the plan's are
+// archive is read from /work/lib. Archives get no Go build ID: the plan's are
 // temporary, and leaving them out lets early cutoff compare archives by
 // their bytes. The link gets one made from what it reads (gohdr linkid).
-func (b *block) script(blocks map[string]*block, outside map[string]string, conc string) string {
+func (b *block) script(blocks map[string]*block, conc string) string {
 	dirs := []string{"/work/" + b.name}
 	var body strings.Builder
 	var heredoc []string
@@ -527,9 +543,6 @@ func (b *block) script(blocks map[string]*block, outside map[string]string, conc
 			name := blocks[id].name
 			if id == b.id {
 				return "/work/" + name + "/" + name + ".a"
-			}
-			if k, ok := outside[id]; ok {
-				return "/work/t/" + k + "/" + name + ".a"
 			}
 			return "/work/lib/" + name + ".a"
 		})
