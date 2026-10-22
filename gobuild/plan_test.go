@@ -78,10 +78,8 @@ func TestParsePlanCgo(t *testing.T) {
 	}
 }
 
-// A downloaded module's package with cgo or assembly can #include any file
-// of its module, by a relative path or through -I, which the plan never
-// names, so it reads the whole module; one without either reads only what
-// the plan names.
+// A downloaded module's package reads its module whole, by name, whatever
+// the plan names of it: cgo and assembly can #include any file of the module.
 func TestParsePlanModuleIncludes(t *testing.T) {
 	plan := strings.Join([]string{
 		"mkdir -p $WORK/b002/",
@@ -116,13 +114,16 @@ func TestParsePlanModuleIncludes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []string{"b002", "b003"} {
-		if b := blocks[id]; !slices.Contains(b.modFiles, "example.com/dep@v1.0.0/**") {
-			t.Errorf("%s (%s) modFiles: %q", id, b.importPath, b.modFiles)
+	for id, want := range map[string]string{"b002": "example.com/dep@v1.0.0", "b003": "example.com/dep@v1.0.0", "b004": "example.com/other@v1.0.0"} {
+		b := blocks[id]
+		if len(b.modFiles) == 0 {
+			t.Errorf("%s (%s) reads no module files", id, b.importPath)
 		}
-	}
-	if b := blocks["b004"]; !slices.Equal(b.modFiles, []string{"example.com/other@v1.0.0/pure/pure.go"}) {
-		t.Errorf("b004 modFiles: %q", b.modFiles)
+		for _, f := range b.modFiles {
+			if moduleRoot(f) != want {
+				t.Errorf("%s (%s): %q is not in %s", id, b.importPath, f, want)
+			}
+		}
 	}
 }
 
@@ -262,20 +263,6 @@ func TestParsePlanQuotedDirectory(t *testing.T) {
 	}
 	if script := b.script(blocks, soloCompileC); !strings.Contains(script, "cd '/src/my dir'") {
 		t.Errorf("the directory isn't quoted:\n%s", script)
-	}
-}
-
-func TestSplitPattern(t *testing.T) {
-	for in, want := range map[string][2]string{
-		"m@v1/**/*.h":  {"m@v1", "**/*.h"},
-		"m@v1/inc/**":  {"m@v1/inc", "**"},
-		"m@v1/x/y.h":   {"m@v1/x", "y.h"},
-		"m@v1/a/*/b.h": {"m@v1/a", "*/b.h"},
-	} {
-		dir, glob := splitPattern(in)
-		if dir != want[0] || glob != want[1] {
-			t.Errorf("splitPattern(%q) = %q, %q; want %q, %q", in, dir, glob, want[0], want[1])
-		}
 	}
 }
 
@@ -701,5 +688,48 @@ func TestProfileOutsideTheSource(t *testing.T) {
 	}
 	if outsideSet(blocks)["b002"] {
 		t.Error("the profile step is in the outside set, which builds packages")
+	}
+}
+
+// The module cache writes an upper-case letter as "!" and the letter in lower
+// case; the go command takes the module and version as they are.
+func TestUnescapeModule(t *testing.T) {
+	for in, want := range map[string]string{
+		"github.com/!burnt!sushi/toml@v1.2.0": "github.com/BurntSushi/toml@v1.2.0",
+		"golang.org/x/sys@v0.30.0":            "golang.org/x/sys@v0.30.0",
+		"example.com/m@v1.0.0-!r!c1":          "example.com/m@v1.0.0-RC1",
+	} {
+		if got := unescapeModule(in); got != want {
+			t.Errorf("unescapeModule(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestSplitPattern(t *testing.T) {
+	for in, want := range map[string][2]string{
+		"m@v1/**/*.h":  {"m@v1", "**/*.h"},
+		"m@v1/inc/**":  {"m@v1/inc", "**"},
+		"m@v1/x/y.h":   {"m@v1/x", "y.h"},
+		"m@v1/a/*/b.h": {"m@v1/a", "*/b.h"},
+	} {
+		dir, glob := splitPattern(in)
+		if dir != want[0] || glob != want[1] {
+			t.Errorf("splitPattern(%q) = %q, %q; want %q, %q", in, dir, glob, want[0], want[1])
+		}
+	}
+}
+
+// The module cache records each download's checksum next to it, under the
+// escaped module path and version, which name the module's directory too.
+func TestParseSums(t *testing.T) {
+	sums := parseSums("./github.com/!burnt!sushi/toml/@v/v1.2.0.ziphash h1:abc=\n./golang.org/x/sys/@v/v0.30.0.ziphash h1:def=\n\n")
+	want := map[string]string{"github.com/!burnt!sushi/toml@v1.2.0": "h1:abc=", "golang.org/x/sys@v0.30.0": "h1:def="}
+	if len(sums) != len(want) {
+		t.Fatalf("sums: %q", sums)
+	}
+	for k, v := range want {
+		if sums[k] != v {
+			t.Errorf("sums[%q] = %q, want %q", k, sums[k], v)
+		}
 	}
 }

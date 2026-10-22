@@ -782,6 +782,25 @@ type GoDev {
   }
 
   """
+  A module whose go directive asks for a newer Go than the base's builds with
+  the toolchain the go command switches to, as go build would, and the
+  binary reports that Go.
+  """
+  toolchainSwitchCheck: Void @check {
+    let base = container
+      .from("golang:1.25-alpine")
+      .withEnvVariable("GOTOOLCHAIN", "auto")
+    let ws = directory
+      .withNewFile("go.mod", "module example.com/switch\n\ngo 1.26.1\n")
+      .withNewFile("main.go", "package main\n\nimport (\n\t\"fmt\"\n\t\"runtime\"\n)\n\nfunc main() { fmt.Println(runtime.Version()) }\n")
+      .asWorkspace
+    let built = go(base: base).packages(ws).get(key: ".").binary(ws)
+    let out = base.withFile("/usr/local/bin/switch", built).withExec(["switch"]).stdout
+    assert(out == "go1.26.1\n", "the binary's Go: " + out)
+    null
+  }
+
+  """
   A downloaded dependency's cgo and assembly #include files from elsewhere in
   its module, including a testdata directory, which no plan line names: each
   package's exec still has them, and the binary runs. The dependency comes

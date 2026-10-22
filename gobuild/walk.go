@@ -55,8 +55,8 @@ type walker struct {
 	base  *dagger.Container
 	tools *dagger.Directory
 	src   *dagger.Directory
-	// mods is the module cache, evaluated: see fileTree.
-	mods  *dagger.Directory
+	// mods is the module cache's modules, each on its own.
+	mods  *modules
 	roots roots
 	// heights orders the execs waiting for a slot, as heightsOf describes.
 	heights map[string]int64
@@ -131,9 +131,7 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 				srcDir, at := selected(w.src, n.SrcFiles)
 				ctr = ctr.WithMountedDirectory(path.Join(w.roots.Src, at), srcDir)
 			}
-			if len(n.ModFiles) > 0 {
-				ctr = ctr.WithMountedDirectory(w.roots.Mod, fileTree(w.mods, n.ModFiles))
-			}
+			ctr = w.mods.mount(ctr, n.ModFiles)
 			// A script past the kernel's argument-size limit (the link's
 			// import config at a large project's scale) goes in as a file.
 			var ran *dagger.Container
@@ -229,82 +227,6 @@ func fileTree(dir *dagger.Directory, files []string) *dagger.Directory {
 		tree = tree.WithFiles(d, byDir[d])
 	}
 	return tree
-}
-
-// expandHeaders replaces each module cache pattern with the files it
-// matches, but Go files, so every module file a package reads is named and
-// fileTree reads files alone: "<module>/**" for cgo or assembly that may
-// include any file in its module, "<dir>/**" for a directory a C compile
-// reads.
-func expandHeaders(ctx context.Context, mods *dagger.Directory, blocks map[string]*block) error {
-	found := map[string][]string{}
-	for _, b := range blocks {
-		for _, f := range b.modFiles {
-			if strings.Contains(f, "*") {
-				found[f] = nil
-			}
-		}
-	}
-	patterns := make([]string, 0, len(found))
-	for pattern := range found {
-		patterns = append(patterns, pattern)
-	}
-	sort.Strings(patterns)
-	matched := make([][]string, len(patterns))
-	errs := make([]error, len(patterns))
-	var wg sync.WaitGroup
-	for i, pattern := range patterns {
-		wg.Go(func() {
-			dir, glob := splitPattern(pattern)
-			hs, err := mods.Directory(dir).Glob(ctx, glob)
-			if err != nil {
-				errs[i] = fmt.Errorf("module cache %s: %w", dir, err)
-				return
-			}
-			for _, h := range hs {
-				// A glob names directories too, with a trailing slash. Go
-				// files are named one by one where they're read, so a
-				// pattern brings in what C and assembly include.
-				if !strings.HasSuffix(h, "/") && path.Ext(h) != ".go" {
-					matched[i] = append(matched[i], dir+"/"+h)
-				}
-			}
-		})
-	}
-	wg.Wait()
-	for i, pattern := range patterns {
-		if errs[i] != nil {
-			return errs[i]
-		}
-		found[pattern] = matched[i]
-	}
-	for _, b := range blocks {
-		var files []string
-		for _, f := range b.modFiles {
-			if hs, ok := found[f]; ok {
-				for _, h := range hs {
-					files = appendUniq(files, h)
-				}
-			} else {
-				files = appendUniq(files, f)
-			}
-		}
-		sort.Strings(files)
-		b.modFiles = files
-	}
-	return nil
-}
-
-// splitPattern splits a path pattern at its first segment holding a "*":
-// the directory before it, and the glob from it on.
-func splitPattern(pattern string) (string, string) {
-	segments := strings.Split(pattern, "/")
-	for i, s := range segments {
-		if strings.Contains(s, "*") {
-			return strings.Join(segments[:i], "/"), strings.Join(segments[i:], "/")
-		}
-	}
-	return path.Dir(pattern), path.Base(pattern)
 }
 
 func commonDir(files []string) string {

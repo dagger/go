@@ -265,9 +265,8 @@ func parsePlan(plan string, r roots) (map[string]*block, error) {
 	}
 	for id, b := range blocks {
 		// Assembly and cgo's C compiles can #include files from anywhere in
-		// their module, which the plan never names: a downloaded module's
-		// package that has either mounts the whole module but its Go files.
-		// A module version never changes, so this costs no rebuilds.
+		// their module, which the plan never names: a package in the module
+		// cache that has either reads its whole module.
 		withC := b.cgo
 		for _, f := range b.modFiles {
 			withC = withC || path.Ext(f) == ".s"

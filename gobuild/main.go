@@ -154,16 +154,22 @@ func run(ctx context.Context, base *dagger.Container, image string, from *dagger
 	for _, bl := range blocks {
 		bl.addCFlags(cc)
 	}
-	if err := expandHeaders(ctx, b.mods, blocks); err != nil {
+	sums, err := moduleSums(ctx, b.base, b.mods)
+	if err != nil {
+		return nil, nil, fmt.Errorf("module checksums: %w", err)
+	}
+	mods := &modules{base: b.base, root: b.roots.Mod, all: b.mods, sums: sums}
+	if err := mods.expandLoose(ctx, blocks); err != nil {
 		return nil, nil, err
 	}
+	mods.fetch(ctx, blocks)
 	// Go 1.25 and later run "go tool pack" for packages with assembly, the
 	// runtime among the first: build the tool now, not when the runtime
 	// waits for it. An error shows again where it's used.
 	if needsTools(blocks) {
 		go b.tools.Sync(ctx)
 	}
-	w := &walker{base: b.base, tools: b.tools, src: source, mods: b.mods, roots: b.roots}
+	w := &walker{base: b.base, tools: b.tools, src: source, mods: mods, roots: b.roots}
 	if test {
 		if w.testmain, err = b.testmain(ctx, headers, flags, pkg); err != nil {
 			return nil, nil, fmt.Errorf("test main: %w", err)
@@ -172,7 +178,7 @@ func run(ctx context.Context, base *dagger.Container, image string, from *dagger
 	// A PGO profile is preprocessed first: every compile reads it.
 	for _, bl := range blocks {
 		if bl.isProfile {
-			if w.profile, err = b.profileStep(ctx, bl, blocks); err != nil {
+			if w.profile, err = b.profileStep(ctx, bl, blocks, mods); err != nil {
 				return nil, nil, fmt.Errorf("pgo profile: %w", err)
 			}
 		}
@@ -203,15 +209,13 @@ func run(ctx context.Context, base *dagger.Container, image string, from *dagger
 
 // profileStep runs the plan's PGO profile preprocessing, from the profile in
 // the source, and returns its output for the execs whose compiles read it.
-func (b *build) profileStep(ctx context.Context, bl *block, blocks map[string]*block) (*profileOutput, error) {
+func (b *build) profileStep(ctx context.Context, bl *block, blocks map[string]*block, mods *modules) (*profileOutput, error) {
 	ctr := b.base
 	if len(bl.srcFiles) > 0 {
 		srcDir, at := selected(b.src, bl.srcFiles)
 		ctr = ctr.WithMountedDirectory(path.Join(b.roots.Src, at), srcDir)
 	}
-	if len(bl.modFiles) > 0 {
-		ctr = ctr.WithMountedDirectory(b.roots.Mod, fileTree(b.mods, bl.modFiles))
-	}
+	ctr = mods.mount(ctr, bl.modFiles)
 	out := "/work/" + bl.name
 	dir, err := ctr.WithExec([]string{"sh", "-c", bl.script(blocks, soloCompileC)}, noNest).
 		Directory(out).Sync(ctx)
