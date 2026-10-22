@@ -390,6 +390,9 @@ func includeBasePatterns(moduleRoot string) []string {
 		"**/go.sum",
 		"go.work",
 		"go.work.sum",
+		// A vendor directory puts the go command in vendor mode, which reads
+		// this to check the vendored modules against go.mod.
+		"vendor/modules.txt",
 	}
 	for i, pattern := range patterns {
 		patterns[i] = path.Join(moduleRoot, pattern)

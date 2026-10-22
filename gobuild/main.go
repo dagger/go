@@ -316,9 +316,12 @@ func newBuild(ctx context.Context, ctr *dagger.Container, image string, source *
 	// The module cache, downloaded from every go.mod and go.sum in the
 	// source: the root's, and those a local replace or go.work points at,
 	// or the alternate go.mod a -modfile flag names, with its go.sum.
-	include := []string{"**/go.mod", "**/go.sum", "go.work", "go.work.sum"}
+	include := []string{"**/go.mod", "**/go.sum", "go.work", "go.work.sum", "**/vendor/modules.txt"}
 	download := []string{"go", "mod", "download"}
-	if mf, ok := modfile(flags, envFlags); ok && mf == "" {
+	// The go.mod the build reads its go directive from: the alternate one,
+	// or with none, the module's own, which the script asks go for.
+	goMod := ""
+	if mf, ok := lastFlag("modfile", flags, envFlags); ok && mf == "" {
 		// An empty -modfile in the call means the module's own go.mod,
 		// whatever GOFLAGS, which the download runs with, names.
 		download = append(download, "-modfile=")
@@ -329,6 +332,7 @@ func newBuild(ctx context.Context, ctr *dagger.Container, image string, source *
 		rel := strings.TrimPrefix(strings.TrimPrefix(mf, mountPath), "/")
 		include = append(include, rel, strings.TrimSuffix(rel, ".mod")+".sum")
 		download = append(download, "-modfile="+mf)
+		goMod = mf
 	}
 	// The cache directory is made first: a module with no dependencies
 	// downloads nothing, and nothing else would create it.
@@ -336,10 +340,35 @@ func newBuild(ctx context.Context, ctr *dagger.Container, image string, source *
 	for i, a := range download {
 		quoted[i] = shQuote(a)
 	}
+	// In vendor mode the go command reads dependencies from the vendor
+	// directory and never the module cache, and a vendored dependency need
+	// not be downloadable at all. The mode is go's own choice: -mod names
+	// it, or with no -mod, a vendor directory at the main module's root, or
+	// the go.work's, selects it from go 1.14, or 1.22 for a go.work, by the
+	// go directive of the go.mod the build reads, a -modfile one included. A
+	// vendor directory without modules.txt is an error go reports itself.
+	// Without one in the source, go is not asked.
+	mode, _ := lastFlag("mod", flags, envFlags)
+	script := "set -e\nmkdir -p " + shQuote(gomodcache) + "\nmode=" + shQuote(mode) + "\nsrc=" + shQuote(mountPath) + "\ngomod=" + shQuote(goMod) + `
+if [ -z "$mode" ] && [ -n "$(find "$src" -path '*/vendor/modules.txt' | head -n 1)" ]; then
+	work=$(go env GOWORK)
+	if [ -n "$work" ] && [ "$work" != off ]; then
+		file=$work edit=work min=22
+	else
+		file=$(go env GOMOD) edit=mod min=14
+	fi
+	root=${file%/*}
+	[ "$edit" = mod ] && [ -n "$gomod" ] && file=$gomod
+	if [ -f "$root/vendor/modules.txt" ]; then
+		minor=$(go "$edit" edit -json "$file" | sed -n 's/^	"Go": "1\.\([0-9]*\).*/\1/p')
+		[ "${minor:-0}" -ge "$min" ] && mode=vendor
+	fi
+fi
+[ "$mode" = vendor ] || ` + strings.Join(quoted, " ")
 	b.mods, err = base.
 		WithMountedDirectory(mountPath, source.Filter(dagger.DirectoryFilterOpts{Include: include})).
 		WithWorkdir(cwd).
-		WithExec([]string{"sh", "-c", "mkdir -p " + shQuote(gomodcache) + " && " + strings.Join(quoted, " ")}, noNest).
+		WithExec([]string{"sh", "-c", script}, noNest).
 		Directory(gomodcache).Sync(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("go mod download: %w", err)
@@ -474,19 +503,25 @@ func checkFlags(flags []string) error {
 	return nil
 }
 
-// modfile is the alternate go.mod a -modfile flag names, and whether one
-// does: the last flag wins, the call's over GOFLAGS', and an empty one means
-// the module's own go.mod.
-func modfile(flags, goflags []string) (string, bool) {
+// lastFlag is the value of the go flag name, e.g. the alternate go.mod
+// -modfile names, and whether it is set: the last flag wins, the call's over
+// GOFLAGS'. An empty -modfile means the module's own go.mod.
+func lastFlag(name string, flags, goflags []string) (string, bool) {
 	last := func(flags []string) (string, bool) {
 		v, set := "", false
-		for i, f := range flags {
-			name, value, ok := strings.Cut(strings.TrimLeft(f, "-"), "=")
-			if name != "modfile" {
+		for i := 0; i < len(flags); i++ {
+			f := flags[i]
+			if !strings.HasPrefix(f, "-") {
 				continue
 			}
+			n, value, ok := strings.Cut(strings.TrimLeft(f, "-"), "=")
+			if n != name {
+				continue
+			}
+			// A value in the next argument is not a flag of its own.
 			if !ok && i+1 < len(flags) {
-				value = flags[i+1]
+				i++
+				value = flags[i]
 			}
 			v, set = value, true
 		}

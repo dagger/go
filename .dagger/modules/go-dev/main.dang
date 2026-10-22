@@ -12,6 +12,7 @@ type GoDev {
   let buildTagsFixturePath: String! = "testdata/go-module-build-tags"
   let mountPathFixturePath: String! = "testdata/go-module-mount-path"
   let noPackagesFixturePath: String! = "testdata/go-module-no-packages"
+  let vendoredFixturePath: String! = "testdata/go-module-vendored"
   let unreadableFixturePath: String! = "fixtures/go-module-unreadable"
   # The other modules in this repository keep their own fixtures, and several
   # of theirs fail on purpose: golangci-lint's does not even compile.
@@ -538,6 +539,33 @@ type GoDev {
   cgoCxxCheck(ws: Workspace!): Void @check {
     let mod = go(base: cgoCxxBase).module(ws, cgoCxxFixturePath)
     mod.test(ws)
+  }
+
+  """
+  A module that vendors its dependencies is built and tested from its vendor
+  directory: Go's vendor mode needs vendor/modules.txt mounted, and nothing
+  is downloaded, as the fixture's dependency exists nowhere else.
+  """
+  vendoredCheck(ws: Workspace!): Void @check {
+    let mod = go.module(ws, vendoredFixturePath)
+    mod.test(ws)
+    let said = mod
+      .base(ws)
+      .withFile("/usr/local/bin/hello", go.packages(ws).get(key: vendoredFixturePath + "/cmd/hello").binary(ws))
+      .withExec(["hello"])
+      .stdout
+    assert(said == "hello vendor\n", "the vendored binary printed: " + said)
+    # -mod with its value in the next argument selects vendor mode too.
+    let flagged = mod
+      .base(ws)
+      .withFile(
+        "/usr/local/bin/hello",
+        go(buildFlags: ["-mod", "vendor"]).packages(ws).get(key: vendoredFixturePath + "/cmd/hello").binary(ws),
+      )
+      .withExec(["hello"])
+      .stdout
+    assert(flagged == "hello vendor\n", "the binary built with -mod vendor printed: " + flagged)
+    null
   }
 
   """

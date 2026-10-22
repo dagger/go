@@ -907,6 +907,7 @@ type GoMod {
       subpath("go.sum"),
       subpath("go.work"),
       subpath("go.work.sum"),
+      subpath("vendor/modules.txt"),
     ]
   }
 

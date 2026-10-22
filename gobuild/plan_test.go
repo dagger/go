@@ -228,9 +228,9 @@ func TestSplitPattern(t *testing.T) {
 	}
 }
 
-// As with any repeated go flag, the last -modfile counts, and the call's
-// flags count over GOFLAGS.
-func TestModfile(t *testing.T) {
+// As with any repeated go flag, the last -modfile or -mod counts, and the
+// call's flags count over GOFLAGS.
+func TestLastFlag(t *testing.T) {
 	for _, c := range []struct {
 		flags, goflags []string
 		want           string
@@ -243,8 +243,24 @@ func TestModfile(t *testing.T) {
 		{[]string{"-modfile="}, []string{"-modfile=g.mod"}, "", true},
 		{[]string{"-trimpath"}, nil, "", false},
 	} {
-		if got, set := modfile(c.flags, c.goflags); got != c.want || set != c.set {
-			t.Errorf("modfile(%q, %q) = %q, %v; want %q, %v", c.flags, c.goflags, got, set, c.want, c.set)
+		if got, set := lastFlag("modfile", c.flags, c.goflags); got != c.want || set != c.set {
+			t.Errorf("lastFlag(modfile, %q, %q) = %q, %v; want %q, %v", c.flags, c.goflags, got, set, c.want, c.set)
+		}
+	}
+	// -mod is not -modfile.
+	for _, c := range []struct {
+		flags, goflags []string
+		want           string
+		set            bool
+	}{
+		{[]string{"-modfile=a.mod"}, []string{"-mod=vendor"}, "vendor", true},
+		{[]string{"-mod", "mod"}, []string{"-mod=vendor"}, "mod", true},
+		{[]string{"-mod", "vendor", "-trimpath"}, nil, "vendor", true},
+		{[]string{"-modfile", "mod"}, nil, "", false},
+		{nil, []string{"-modfile=g.mod"}, "", false},
+	} {
+		if got, set := lastFlag("mod", c.flags, c.goflags); got != c.want || set != c.set {
+			t.Errorf("lastFlag(mod, %q, %q) = %q, %v; want %q, %v", c.flags, c.goflags, got, set, c.want, c.set)
 		}
 	}
 }

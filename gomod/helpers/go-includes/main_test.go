@@ -142,6 +142,7 @@ func TestIncludeBasePreservesNestedModuleBoundaries(t *testing.T) {
 		"pkg/**/go.sum",
 		"pkg/go.work",
 		"pkg/go.work.sum",
+		"pkg/vendor/modules.txt",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("includeBase mismatch:\n got: %#v\nwant: %#v", got, want)
