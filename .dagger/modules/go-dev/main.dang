@@ -551,12 +551,23 @@ type GoDev {
   directory named like a Go file, with and without all:, test files, files
   starting with _ or ., a Go file's whole source, and a pattern go build
   rejects fails with go build's own error, as does a pattern naming a
-  symlink. A test file's embed reaches its test.
+  symlink; and a package the main package imports embeds its own files. A
+  test file's embed reaches its test. All of it under Go 1.25 too, whose
+  go/build finds a file's //go:embed lines only when its import scan stops
+  before the end of the file.
   """
   embedCheck: Void @check {
-    let shapes = ["dirgo", "dirgoall", "testfiles", "nodot", "gofile", "nested", "missing", "dirlink", "globlink", "testlink"]
+    let failures = embedFailures("1.25.0") + embedFailures("1.26.1")
+    assert(failures.length == 0, failures.join("\n"))
+    null
+  }
+
+  # What embedCheck finds wrong with each embed shape under Go version, and
+  # the test-file embed's test run.
+  let embedFailures(version: String!): [String!]! {
+    let shapes = ["dirgo", "dirgoall", "testfiles", "nodot", "gofile", "nested", "missing", "dirlink", "globlink", "testlink", "pkgembed"]
     let source = directory
-      .withNewFile("go.mod", "module example.com/embeds\n\ngo 1.26.1\n")
+      .withNewFile("go.mod", "module example.com/embeds\n\ngo " + version + "\n")
       .withNewFile("cmd/dirgo/main.go", embedMain("tmpl.go"))
       .withNewFile("cmd/dirgo/tmpl.go/a.txt", "a\n")
       .withNewFile("cmd/dirgo/tmpl.go/_b.txt", "b\n")
@@ -576,7 +587,7 @@ type GoDev {
       .withNewFile("cmd/gofile/main.go", embedMain("sample/sample.go"))
       .withNewFile("cmd/gofile/sample/sample.go", "package sample\n\nimport \"fmt\"\n\nfunc Say() { fmt.Println(\"a body well past the imports\") }\n")
       .withNewFile("cmd/nested/main.go", embedMain("sub"))
-      .withNewFile("cmd/nested/sub/go.mod", "module example.com/sub\n\ngo 1.26.1\n")
+      .withNewFile("cmd/nested/sub/go.mod", "module example.com/sub\n\ngo " + version + "\n")
       .withNewFile("cmd/nested/sub/x.txt", "x\n")
       .withNewFile("cmd/missing/main.go", embedMain("nothing.txt"))
       # A symlink go leaves out of a directory pattern, and rejects when a
@@ -590,16 +601,23 @@ type GoDev {
       .withNewFile("cmd/testlink/main.go", embedMain("tmpl.go"))
       .withNewFile("cmd/testlink/tmpl.go/target.go", "package target\n\nfunc Body() string { return \"body\" }\n")
       .withSymlink("target.go", "cmd/testlink/tmpl.go/link_test.go")
+      # A package the main package imports, embedding its own files, as
+      # github.com/vito/booklit's errhtml does: nothing follows its //go:embed
+      # line but the variable it applies to.
+      .withNewFile("cmd/pkgembed/main.go", "package main\n\nimport (\n\t\"fmt\"\n\t\"io/fs\"\n\n\t\"example.com/embeds/assets\"\n)\n\nfunc main() {\n\tfs.WalkDir(assets.Files, \".\", func(p string, d fs.DirEntry, err error) error {\n\t\tif err == nil && !d.IsDir() {\n\t\t\tdata, _ := assets.Files.ReadFile(p)\n\t\t\tfmt.Println(p, len(data))\n\t\t}\n\t\treturn err\n\t})\n}\n")
+      .withNewFile("assets/assets.go", "package assets\n\nimport \"embed\"\n\n//go:embed *.tmpl *.css\nvar Files embed.FS\n")
+      .withNewFile("assets/page.tmpl", "{{ .Page }}\n")
+      .withNewFile("assets/style.css", "body {}\n")
       .withNewFile("lib/lib.go", "package lib\n")
       .withNewFile("lib/fixture.txt", "embedded in a test\n")
       .withNewFile("lib/lib_test.go", "package lib\n\nimport (\n\t_ \"embed\"\n\t\"testing\"\n)\n\n//go:embed fixture.txt\nvar fixture string\n\nfunc TestFixture(t *testing.T) {\n\tif fixture != \"embedded in a test\\n\" {\n\t\tt.Fatalf(\"embedded %q\", fixture)\n\t}\n}\n")
     let ws = source.asWorkspace
-    let tool = go(version: "1.26.1")
+    let tool = go(version: version)
     let mod = tool.module(ws, ".", findUp: false)
     # What plain go build makes of each shape: the binary's output, or the
     # line of go build's error that names the pattern.
     let plain = container
-      .from("golang:1.26.1-alpine")
+      .from("golang:" + version + "-alpine")
       .withDirectory("/src", source)
       .withWorkdir("/src")
     let failures = shapes.map { shape =>
@@ -616,17 +634,21 @@ type GoDev {
         err: Error => err.message
       }
       if (want == "") {
-        shape + ": plain go build printed nothing"
+        shape + " (Go " + version + "): plain go build printed nothing"
       } else if (got == want or (want.contains(": pattern ") and got.contains(want.trimSpace))) {
         ""
       } else {
-        shape + ": go build gave\n" + want + "the go module gave\n" + got
+        shape + " (Go " + version + "): go build gave\n" + want + "the go module gave\n" + got
       }
     }.filter { failure => failure != "" }
-    assert(failures.length == 0, failures.join("\n"))
     # Other shapes fail on purpose, so the test-file embed runs on its own.
-    run(tool.packages(ws).get(key: "lib").tests(ws).batch.test(ws))
-    null
+    let tested = {
+      run(tool.packages(ws).get(key: "lib").tests(ws).batch.test(ws))
+      ""
+    } rescue {
+      err: Error => "lib tests (Go " + version + "): " + err.message
+    }
+    failures + [tested].filter { failure => failure != "" }
   }
 
   """

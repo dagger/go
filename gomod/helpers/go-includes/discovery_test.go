@@ -2,12 +2,78 @@ package main
 
 import (
 	"fmt"
+	"go/build"
+	"go/parser"
+	"go/scanner"
+	"go/token"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
+
+// A header with go:embed lines goes on past them, so go/build's scan of its
+// imports stops at a token before the end of the file: up to Go 1.25, it only
+// looks for go:embed lines then, and without them go build -n leaves the
+// package's embed configuration out. github.com/vito/booklit's errhtml, a
+// package its main package imports, has the first shape here.
+func TestHeaderEndsAfterEmbeds(t *testing.T) {
+	for name, src := range map[string]string{
+		"single": "package errhtml\n\nimport \"embed\"\n\n//go:embed *.tmpl *.css\nvar Assets embed.FS\n",
+		"block":  "package x\n\nimport (\n\t\"embed\"\n\t\"fmt\"\n)\n\n//go:embed *.tmpl\nvar files embed.FS\n\nfunc F() { fmt.Println(files) }\n",
+		"blank":  "package x\n\nimport _ \"embed\"\n\nvar (\n\t//go:embed a.tmpl\n\ta string\n\t//go:embed b.css\n\tb string\n)",
+	} {
+		t.Run(name, func(t *testing.T) {
+			header := goHeader(name+".go", []byte(src))
+			fset := token.NewFileSet()
+			f, err := parser.ParseFile(fset, "", header, parser.ImportsOnly)
+			if err != nil {
+				t.Fatalf("header does not parse: %v\n%s", err, header)
+			}
+			var end token.Pos
+			for _, d := range f.Decls {
+				end = max(end, d.End())
+			}
+			rest := header[fset.Position(end).Offset:]
+			var s scanner.Scanner
+			s.Init(token.NewFileSet().AddFile("", -1, len(rest)), rest, nil, scanner.ScanComments)
+			stops := false
+			for {
+				_, tok, lit := s.Scan()
+				if tok == token.EOF {
+					break
+				}
+				if tok != token.COMMENT && !(tok == token.SEMICOLON && lit == "\n") {
+					stops = true
+					break
+				}
+			}
+			if !stops {
+				t.Errorf("the header ends in comments after its imports, where go/build's import scan reaches the end of the file:\n%s", header)
+			}
+
+			// The patterns go/build finds, which go build -n embeds: the
+			// same in the header as in the source.
+			pkg, err := build.ImportDir(writeTree(t, map[string]string{"x.go": string(header)}), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := build.ImportDir(writeTree(t, map[string]string{"x.go": src}), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(pkg.EmbedPatterns, want.EmbedPatterns) || len(want.EmbedPatterns) == 0 {
+				t.Errorf("go/build finds embed patterns %q in the header, %q in the source", pkg.EmbedPatterns, want.EmbedPatterns)
+			}
+		})
+	}
+	// A header without go:embed lines is as before.
+	if src := "package x\n\nimport \"fmt\"\n\nfunc F() { fmt.Println() }\n"; string(goHeader("x.go", []byte(src))) != "package x\n\nimport \"fmt\"\n" {
+		t.Errorf("header without embeds: %q", goHeader("x.go", []byte(src)))
+	}
+}
 
 // A test may be named in any script: the go module's test search matched
 // such names with ripgrep's Unicode \w, and discovery must still find them.

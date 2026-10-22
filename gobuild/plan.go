@@ -853,7 +853,8 @@ var rePosition = regexp.MustCompile(`^(.+\.go):(\d+):(\d+)(:.*)$`)
 // sourcePosition is the position in src of line and col in its header, as
 // the scan's header pack holds it (goHeader, in go-includes): the source up
 // to the end of its imports, then each go:embed line after them, trimmed,
-// one per line. It reports false for a line past the header's.
+// one per line, then a line that ends the header. It reports false for a
+// line past the header's go:embed lines.
 func sourcePosition(src []byte, line, col int) (int, int, bool) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "", src, parser.ImportsOnly|parser.ParseComments|parser.SkipObjectResolution)
