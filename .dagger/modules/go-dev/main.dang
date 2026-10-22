@@ -657,6 +657,33 @@ type GoDev {
   }
 
   """
+  A cgo main package builds with -cover as plain go build -cover builds it,
+  byte for byte but for its build IDs, and runs: go hands the cgo tool the
+  cover tool's output from its work directory.
+  """
+  cgoCoverCheck: Void @check {
+    let source = directory
+      .withNewFile("go.mod", "module example.com/cgocover\n\ngo 1.26.1\n")
+      .withNewFile("main.go", "package main\n\n// int answer(void) { return 42; }\nimport \"C\"\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(int(C.answer())) }\n")
+    let ws = source.asWorkspace
+    let base = cgoCxxBase.withExec(["apk", "add", "--no-cache", "binutils"]).withEnvVariable("CGO_ENABLED", "1")
+    let built = go(base: base, buildFlags: ["-cover"]).packages(ws).get(key: ".").binary(ws)
+    let compared = base
+      .withDirectory("/src", source)
+      .withWorkdir("/src")
+      .withFile("/module/cgocover", built)
+      .withExec(["go", "build", "-cover", "-o", "/plain/cgocover", "."])
+      .withExec(["sh", "-c", """
+        for b in plain module; do objcopy --remove-section=.note.go.buildid --remove-section=.note.gnu.build-id /$b/cgocover /$b/stripped; done
+        cmp -s /plain/stripped /module/stripped || echo "the bytes differ"
+        /module/cgocover
+        """])
+      .stdout
+    assert(compared == "42\n", "the cgo -cover binary: " + compared)
+    null
+  }
+
+  """
   The goflags setting reaches Go commands as GOFLAGS, so build tags select
   source files without a custom base container.
   """

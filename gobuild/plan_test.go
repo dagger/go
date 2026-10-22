@@ -451,3 +451,26 @@ func TestSourcePosition(t *testing.T) {
 		t.Errorf("a line past the header's was placed")
 	}
 }
+
+// A work file go hands the cgo tool from a source directory, printed as
+// "./$WORK/...", is the work file: an input of no source file, run at the
+// work path.
+func TestParsePlanCgoCoverWorkFile(t *testing.T) {
+	plan := mainLink(
+		"cd /src",
+		"TERM='dumb' CGO_LDFLAGS='' /usr/local/go/pkg/tool/linux_amd64/cgo -objdir $WORK/b001/ -importpath example.com/m -- -I $WORK/b001/ -O2 -g ./$WORK/b001/m.cover.go",
+	)
+	blocks, err := parsePlan(plan, testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := blocks[mainID]
+	if !slices.ContainsFunc(b.lines, func(l string) bool { return strings.HasSuffix(l, " -g $WORK/b001/m.cover.go") }) {
+		t.Errorf("the cgo run kept ./$WORK: %q", b.lines)
+	}
+	for _, f := range b.srcFiles {
+		if strings.Contains(f, "WORK") || strings.Contains(f, "cover.go") {
+			t.Errorf("a work file is a source input: %q", b.srcFiles)
+		}
+	}
+}

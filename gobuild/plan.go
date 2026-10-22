@@ -100,7 +100,11 @@ func parsePlan(plan string, r roots) (map[string]*block, error) {
 	pending := ""
 	lines := strings.Split(plan, "\n")
 	for i := 0; i < len(lines); i++ {
-		line := lines[i]
+		// go -n prints its work directory as "$WORK", which is not an
+		// absolute path, so a work file it hands the cgo tool from a source
+		// directory, such as the cover tool's output, comes out as
+		// "./$WORK/...". It runs it as the absolute path it is.
+		line := strings.ReplaceAll(lines[i], "./$WORK/", "$WORK/")
 		if line == "#" && i+2 < len(lines) && strings.HasPrefix(lines[i+1], "# ") && lines[i+2] == "#" {
 			if h := strings.TrimPrefix(lines[i+1], "# "); cur != nil && cur.importPath == "" {
 				cur.importPath = h
