@@ -81,8 +81,18 @@ func (index *localIndex) writeHeaderPack(path string) error {
 	return out.Close()
 }
 
+// headerEnd follows a header's go:embed lines. Up to Go 1.25, go/build (and
+// the go command's copy of it) looks for go:embed lines only when its scan of
+// the imports stops at a token before the end of the file: skipping the
+// comments after the imports to the end, it finds none, and go build -n
+// leaves the package's -embedcfg out, so its compile fails with "build system
+// did not supply embed configuration". Go 1.26 scans the whole file either
+// way. Nothing compiles a header, so what the token is doesn't matter.
+const headerEnd = "var _ struct{}\n"
+
 // goHeader returns a Go file up to the end of its import declarations, plus
-// its go:embed lines. A file that does not parse is kept whole.
+// its go:embed lines, then headerEnd when there are any. A file that does not
+// parse is kept whole.
 func goHeader(name string, src []byte) []byte {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, name, src, parser.ImportsOnly|parser.ParseComments|parser.SkipObjectResolution)
@@ -99,11 +109,16 @@ func goHeader(name string, src []byte) []byte {
 	var out bytes.Buffer
 	out.Write(src[:off])
 	out.WriteByte('\n')
+	embeds := false
 	for _, line := range strings.Split(string(src[off:]), "\n") {
 		if t := strings.TrimSpace(line); strings.HasPrefix(t, "//go:embed") {
 			out.WriteString(t)
 			out.WriteByte('\n')
+			embeds = true
 		}
+	}
+	if embeds {
+		out.WriteString(headerEnd)
 	}
 	return out.Bytes()
 }
