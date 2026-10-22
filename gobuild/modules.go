@@ -61,7 +61,7 @@ func (m *modules) dir(name string) *dagger.Directory {
 	d := dag.Container().From(toolImage).
 		WithMountedFile("/gobuild/gohdr", hdrTool()).
 		WithMountedFile("/gobuild/mod.zip", m.all.File(zipFile)).
-		WithExec([]string{"sh", "-c", script}, noNest).
+		WithExec([]string{"sh", "-c", script}, bare).
 		Directory("/gobuild/mod")
 	if m.dirs == nil {
 		m.dirs = map[string]*dagger.Directory{}
@@ -130,7 +130,7 @@ func moduleSums(ctx context.Context, base *dagger.Container, mods *dagger.Direct
 	out, err := base.
 		WithMountedDirectory("/gobuild/mods", mods).
 		WithExec([]string{"sh", "-c", "cd /gobuild/mods/cache/download 2>/dev/null || exit 0; " +
-			"find . -name '*.ziphash' | sort | while read -r f; do printf '%s %s\\n' \"$f\" \"$(cat \"$f\")\"; done"}, noNest).
+			"find . -name '*.ziphash' | sort | while read -r f; do printf '%s %s\\n' \"$f\" \"$(cat \"$f\")\"; done"}, bare).
 		Stdout(ctx)
 	if err != nil {
 		return nil, err

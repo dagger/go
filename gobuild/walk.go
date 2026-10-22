@@ -136,9 +136,9 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 			// import config at a large project's scale) goes in as a file.
 			var ran *dagger.Container
 			if len(n.Script) > 64<<10 {
-				ran = ctr.WithNewFile("/gobuild/run.sh", n.Script).WithExec([]string{"sh", "/gobuild/run.sh"}, noNest)
+				ran = ctr.WithNewFile("/gobuild/run.sh", n.Script).WithExec([]string{"sh", "/gobuild/run.sh"}, bare)
 			} else {
-				ran = ctr.WithExec([]string{"sh", "-c", n.Script}, noNest)
+				ran = ctr.WithExec([]string{"sh", "-c", n.Script}, bare)
 			}
 			slots.acquire(w.heights[id])
 			defer slots.release()

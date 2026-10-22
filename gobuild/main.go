@@ -28,9 +28,12 @@ type Gobuild struct{}
 // toolImage builds gohdr, which runs in whatever image the build uses.
 const toolImage = "golang:1.26-alpine"
 
-// noNest runs an exec without Dagger-in-Dagger: none of these execs call
-// Dagger, and starting a nested session for each would cost every package.
-var noNest = dagger.ContainerWithExecOpts{DisableDaggerInDagger: true}
+// bare runs an exec as its command alone: none of these execs call Dagger,
+// and starting a nested session for each would cost every package; and
+// none needs Dagger's init process, whose start every package would pay:
+// a script, or the go command, waits for what it starts, and a cancelled
+// exec is stopped whole.
+var bare = dagger.ContainerWithExecOpts{DisableDaggerInDagger: true, NoInit: true}
 
 // Binary builds the main package pkg as "go build" would and returns a
 // directory holding the binary, named output, and for a c-archive or
@@ -217,7 +220,7 @@ func (b *build) profileStep(ctx context.Context, bl *block, blocks map[string]*b
 	}
 	ctr = mods.mount(ctr, bl.modFiles)
 	out := "/work/" + bl.name
-	dir, err := ctr.WithExec([]string{"sh", "-c", bl.script(blocks, soloCompileC)}, noNest).
+	dir, err := ctr.WithExec([]string{"sh", "-c", bl.script(blocks, soloCompileC)}, bare).
 		Directory(out).Sync(ctx)
 	if err != nil {
 		return nil, err
@@ -277,7 +280,7 @@ func newBuild(ctx context.Context, ctr *dagger.Container, image string, from *da
 		return nil, err
 	}
 	if gomodcache == "" {
-		out, err := ctr.WithExec([]string{"go", "env", "GOMODCACHE"}, noNest).Stdout(ctx)
+		out, err := ctr.WithExec([]string{"go", "env", "GOMODCACHE"}, bare).Stdout(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -365,7 +368,7 @@ fi
 	b.mods, err = base.
 		WithMountedDirectory(mountPath, source.Filter(dagger.DirectoryFilterOpts{Include: include})).
 		WithWorkdir(cwd).
-		WithExec([]string{"sh", "-c", script}, noNest).
+		WithExec([]string{"sh", "-c", script}, bare).
 		Directory(modCacheDir).Sync(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("go mod download: %w", err)
@@ -376,7 +379,7 @@ fi
 		WithoutEnvVariable("GOARCH").
 		WithEnvVariable("GOFLAGS", "").
 		WithEnvVariable("GOCACHE", "/gobuild/cache").
-		WithExec([]string{"go", "build", "-o", toolsDir + "/", "cmd/pack"}, noNest).
+		WithExec([]string{"go", "build", "-o", toolsDir + "/", "cmd/pack"}, bare).
 		Directory(toolsDir)
 	return b, nil
 }
@@ -441,7 +444,7 @@ func (b *build) plan(ctx context.Context, headers *dagger.File, flags []string, 
 			" && cd " + shQuote(b.roots.Cwd) + " && { " + strings.Join(quoted, " ") + " 2> /gobuild/plan.txt" +
 			" || { status=$?; cat /gobuild/plan.txt >&2; exit $status; }; }" +
 			" && /gobuild/gohdr weigh /gobuild/plan.txt > /gobuild/weights.txt" +
-			" && /gobuild/gohdr cc /gobuild/plan.txt > /gobuild/cc.txt"}, noNest)
+			" && /gobuild/gohdr cc /gobuild/plan.txt > /gobuild/cc.txt"}, bare)
 	plan, err := ran.File("/gobuild/plan.txt").Contents(ctx)
 	if err != nil {
 		return "", nil, ccInfo{}, b.planError(ctx, err)
@@ -496,7 +499,7 @@ func (b *build) testmain(ctx context.Context, headers *dagger.File, flags []stri
 			" && cd " + shQuote(b.roots.Cwd) + " && { " + strings.Join(quoted, " ") + " 2> /gobuild/testmain.err; " +
 			`work=$(sed -n 's/^WORK=//p' /gobuild/testmain.err); ` +
 			`set -- "$work"/b*/_testmain.go; [ -f "$1" ] || { cat /gobuild/testmain.err >&2; exit 1; }; ` +
-			`cp "$1" /gobuild/_testmain.go; }`}, noNest).
+			`cp "$1" /gobuild/_testmain.go; }`}, bare).
 		File("/gobuild/_testmain.go").Sync(ctx)
 }
 

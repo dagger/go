@@ -16,7 +16,7 @@ func hdrTool() *dagger.File {
 		WithNewFile("/gohdr-src/go.mod", "module gohdr\n\ngo 1.26\n").
 		WithNewFile("/gohdr-src/main.go", hdrToolSrc).
 		WithWorkdir("/gohdr-src").
-		WithExec([]string{"go", "build", "-o", "/gohdr", "."}, noNest).File("/gohdr")
+		WithExec([]string{"go", "build", "-o", "/gohdr", "."}, bare).File("/gohdr")
 }
 
 const hdrToolSrc = `package main
