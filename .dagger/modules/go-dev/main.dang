@@ -618,6 +618,17 @@ type GoDev {
       derived.contains("/fixtures") == false and derived.contains("/testdata") == false,
       "default mount path leaked a workspace path into the name: " + derived,
     )
+    # A workspace made from a directory is addressed by its content digest,
+    # which every edit changes, so it is mounted at /src whatever it holds.
+    let one = directory.withNewFile("go.mod", "module example.com/one\n\ngo 1.26.1\n").asWorkspace
+    let two = directory.withNewFile("go.mod", "module example.com/two\n\ngo 1.26.1\n").asWorkspace
+    assert(one.address != two.address, "two directories made the same workspace address: " + one.address)
+    let mountedOne = go(version: "1.26.1").module(one, ".", findUp: false).mountPath
+    let mountedTwo = go(version: "1.26.1").module(two, ".", findUp: false).mountPath
+    assert(
+      mountedOne == "/src" and mountedTwo == "/src",
+      "directory workspaces were mounted at " + mountedOne + " and " + mountedTwo,
+    )
     let relative = { go(version: "1.26.1", mountPath: "src/hugo").mountPath ?? "missing rejection" } rescue {
       err: Error => err.message
     }

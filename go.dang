@@ -113,16 +113,23 @@ type Go {
   goflags: String
 
   """
-  Configured workspace mount path. Null uses "/src/<workspace name>".
+  Configured workspace mount path. Null uses "/src/<workspace name>", or
+  "/src" for a workspace made from a directory or git ref.
   """
   mountPath: String
 
   """
   Container path where the workspace is mounted for Go commands: the
   configured mountPath, or "/src/<workspace name>".
+
+  A workspace made with asWorkspace has no name: its address is its content
+  digest or commit. Named after that, the mount path would change with every
+  edit, and with it every package's compile, so it is "/src".
   """
   let workspaceMountPath(ws: Workspace!): String! {
-    mountPath ?? ("/src/" + workspaceName(ws))
+    let synthetic = ws.address.hasPrefix("directory://") or ws.address.hasPrefix("git-ref://")
+    let derived = if (synthetic) { "/src" } else { "/src/" + workspaceName(ws) }
+    mountPath ?? derived
   }
 
   """

@@ -89,6 +89,8 @@ value must use the `-flag=value` form, as Go requires inside `GOFLAGS`.
 `mountPath` defaults to `/src/<workspace name>`, where the name is the last
 segment of the workspace address — usually the repository name — so tests that
 expect it in their working directory keep passing. It must be absolute.
+A workspace made from a directory or git ref with `asWorkspace` has no name, so
+it is mounted at `/src`.
 
 #### Packages
 
