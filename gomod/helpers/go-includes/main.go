@@ -390,6 +390,12 @@ func includeBasePatterns(moduleRoot string) []string {
 		"**/go.sum",
 		"go.work",
 		"go.work.sum",
+		// A vendor directory puts the go command in vendor mode, which reads
+		// this to check the vendored modules against go.mod.
+		"vendor/modules.txt",
+		// go build uses a main package's default.pgo for profile-guided
+		// optimization, unless a -pgo flag says otherwise.
+		"**/default.pgo",
 	}
 	for i, pattern := range patterns {
 		patterns[i] = path.Join(moduleRoot, pattern)
@@ -531,7 +537,7 @@ func (t targetModule) goDirectives(ctx context.Context) ([]goDirective, error) {
 // goDirectivesInFile extracts Go comment directives from one parsed Go file.
 func goDirectivesInFile(filePath string, data []byte) ([]goDirective, error) {
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, filePath, data, parser.ParseComments)
+	file, err := parser.ParseFile(fset, filePath, data, parser.ParseComments|parser.SkipObjectResolution)
 	if err != nil {
 		return nil, err
 	}

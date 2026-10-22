@@ -12,6 +12,7 @@ type GoDev {
   let buildTagsFixturePath: String! = "testdata/go-module-build-tags"
   let mountPathFixturePath: String! = "testdata/go-module-mount-path"
   let noPackagesFixturePath: String! = "testdata/go-module-no-packages"
+  let vendoredFixturePath: String! = "testdata/go-module-vendored"
   let unreadableFixturePath: String! = "fixtures/go-module-unreadable"
   # The other modules in this repository keep their own fixtures, and several
   # of theirs fail on purpose: golangci-lint's does not even compile.
@@ -540,6 +541,335 @@ type GoDev {
     mod.test(ws)
   }
 
+  # A main package that prints each file it embeds with pattern, and its size.
+  let embedMain(pattern: String!): String! {
+    "package main\n\nimport (\n\t\"embed\"\n\t\"fmt\"\n\t\"io/fs\"\n)\n\n//go:embed " + pattern + "\nvar files embed.FS\n\nfunc main() {\n\tfs.WalkDir(files, \".\", func(p string, d fs.DirEntry, err error) error {\n\t\tif err == nil && !d.IsDir() {\n\t\t\tdata, _ := files.ReadFile(p)\n\t\t\tfmt.Println(p, len(data))\n\t\t}\n\t\treturn err\n\t})\n}\n"
+  }
+
+  """
+  A binary embeds exactly what go build embeds, whatever the pattern names: a
+  directory named like a Go file, with and without all:, test files, files
+  starting with _ or ., a Go file's whole source, and a pattern go build
+  rejects fails with go build's own error, as does a pattern naming a
+  symlink. A test file's embed reaches its test.
+  """
+  embedCheck: Void @check {
+    let shapes = ["dirgo", "dirgoall", "testfiles", "nodot", "gofile", "nested", "missing", "dirlink", "globlink", "testlink"]
+    let source = directory
+      .withNewFile("go.mod", "module example.com/embeds\n\ngo 1.26.1\n")
+      .withNewFile("cmd/dirgo/main.go", embedMain("tmpl.go"))
+      .withNewFile("cmd/dirgo/tmpl.go/a.txt", "a\n")
+      .withNewFile("cmd/dirgo/tmpl.go/_b.txt", "b\n")
+      .withNewFile("cmd/dirgoall/main.go", embedMain("all:tmpl.go"))
+      .withNewFile("cmd/dirgoall/tmpl.go/a.txt", "a\n")
+      .withNewFile("cmd/dirgoall/tmpl.go/_b.txt", "b\n")
+      .withNewFile("cmd/testfiles/main.go", embedMain("all:src"))
+      .withNewFile("cmd/testfiles/src/x.txt", "x\n")
+      .withNewFile("cmd/testfiles/src/_u.txt", "u\n")
+      .withNewFile("cmd/testfiles/src/.hidden", "hidden\n")
+      .withNewFile("cmd/testfiles/src/data_test.go", "package data\n\nfunc helper() string { return \"test body\" }\n")
+      .withNewFile("cmd/testfiles/src/data.go", "package data\n")
+      .withNewFile("cmd/nodot/main.go", embedMain("src"))
+      .withNewFile("cmd/nodot/src/x.txt", "x\n")
+      .withNewFile("cmd/nodot/src/_u.txt", "u\n")
+      .withNewFile("cmd/nodot/src/.hidden", "hidden\n")
+      .withNewFile("cmd/gofile/main.go", embedMain("sample/sample.go"))
+      .withNewFile("cmd/gofile/sample/sample.go", "package sample\n\nimport \"fmt\"\n\nfunc Say() { fmt.Println(\"a body well past the imports\") }\n")
+      .withNewFile("cmd/nested/main.go", embedMain("sub"))
+      .withNewFile("cmd/nested/sub/go.mod", "module example.com/sub\n\ngo 1.26.1\n")
+      .withNewFile("cmd/nested/sub/x.txt", "x\n")
+      .withNewFile("cmd/missing/main.go", embedMain("nothing.txt"))
+      # A symlink go leaves out of a directory pattern, and rejects when a
+      # pattern names it.
+      .withNewFile("cmd/dirlink/main.go", embedMain("tmpl.go"))
+      .withNewFile("cmd/dirlink/tmpl.go/target.txt", "target\n")
+      .withSymlink("target.txt", "cmd/dirlink/tmpl.go/link.txt")
+      .withNewFile("cmd/globlink/main.go", embedMain("tmpl.go/*"))
+      .withNewFile("cmd/globlink/tmpl.go/target.txt", "target\n")
+      .withSymlink("target.txt", "cmd/globlink/tmpl.go/link.txt")
+      .withNewFile("cmd/testlink/main.go", embedMain("tmpl.go"))
+      .withNewFile("cmd/testlink/tmpl.go/target.go", "package target\n\nfunc Body() string { return \"body\" }\n")
+      .withSymlink("target.go", "cmd/testlink/tmpl.go/link_test.go")
+      .withNewFile("lib/lib.go", "package lib\n")
+      .withNewFile("lib/fixture.txt", "embedded in a test\n")
+      .withNewFile("lib/lib_test.go", "package lib\n\nimport (\n\t_ \"embed\"\n\t\"testing\"\n)\n\n//go:embed fixture.txt\nvar fixture string\n\nfunc TestFixture(t *testing.T) {\n\tif fixture != \"embedded in a test\\n\" {\n\t\tt.Fatalf(\"embedded %q\", fixture)\n\t}\n}\n")
+    let ws = source.asWorkspace
+    let tool = go(version: "1.26.1")
+    let mod = tool.module(ws, ".", findUp: false)
+    # What plain go build makes of each shape: the binary's output, or the
+    # line of go build's error that names the pattern.
+    let plain = container
+      .from("golang:1.26.1-alpine")
+      .withDirectory("/src", source)
+      .withWorkdir("/src")
+    let failures = shapes.map { shape =>
+      let want = plain
+        .withExec(["sh", "-c", "if go build -o /tmp/bin ./cmd/" + shape + " 2> /tmp/err; then /tmp/bin; else grep -v '^#' /tmp/err | head -n 1; fi"])
+        .stdout
+      let got = {
+        mod
+          .base(ws)
+          .withFile("/usr/local/bin/embeds", tool.packages(ws).get(key: "cmd/" + shape).binary(ws))
+          .withExec(["embeds"])
+          .stdout
+      } rescue {
+        err: Error => err.message
+      }
+      if (want == "") {
+        shape + ": plain go build printed nothing"
+      } else if (got == want or (want.contains(": pattern ") and got.contains(want.trimSpace))) {
+        ""
+      } else {
+        shape + ": go build gave\n" + want + "the go module gave\n" + got
+      }
+    }.filter { failure => failure != "" }
+    assert(failures.length == 0, failures.join("\n"))
+    # Other shapes fail on purpose, so the test-file embed runs on its own.
+    run(tool.packages(ws).get(key: "lib").tests(ws).batch.test(ws))
+    null
+  }
+
+  """
+  A package's test binary is the one go test -c builds without vet, byte for
+  byte but for its build IDs, with and without -race and an -ldflags stamp,
+  -cover and -coverpkg, and for packages whose test files hold only an
+  aliased testing import, a benchmark or a TestMain:
+  the package with its test files, its external test package, a dependency
+  only its tests import, an embed in a test file, and a package that imports
+  it, recompiled against its test variant. The binaries list the same tests
+  and pass and fail the same ones; -race finds the race in TestRace.
+  """
+  testBinaryCheck: Void @check {
+    let source = directory
+      .withNewFile("go.mod", "module example.com/tb\n\ngo 1.26.1\n")
+      .withNewFile("lib/lib.go", "package lib\n\nvar stamp = \"unset\"\n\n// Answer is the answer.\nfunc Answer() int { return 42 }\n")
+      .withNewFile("lib/fixture.txt", "embedded in a test\n")
+      .withNewFile("lib/lib_test.go", "package lib\n\nimport (\n\t_ \"embed\"\n\t\"testing\"\n\n\t\"example.com/tb/testonly\"\n)\n\n//go:embed fixture.txt\nvar fixture string\n\nfunc TestAnswer(t *testing.T) {\n\tif Answer() != testonly.Want() || fixture != \"embedded in a test\\n\" {\n\t\tt.Fatal(\"wrong\")\n\t}\n}\n\nfunc TestStamp(t *testing.T) { t.Log(\"stamp=\" + stamp) }\n\nfunc TestFails(t *testing.T) { t.Fatal(\"fails on purpose\") }\n\nfunc TestRace(t *testing.T) {\n\tn := 0\n\tdone := make(chan bool)\n\tgo func() { n++; done <- true }()\n\tn++\n\t<-done\n}\n")
+      .withNewFile("lib/ext_test.go", "package lib_test\n\nimport (\n\t\"testing\"\n\n\t\"example.com/tb/lib\"\n\t\"example.com/tb/user\"\n)\n\nfunc TestUser(t *testing.T) {\n\tif user.Twice() != 2*lib.Answer() {\n\t\tt.Fatal(\"wrong\")\n\t}\n}\n")
+      .withNewFile("testonly/testonly.go", "package testonly\n\n// Want is what the test wants.\nfunc Want() int { return 42 }\n")
+      .withNewFile("user/user.go", "package user\n\nimport \"example.com/tb/lib\"\n\n// Twice is twice the answer.\nfunc Twice() int { return 2 * lib.Answer() }\n")
+      # Test files go test -c builds whatever they hold, in command packages,
+      # which are package keys whatever their tests.
+      .withNewFile("alias/main.go", goMain("alias"))
+      .withNewFile("alias/alias_test.go", "package main\n\nimport t \"testing\"\n\nfunc TestAlias(x *t.T) {}\n")
+      .withNewFile("bench/main.go", goMain("bench"))
+      .withNewFile("bench/bench_test.go", "package main\n\nimport \"testing\"\n\nfunc BenchmarkNothing(b *testing.B) {}\n")
+      .withNewFile("tmain/main.go", goMain("tmain"))
+      .withNewFile("tmain/main_test.go", "package main\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestMain(m *testing.M) { os.Exit(m.Run()) }\n")
+    let ws = source.asWorkspace
+    let stamp = "-ldflags=-X example.com/tb/lib.stamp=STAMPED"
+    let cgo = container
+      .from("golang:1.26.1-alpine")
+      .withExec(["apk", "add", "--no-cache", "build-base", "binutils"])
+      .withEnvVariable("CGO_ENABLED", "1")
+    # Each variant is "<package>;<flag>;...": -race is built with cgo.
+    let variants = ["lib", "lib;-race;" + stamp, "lib;-cover", "lib;-coverpkg=./...", "alias", "bench", "tmain"]
+    let failures = variants.map { variant =>
+      let pkg = variant.split(";").takeFirst(1).join("")
+      let flags = variant.split(";").dropFirst(1)
+      let race = flags.contains("-race")
+      let tool = if (race) { go(base: cgo, buildFlags: flags) } else { go(version: "1.26.1", buildFlags: flags) }
+      let built = tool.packages(ws).get(key: pkg).testBinary(ws)
+      let compared = cgo
+        .withEnvVariable("CGO_ENABLED", if (race) { "1" } else { "0" })
+        .withDirectory("/src", source)
+        .withWorkdir("/src")
+        .withFile("/module/lib.test", built)
+        .withExec(["go", "test", "-c", "-vet=off"] + flags + ["-o", "/plain/lib.test", "./" + pkg])
+        .withExec(["sh", "-c", """
+          set -e
+          for b in plain module; do
+            objcopy --remove-section=.note.go.buildid --remove-section=.note.gnu.build-id /$b/lib.test /$b/stripped
+            /$b/lib.test -test.list . > /$b/list
+            /$b/lib.test -test.v > /$b/run 2>&1 || true
+            grep -E '^(--- (PASS|FAIL)|ok|FAIL)|stamp=|DATA RACE' /$b/run | sed 's/ ([0-9.]*s)$//' | sort > /$b/results
+          done
+          cmp -s /plain/stripped /module/stripped || echo "the bytes differ"
+          cmp -s /plain/list /module/list || echo "the test lists differ"
+          cmp -s /plain/results /module/results || { echo "the results differ:"; cat /plain/results /module/results; }
+          cat /module/results
+          """])
+        .stdout
+      let raced = compared.contains("DATA RACE")
+      let stamped = compared.contains("stamp=STAMPED")
+      if (compared.contains(" differ")) {
+        variant + ": " + compared
+      } else if (race and (raced == false or stamped == false)) {
+        variant + ": -race or the stamp did not reach the test binary: " + compared
+      } else if (pkg == "lib" and (compared.contains("--- FAIL: TestFails") == false or compared.contains("--- PASS: TestUser") == false)) {
+        variant + ": the test binary did not run its tests: " + compared
+      } else {
+        ""
+      }
+    }.filter { failure => failure != "" }
+    assert(failures.length == 0, failures.join("\n"))
+
+    # A platform's test binary is go test -c's for that GOOS/GOARCH, named
+    # as go test names it there.
+    let platforms = go(version: "1.26.1").packages(ws).get(key: "lib").platforms
+    let crossed = cgo
+      .withEnvVariable("CGO_ENABLED", "0")
+      .withEnvVariable("GOARCH", "arm64")
+      .withDirectory("/src", source)
+      .withWorkdir("/src")
+      .withFile("/module/lib.test", platforms.get(key: "linux/arm64").testBinary(ws))
+      .withExec(["go", "test", "-c", "-vet=off", "-o", "/plain/lib.test", "./lib"])
+      .withExec(["sh", "-c", """
+        # objcopy reads only the host's ELF: zero the build ID notes where
+        # readelf, which reads any, finds them.
+        for b in plain module; do
+          cp /$b/lib.test /$b/stripped
+          readelf -S -W /$b/lib.test | sed 's/^ *\[ *[0-9]*\]//' | awk '$1 == ".note.go.buildid" || $1 == ".note.gnu.build-id" {print $4, $5}' | while read off size; do
+            dd if=/dev/zero of=/$b/stripped bs=1 seek=$((0x$off)) count=$((0x$size)) conv=notrunc 2>/dev/null
+          done
+        done
+        cmp -s /plain/stripped /module/stripped && echo same || echo "the linux/arm64 test binaries differ"
+        """])
+      .stdout
+    assert(crossed.trimSpace == "same", crossed)
+    let windows = platforms.get(key: "windows/amd64").testBinary(ws).name
+    assert(windows == "lib.test.exe", "the Windows test binary is named " + windows)
+    null
+  }
+
+  """
+  A module that vendors its dependencies is built and tested from its vendor
+  directory: Go's vendor mode needs vendor/modules.txt mounted, and nothing
+  is downloaded, as the fixture's dependency exists nowhere else.
+  """
+  vendoredCheck(ws: Workspace!): Void @check {
+    let mod = go.module(ws, vendoredFixturePath)
+    mod.test(ws)
+    let said = mod
+      .base(ws)
+      .withFile("/usr/local/bin/hello", go.packages(ws).get(key: vendoredFixturePath + "/cmd/hello").binary(ws))
+      .withExec(["hello"])
+      .stdout
+    assert(said == "hello vendor\n", "the vendored binary printed: " + said)
+    # -mod with its value in the next argument selects vendor mode too.
+    let flagged = mod
+      .base(ws)
+      .withFile(
+        "/usr/local/bin/hello",
+        go(buildFlags: ["-mod", "vendor"]).packages(ws).get(key: vendoredFixturePath + "/cmd/hello").binary(ws),
+      )
+      .withExec(["hello"])
+      .stdout
+    assert(flagged == "hello vendor\n", "the binary built with -mod vendor printed: " + flagged)
+    null
+  }
+
+  """
+  A cgo main package builds with -cover as plain go build -cover builds it,
+  byte for byte but for its build IDs, and runs: go hands the cgo tool the
+  cover tool's output from its work directory.
+  """
+  cgoCoverCheck: Void @check {
+    let source = directory
+      .withNewFile("go.mod", "module example.com/cgocover\n\ngo 1.26.1\n")
+      .withNewFile("main.go", "package main\n\n// int answer(void) { return 42; }\nimport \"C\"\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(int(C.answer())) }\n")
+    let ws = source.asWorkspace
+    let base = cgoCxxBase.withExec(["apk", "add", "--no-cache", "binutils"]).withEnvVariable("CGO_ENABLED", "1")
+    let built = go(base: base, buildFlags: ["-cover"]).packages(ws).get(key: ".").binary(ws)
+    let compared = base
+      .withDirectory("/src", source)
+      .withWorkdir("/src")
+      .withFile("/module/cgocover", built)
+      .withExec(["go", "build", "-cover", "-o", "/plain/cgocover", "."])
+      .withExec(["sh", "-c", """
+        for b in plain module; do objcopy --remove-section=.note.go.buildid --remove-section=.note.gnu.build-id /$b/cgocover /$b/stripped; done
+        cmp -s /plain/stripped /module/stripped || echo "the bytes differ"
+        /module/cgocover
+        """])
+      .stdout
+    assert(compared == "42\n", "the cgo -cover binary: " + compared)
+    null
+  }
+
+  """
+  A cgo package with no //export builds as a C archive or shared library as
+  plain go build builds it, byte for byte but for its build IDs, and with no
+  C header beside it: cgo writes none, and go build installs none.
+  """
+  cHeaderlessCheck: Void @check {
+    let source = directory
+      .withNewFile("go.mod", "module example.com/noexport\n\ngo 1.26.1\n")
+      .withNewFile("main.go", "package main\n\n// int answer(void) { return 42; }\nimport \"C\"\n\nfunc main() { _ = C.answer() }\n")
+    let ws = source.asWorkspace
+    let base = cgoCxxBase.withExec(["apk", "add", "--no-cache", "binutils"]).withEnvVariable("CGO_ENABLED", "1")
+    let failures = ["c-shared", "c-archive"].map { mode =>
+      let flag = "-buildmode=" + mode
+      let built = go(base: base, buildFlags: [flag]).packages(ws).subset(keys: ["."]).batch.binary(ws)
+      let compared = base
+        .withDirectory("/src", source)
+        .withWorkdir("/src")
+        .withDirectory("/module", built)
+        .withExec(["go", "build", flag, "-o", "/plain/noexport", "."])
+        .withExec(["sh", "-c", """
+          if [ "$(ls /module)" != noexport ]; then
+            echo "the build returned: $(ls /module)"
+          else
+            # objcopy keeps an archive an archive; a shared library's notes go.
+            for b in plain module; do objcopy --remove-section=.note.go.buildid --remove-section=.note.gnu.build-id /$b/noexport /$b/stripped 2>/dev/null || cp /$b/noexport /$b/stripped; done
+            cmp -s /plain/stripped /module/stripped || echo "the bytes differ"
+          fi
+          """])
+        .stdout
+      if (compared.trimSpace == "") { "" } else { mode + ": " + compared }
+    }.filter { failure => failure != "" }
+    assert(failures.length == 0, failures.join("\n"))
+    null
+  }
+
+  # The PGO shapes pgoCheck builds: a profile go finds as default.pgo, one a
+  # -pgo flag names in the source, and one it names outside the source.
+  let pgoShapes: [String!]! = ["auto", "flag", "base"]
+
+  """
+  A PGO build is the one plain go build makes, byte for byte but for its
+  build IDs and with the same profile recorded, whether go finds the
+  profile as the main package's default.pgo, a -pgo flag names it in the
+  source, or a -pgo flag names it in the base image.
+  """
+  pgoCheck: Void @check {
+    let base = container.from("golang:1.26.1-alpine")
+      .withExec(["apk", "add", "--no-cache", "binutils"])
+      .withEnvVariable("CGO_ENABLED", "0")
+    let program = directory
+      .withNewFile("go.mod", "module example.com/pgo\n\ngo 1.26.1\n")
+      .withNewFile("main.go", "package main\n\nimport (\n\t\"fmt\"\n\t\"os\"\n\t\"runtime/pprof\"\n\t\"time\"\n)\n\nvar sink uint64\n\nfunc main() {\n\tif len(os.Args) > 1 {\n\t\tf, _ := os.Create(os.Args[1])\n\t\tpprof.StartCPUProfile(f)\n\t\tend := time.Now().Add(time.Second)\n\t\tfor time.Now().Before(end) {\n\t\t\tfor i := uint64(0); i < 100000; i++ {\n\t\t\t\tsink += i * i\n\t\t\t}\n\t\t}\n\t\tpprof.StopCPUProfile()\n\t\tf.Close()\n\t}\n\tfmt.Println(\"ok\")\n}\n")
+    let profile = base.withDirectory("/src", program).withWorkdir("/src")
+      .withExec(["go", "build", "-o", "/profiler", "."])
+      .withExec(["/profiler", "/profile.pprof"])
+      .file("/profile.pprof")
+    let source = program.withFile("default.pgo", profile)
+    let ws = source.asWorkspace
+    let withProfile = base.withFile("/profile.pprof", profile)
+    let failures = pgoShapes.map { shape =>
+      let flags = if (shape == "flag") { ["-pgo=default.pgo"] } else if (shape == "base") { ["-pgo=/profile.pprof"] } else { [] }
+      let built = {
+        withProfile.withFile("/module/pgo", go(base: withProfile, buildFlags: flags).packages(ws).get(key: ".").binary(ws)).sync
+      } rescue {
+        err: Error => withProfile.withNewFile("/module/error", err.message)
+      }
+      let compared = built
+        .withDirectory("/src", source)
+        .withWorkdir("/src")
+        .withExec(["go", "build"] + flags + ["-o", "/plain/pgo", "."])
+        .withExec(["sh", "-c", """
+          if [ -f /module/error ]; then cat /module/error; exit 0; fi
+          for b in plain module; do go version -m /$b/pgo | grep -o 'pgo=[^ ]*' > /$b/setting || echo none > /$b/setting; done
+          cmp -s /plain/setting /module/setting || echo "go build recorded $(cat /plain/setting), the module $(cat /module/setting)"
+          for b in plain module; do objcopy --remove-section=.note.go.buildid --remove-section=.note.gnu.build-id /$b/pgo /$b/stripped; done
+          cmp -s /plain/stripped /module/stripped || echo "the bytes differ"
+          """])
+        .stdout
+      if (compared.trimSpace == "") { "" } else { shape + ": " + compared.trimSpace }
+    }.filter { failure => failure != "" }
+    assert(failures.length == 0, failures.join("\n"))
+    null
+  }
+
   """
   The goflags setting reaches Go commands as GOFLAGS, so build tags select
   source files without a custom base container.
@@ -589,6 +919,17 @@ type GoDev {
     assert(
       derived.contains("/fixtures") == false and derived.contains("/testdata") == false,
       "default mount path leaked a workspace path into the name: " + derived,
+    )
+    # A workspace made from a directory is addressed by its content digest,
+    # which every edit changes, so it is mounted at /src whatever it holds.
+    let one = directory.withNewFile("go.mod", "module example.com/one\n\ngo 1.26.1\n").asWorkspace
+    let two = directory.withNewFile("go.mod", "module example.com/two\n\ngo 1.26.1\n").asWorkspace
+    assert(one.address != two.address, "two directories made the same workspace address: " + one.address)
+    let mountedOne = go(version: "1.26.1").module(one, ".", findUp: false).mountPath
+    let mountedTwo = go(version: "1.26.1").module(two, ".", findUp: false).mountPath
+    assert(
+      mountedOne == "/src" and mountedTwo == "/src",
+      "directory workspaces were mounted at " + mountedOne + " and " + mountedTwo,
     )
     let relative = { go(version: "1.26.1", mountPath: "src/hugo").mountPath ?? "missing rejection" } rescue {
       err: Error => err.message

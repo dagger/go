@@ -7,8 +7,11 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 )
 
 // runAll computes includes for every module in one local pass over a mounted
@@ -67,6 +70,12 @@ func moduleOutputFile(moduleRoot, suffix string) string {
 // something actually asks for that module's sources.
 func (index *localIndex) writeAllDir(dir string, test, generate bool) error {
 	if err := writeModuleOutput(dir, "_modules_", linesWithTrailer(index.goModules())); err != nil {
+		return err
+	}
+	if err := index.writeHeaderPack(filepath.Join(dir, headerPackFile)); err != nil {
+		return err
+	}
+	if err := index.writeDiscovery(filepath.Join(dir, discoveryFile)); err != nil {
 		return err
 	}
 	for _, moduleRoot := range index.moduleRoots {
@@ -255,16 +264,28 @@ type localIndex struct {
 	moduleRoots     []string
 	moduleSet       map[string]bool
 	goFilesByModule map[string][]string
+	// goDirFilesByModule holds each module's other files in a directory
+	// named like a Go file, such as templates/_dagger.gen.go/defs.go.tmpl.
+	goDirFilesByModule map[string][]string
+	// parsed holds each module's directives once read: a module that several
+	// others reach through local replaces is parsed once, not once for each.
+	parsed map[string]parsedDirectives
+}
+
+type parsedDirectives struct {
+	directives []goDirective
+	err        error
 }
 
 // indexLocal walks the snapshot once, recording modules and their Go files.
 func indexLocal(root string) (*localIndex, error) {
 	index := &localIndex{
-		root:            root,
-		moduleSet:       map[string]bool{},
-		goFilesByModule: map[string][]string{},
+		root:               root,
+		moduleSet:          map[string]bool{},
+		goFilesByModule:    map[string][]string{},
+		goDirFilesByModule: map[string][]string{},
 	}
-	var goMods, goFiles []string
+	var goMods, goFiles, goDirFiles []string
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -282,6 +303,8 @@ func indexLocal(root string) (*localIndex, error) {
 			goMods = append(goMods, rel)
 		case strings.HasSuffix(d.Name(), ".go"):
 			goFiles = append(goFiles, rel)
+		case strings.HasSuffix(path.Dir(rel), ".go") || strings.Contains(path.Dir(rel), ".go/"):
+			goDirFiles = append(goDirFiles, rel)
 		}
 		return nil
 	})
@@ -305,6 +328,11 @@ func indexLocal(root string) (*localIndex, error) {
 			continue
 		}
 		index.goFilesByModule[moduleRoot] = append(index.goFilesByModule[moduleRoot], goFile)
+	}
+	for _, f := range goDirFiles {
+		if moduleRoot, ok := containingModuleDir(index.moduleSet, path.Dir(f)); ok {
+			index.goDirFilesByModule[moduleRoot] = append(index.goDirFilesByModule[moduleRoot], f)
+		}
 	}
 	return index, nil
 }
@@ -371,24 +399,59 @@ func (index *localIndex) includesFor(moduleRoot string, test, generate bool) ([]
 	return deduped, nil
 }
 
-// directives parses every Go file belonging to a module root.
+// directives returns the directives of every Go file belonging to a module
+// root, parsing them the first time it is asked.
 func (index *localIndex) directives(moduleRoot string) ([]goDirective, error) {
+	if p, ok := index.parsed[moduleRoot]; ok {
+		return p.directives, p.err
+	}
+	directives, err := index.parseDirectives(moduleRoot)
+	if index.parsed == nil {
+		index.parsed = map[string]parsedDirectives{}
+	}
+	index.parsed[moduleRoot] = parsedDirectives{directives, err}
+	return directives, err
+}
+
+// parseDirectives parses every Go file belonging to a module root, the files
+// spread over the CPUs; the directives and the first error are in file order.
+func (index *localIndex) parseDirectives(moduleRoot string) ([]goDirective, error) {
 	files := index.goFilesByModule[moduleRoot]
 	sort.Strings(files)
 
+	perFile := make([][]goDirective, len(files))
+	errs := make([]error, len(files))
+	forEach(len(files), func(i int) {
+		data, err := os.ReadFile(filepath.Join(index.root, filepath.FromSlash(files[i])))
+		if err != nil {
+			errs[i] = err
+			return
+		}
+		perFile[i], errs[i] = goDirectivesInFile(files[i], data)
+	})
 	var directives []goDirective
-	for _, filePath := range files {
-		data, err := os.ReadFile(filepath.Join(index.root, filepath.FromSlash(filePath)))
-		if err != nil {
-			return nil, err
+	for i := range files {
+		if errs[i] != nil {
+			return nil, errs[i]
 		}
-		fileDirectives, err := goDirectivesInFile(filePath, data)
-		if err != nil {
-			return nil, err
-		}
-		directives = append(directives, fileDirectives...)
+		directives = append(directives, perFile[i]...)
 	}
 	return directives, nil
+}
+
+// forEach calls f for each of 0 to n-1, on as many goroutines as there are
+// CPUs.
+func forEach(n int, f func(int)) {
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for range min(runtime.NumCPU(), n) {
+		wg.Go(func() {
+			for i := int(next.Add(1) - 1); i < n; i = int(next.Add(1) - 1) {
+				f(i)
+			}
+		})
+	}
+	wg.Wait()
 }
 
 func (index *localIndex) testDirectoriesFor(moduleRoot string) []string {

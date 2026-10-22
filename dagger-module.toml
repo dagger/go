@@ -1,8 +1,12 @@
 name = "go"
-engineVersion = "v1.0.0-beta.15"
+engineVersion = "v1.0.0-beta.17"
 
 [runtime]
   source = "dang"
+
+[[dependencies]]
+  name = "gobuild"
+  source = "gobuild"
 
 [[dependencies]]
   name = "gomod"
