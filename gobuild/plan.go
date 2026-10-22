@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/parser"
+	"go/token"
 	"path"
 	"regexp"
 	"slices"
@@ -771,4 +774,43 @@ func (b *block) output() string {
 
 func shQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// rePosition is a go command message about a position in a Go file:
+// "file.go:line:col: message".
+var rePosition = regexp.MustCompile(`^(.+\.go):(\d+):(\d+)(:.*)$`)
+
+// sourcePosition is the position in src of line and col in its header, as
+// the scan's header pack holds it (goHeader, in go-includes): the source up
+// to the end of its imports, then each go:embed line after them, trimmed,
+// one per line. It reports false for a line past the header's.
+func sourcePosition(src []byte, line, col int) (int, int, bool) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "", src, parser.ImportsOnly|parser.ParseComments|parser.SkipObjectResolution)
+	if err != nil || f == nil {
+		// A file that does not parse is in the pack whole.
+		return line, col, true
+	}
+	end := f.Name.End()
+	for _, d := range f.Decls {
+		if d.End() > end {
+			end = d.End()
+		}
+	}
+	off := min(fset.Position(end).Offset, len(src))
+	shared := bytes.Count(src[:off], []byte("\n")) + 1
+	if line <= shared {
+		return line, col, true
+	}
+	k := line - shared
+	for i, l := range strings.Split(string(src[off:]), "\n") {
+		t := strings.TrimSpace(l)
+		if !strings.HasPrefix(t, "//go:embed") {
+			continue
+		}
+		if k--; k == 0 {
+			return shared + i, col + strings.Index(l, t), true
+		}
+	}
+	return line, col, false
 }

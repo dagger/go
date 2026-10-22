@@ -86,6 +86,12 @@ func unpack(src, dst string) error {
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			return err
 		}
+		if fs.FileMode(mode)&fs.ModeSymlink != 0 {
+			if err := os.Symlink(string(data[:size]), p); err != nil {
+				return err
+			}
+			continue
+		}
 		if err := os.WriteFile(p, data[:size], fs.FileMode(mode)); err != nil {
 			return err
 		}

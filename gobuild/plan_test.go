@@ -431,3 +431,23 @@ func TestAddCFlags(t *testing.T) {
 		}
 	}
 }
+
+// A position in a header is moved to the source's line and column: the
+// lines up to the end of the imports are the source's own, and each go:embed
+// line after them is the next one in the source, trimmed.
+func TestSourcePosition(t *testing.T) {
+	src := []byte("package x\n\nimport \"embed\"\n\n// Files.\n//go:embed a.txt\nvar a string\n\n\t//go:embed b\nvar b embed.FS\n")
+	for _, c := range []struct{ line, col, wantLine, wantCol int }{
+		{3, 8, 3, 8},
+		{4, 12, 6, 12},
+		{5, 12, 9, 13},
+	} {
+		line, col, ok := sourcePosition(src, c.line, c.col)
+		if !ok || line != c.wantLine || col != c.wantCol {
+			t.Errorf("sourcePosition(%d:%d) = %d:%d, %v; want %d:%d", c.line, c.col, line, col, ok, c.wantLine, c.wantCol)
+		}
+	}
+	if _, _, ok := sourcePosition(src, 6, 1); ok {
+		t.Errorf("a line past the header's was placed")
+	}
+}

@@ -541,6 +541,94 @@ type GoDev {
     mod.test(ws)
   }
 
+  # A main package that prints each file it embeds with pattern, and its size.
+  let embedMain(pattern: String!): String! {
+    "package main\n\nimport (\n\t\"embed\"\n\t\"fmt\"\n\t\"io/fs\"\n)\n\n//go:embed " + pattern + "\nvar files embed.FS\n\nfunc main() {\n\tfs.WalkDir(files, \".\", func(p string, d fs.DirEntry, err error) error {\n\t\tif err == nil && !d.IsDir() {\n\t\t\tdata, _ := files.ReadFile(p)\n\t\t\tfmt.Println(p, len(data))\n\t\t}\n\t\treturn err\n\t})\n}\n"
+  }
+
+  """
+  A binary embeds exactly what go build embeds, whatever the pattern names: a
+  directory named like a Go file, with and without all:, test files, files
+  starting with _ or ., a Go file's whole source, and a pattern go build
+  rejects fails with go build's own error, as does a pattern naming a
+  symlink. A test file's embed reaches its test.
+  """
+  embedCheck: Void @check {
+    let shapes = ["dirgo", "dirgoall", "testfiles", "nodot", "gofile", "nested", "missing", "dirlink", "globlink", "testlink"]
+    let source = directory
+      .withNewFile("go.mod", "module example.com/embeds\n\ngo 1.26.1\n")
+      .withNewFile("cmd/dirgo/main.go", embedMain("tmpl.go"))
+      .withNewFile("cmd/dirgo/tmpl.go/a.txt", "a\n")
+      .withNewFile("cmd/dirgo/tmpl.go/_b.txt", "b\n")
+      .withNewFile("cmd/dirgoall/main.go", embedMain("all:tmpl.go"))
+      .withNewFile("cmd/dirgoall/tmpl.go/a.txt", "a\n")
+      .withNewFile("cmd/dirgoall/tmpl.go/_b.txt", "b\n")
+      .withNewFile("cmd/testfiles/main.go", embedMain("all:src"))
+      .withNewFile("cmd/testfiles/src/x.txt", "x\n")
+      .withNewFile("cmd/testfiles/src/_u.txt", "u\n")
+      .withNewFile("cmd/testfiles/src/.hidden", "hidden\n")
+      .withNewFile("cmd/testfiles/src/data_test.go", "package data\n\nfunc helper() string { return \"test body\" }\n")
+      .withNewFile("cmd/testfiles/src/data.go", "package data\n")
+      .withNewFile("cmd/nodot/main.go", embedMain("src"))
+      .withNewFile("cmd/nodot/src/x.txt", "x\n")
+      .withNewFile("cmd/nodot/src/_u.txt", "u\n")
+      .withNewFile("cmd/nodot/src/.hidden", "hidden\n")
+      .withNewFile("cmd/gofile/main.go", embedMain("sample/sample.go"))
+      .withNewFile("cmd/gofile/sample/sample.go", "package sample\n\nimport \"fmt\"\n\nfunc Say() { fmt.Println(\"a body well past the imports\") }\n")
+      .withNewFile("cmd/nested/main.go", embedMain("sub"))
+      .withNewFile("cmd/nested/sub/go.mod", "module example.com/sub\n\ngo 1.26.1\n")
+      .withNewFile("cmd/nested/sub/x.txt", "x\n")
+      .withNewFile("cmd/missing/main.go", embedMain("nothing.txt"))
+      # A symlink go leaves out of a directory pattern, and rejects when a
+      # pattern names it.
+      .withNewFile("cmd/dirlink/main.go", embedMain("tmpl.go"))
+      .withNewFile("cmd/dirlink/tmpl.go/target.txt", "target\n")
+      .withSymlink("target.txt", "cmd/dirlink/tmpl.go/link.txt")
+      .withNewFile("cmd/globlink/main.go", embedMain("tmpl.go/*"))
+      .withNewFile("cmd/globlink/tmpl.go/target.txt", "target\n")
+      .withSymlink("target.txt", "cmd/globlink/tmpl.go/link.txt")
+      .withNewFile("cmd/testlink/main.go", embedMain("tmpl.go"))
+      .withNewFile("cmd/testlink/tmpl.go/target.go", "package target\n\nfunc Body() string { return \"body\" }\n")
+      .withSymlink("target.go", "cmd/testlink/tmpl.go/link_test.go")
+      .withNewFile("lib/lib.go", "package lib\n")
+      .withNewFile("lib/fixture.txt", "embedded in a test\n")
+      .withNewFile("lib/lib_test.go", "package lib\n\nimport (\n\t_ \"embed\"\n\t\"testing\"\n)\n\n//go:embed fixture.txt\nvar fixture string\n\nfunc TestFixture(t *testing.T) {\n\tif fixture != \"embedded in a test\\n\" {\n\t\tt.Fatalf(\"embedded %q\", fixture)\n\t}\n}\n")
+    let ws = source.asWorkspace
+    let tool = go(version: "1.26.1")
+    let mod = tool.module(ws, ".", findUp: false)
+    # What plain go build makes of each shape: the binary's output, or the
+    # line of go build's error that names the pattern.
+    let plain = container
+      .from("golang:1.26.1-alpine")
+      .withDirectory("/src", source)
+      .withWorkdir("/src")
+    let failures = shapes.map { shape =>
+      let want = plain
+        .withExec(["sh", "-c", "if go build -o /tmp/bin ./cmd/" + shape + " 2> /tmp/err; then /tmp/bin; else grep -v '^#' /tmp/err | head -n 1; fi"])
+        .stdout
+      let got = {
+        mod
+          .base(ws)
+          .withFile("/usr/local/bin/embeds", tool.packages(ws).get(key: "cmd/" + shape).binary(ws))
+          .withExec(["embeds"])
+          .stdout
+      } rescue {
+        err: Error => err.message
+      }
+      if (want == "") {
+        shape + ": plain go build printed nothing"
+      } else if (got == want or (want.contains(": pattern ") and got.contains(want.trimSpace))) {
+        ""
+      } else {
+        shape + ": go build gave\n" + want + "the go module gave\n" + got
+      }
+    }.filter { failure => failure != "" }
+    assert(failures.length == 0, failures.join("\n"))
+    # Other shapes fail on purpose, so the test-file embed runs on its own.
+    run(tool.packages(ws).get(key: "lib").tests(ws).batch.test(ws))
+    null
+  }
+
   """
   A module that vendors its dependencies is built and tested from its vendor
   directory: Go's vendor mode needs vendor/modules.txt mounted, and nothing

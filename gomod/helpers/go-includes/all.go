@@ -264,6 +264,9 @@ type localIndex struct {
 	moduleRoots     []string
 	moduleSet       map[string]bool
 	goFilesByModule map[string][]string
+	// goDirFilesByModule holds each module's other files in a directory
+	// named like a Go file, such as templates/_dagger.gen.go/defs.go.tmpl.
+	goDirFilesByModule map[string][]string
 	// parsed holds each module's directives once read: a module that several
 	// others reach through local replaces is parsed once, not once for each.
 	parsed map[string]parsedDirectives
@@ -277,11 +280,12 @@ type parsedDirectives struct {
 // indexLocal walks the snapshot once, recording modules and their Go files.
 func indexLocal(root string) (*localIndex, error) {
 	index := &localIndex{
-		root:            root,
-		moduleSet:       map[string]bool{},
-		goFilesByModule: map[string][]string{},
+		root:               root,
+		moduleSet:          map[string]bool{},
+		goFilesByModule:    map[string][]string{},
+		goDirFilesByModule: map[string][]string{},
 	}
-	var goMods, goFiles []string
+	var goMods, goFiles, goDirFiles []string
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -299,6 +303,8 @@ func indexLocal(root string) (*localIndex, error) {
 			goMods = append(goMods, rel)
 		case strings.HasSuffix(d.Name(), ".go"):
 			goFiles = append(goFiles, rel)
+		case strings.HasSuffix(path.Dir(rel), ".go") || strings.Contains(path.Dir(rel), ".go/"):
+			goDirFiles = append(goDirFiles, rel)
 		}
 		return nil
 	})
@@ -322,6 +328,11 @@ func indexLocal(root string) (*localIndex, error) {
 			continue
 		}
 		index.goFilesByModule[moduleRoot] = append(index.goFilesByModule[moduleRoot], goFile)
+	}
+	for _, f := range goDirFiles {
+		if moduleRoot, ok := containingModuleDir(index.moduleSet, path.Dir(f)); ok {
+			index.goDirFilesByModule[moduleRoot] = append(index.goDirFilesByModule[moduleRoot], f)
+		}
 	}
 	return index, nil
 }

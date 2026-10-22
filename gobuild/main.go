@@ -15,6 +15,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path"
 	"sort"
@@ -435,13 +436,16 @@ func (b *build) plan(ctx context.Context, headers *dagger.File, flags []string, 
 		WithMountedFile("/gobuild/src.hdr", headers).
 		// An empty build cache, so the plan holds every step.
 		WithEnvVariable("GOCACHE", "/gobuild/plancache").
+		// A failed plan prints go build's error, such as a //go:embed
+		// pattern it rejects, rather than leaving it in the plan file.
 		WithExec([]string{"sh", "-c", "/gobuild/gohdr unpack /gobuild/src.hdr " + shQuote(b.roots.Src) +
-			" && cd " + shQuote(b.roots.Cwd) + " && " + strings.Join(quoted, " ") + " 2> /gobuild/plan.txt" +
+			" && cd " + shQuote(b.roots.Cwd) + " && { " + strings.Join(quoted, " ") + " 2> /gobuild/plan.txt" +
+			" || { status=$?; cat /gobuild/plan.txt >&2; exit $status; }; }" +
 			" && /gobuild/gohdr weigh /gobuild/plan.txt > /gobuild/weights.txt" +
 			" && /gobuild/gohdr cc /gobuild/plan.txt > /gobuild/cc.txt"}, noNest)
 	plan, err := ran.File("/gobuild/plan.txt").Contents(ctx)
 	if err != nil {
-		return "", nil, ccInfo{}, err
+		return "", nil, ccInfo{}, b.planError(ctx, err)
 	}
 	out, err := ran.File("/gobuild/weights.txt").Contents(ctx)
 	if err != nil {
@@ -464,6 +468,44 @@ func (b *build) plan(ctx context.Context, headers *dagger.File, flags []string, 
 		weights[id] = v
 	}
 	return plan, weights, parseCC(ccOut), nil
+}
+
+// planError is a failed plan's error with go build's own message first, then
+// the exec's, which holds its exit code. The plan read Go files as their
+// headers, so a position go build gives in one, such as a //go:embed
+// pattern's, is moved to the line the source has.
+func (b *build) planError(ctx context.Context, err error) error {
+	var execErr *dagger.ExecError
+	if !errors.As(err, &execErr) || strings.TrimSpace(execErr.Stderr) == "" {
+		return err
+	}
+	lines := strings.Split(strings.TrimSpace(execErr.Stderr), "\n")
+	for i, l := range lines {
+		m := rePosition.FindStringSubmatch(l)
+		if m == nil {
+			continue
+		}
+		p := m[1]
+		if !path.IsAbs(p) {
+			p = path.Join(b.roots.Cwd, p)
+		}
+		rel, ok := strings.CutPrefix(p, b.roots.Src+"/")
+		if !ok {
+			continue
+		}
+		src, err := b.src.File(rel).Contents(ctx)
+		if err != nil {
+			continue
+		}
+		line, _ := strconv.Atoi(m[2])
+		col, _ := strconv.Atoi(m[3])
+		if line, col, ok := sourcePosition([]byte(src), line, col); ok {
+			lines[i] = m[1] + ":" + strconv.Itoa(line) + ":" + strconv.Itoa(col) + m[4]
+		}
+	}
+	// Not wrapped: a module's error that wraps an ExecError reaches the
+	// caller as the exec's error alone, "exit code: N", without the message.
+	return fmt.Errorf("%s: %s", strings.Join(lines, "\n"), err.Error())
 }
 
 func needsTools(blocks map[string]*block) bool {
