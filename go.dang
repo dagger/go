@@ -1004,6 +1004,14 @@ type GoModule {
       .withTool(base(ws), "otelgotest", testRunner)
       .withDirectory(".", source(ws, test: true))
       .withDirectory(".", testData(ws))
+      # A test that serves a Dagger module needs that module's config, which is
+      # not a Go file and so is not in the source mount. Without it the serve
+      # fails with "does not contain a dagger config file" even though the
+      # module's Go code is right there.
+      .withDirectory(
+        ".",
+        ws.directory("/", include: ["**/dagger-module.toml", "**/dagger.json"]),
+      )
       # Nested Dagger clients find the workspace boundary by walking up to .git.
       .withNewFile(".git/HEAD", "ref: refs/heads/main\n")
   }
