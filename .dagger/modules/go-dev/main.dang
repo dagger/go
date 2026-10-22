@@ -684,6 +684,41 @@ type GoDev {
   }
 
   """
+  A cgo package with no //export builds as a C archive or shared library as
+  plain go build builds it, byte for byte but for its build IDs, and with no
+  C header beside it: cgo writes none, and go build installs none.
+  """
+  cHeaderlessCheck: Void @check {
+    let source = directory
+      .withNewFile("go.mod", "module example.com/noexport\n\ngo 1.26.1\n")
+      .withNewFile("main.go", "package main\n\n// int answer(void) { return 42; }\nimport \"C\"\n\nfunc main() { _ = C.answer() }\n")
+    let ws = source.asWorkspace
+    let base = cgoCxxBase.withExec(["apk", "add", "--no-cache", "binutils"]).withEnvVariable("CGO_ENABLED", "1")
+    let failures = ["c-shared", "c-archive"].map { mode =>
+      let flag = "-buildmode=" + mode
+      let built = go(base: base, buildFlags: [flag]).packages(ws).subset(keys: ["."]).batch.binary(ws)
+      let compared = base
+        .withDirectory("/src", source)
+        .withWorkdir("/src")
+        .withDirectory("/module", built)
+        .withExec(["go", "build", flag, "-o", "/plain/noexport", "."])
+        .withExec(["sh", "-c", """
+          if [ "$(ls /module)" != noexport ]; then
+            echo "the build returned: $(ls /module)"
+          else
+            # objcopy keeps an archive an archive; a shared library's notes go.
+            for b in plain module; do objcopy --remove-section=.note.go.buildid --remove-section=.note.gnu.build-id /$b/noexport /$b/stripped 2>/dev/null || cp /$b/noexport /$b/stripped; done
+            cmp -s /plain/stripped /module/stripped || echo "the bytes differ"
+          fi
+          """])
+        .stdout
+      if (compared.trimSpace == "") { "" } else { mode + ": " + compared }
+    }.filter { failure => failure != "" }
+    assert(failures.length == 0, failures.join("\n"))
+    null
+  }
+
+  """
   The goflags setting reaches Go commands as GOFLAGS, so build tags select
   source files without a custom base container.
   """

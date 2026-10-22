@@ -749,9 +749,9 @@ func (b *block) linkLine() string {
 // cgoHeader is the C header cgo writes for a package's exported functions.
 const cgoHeader = "_cgo_install.h"
 
-// exportsHeader reports a c-archive or c-shared build whose cgo step writes
-// the header of its exported functions, which go build installs next to the
-// library.
+// exportsHeader reports a c-archive or c-shared build whose cgo step is
+// asked for the header of its exported functions, which go build installs
+// next to the library. cgo writes it only for a package that exports one.
 func (b *block) exportsHeader() bool {
 	link := b.linkLine()
 	if !strings.Contains(link, "-buildmode=c-archive") && !strings.Contains(link, "-buildmode=c-shared") {

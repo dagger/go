@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -166,7 +167,15 @@ func (m *Gobuild) Binary(
 	linked := results[mainID]
 	out := dag.Directory().WithFile(output, linked.file)
 	if blocks[mainID].exportsHeader() {
-		out = out.WithFile(strings.TrimSuffix(output, path.Ext(output))+".h", linked.dir.File(cgoHeader))
+		// cgo writes the header only for a package that exports something,
+		// and go build installs it only if it was written.
+		names, err := linked.dir.Entries(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if slices.Contains(names, cgoHeader) {
+			out = out.WithFile(strings.TrimSuffix(output, path.Ext(output))+".h", linked.dir.File(cgoHeader))
+		}
 	}
 	return out, nil
 }
