@@ -26,6 +26,9 @@ type node struct {
 	// Tiers names the tiers whose output the package mounts whole.
 	Tiers []string `json:"tiers,omitempty"`
 	Tools bool     `json:"tools,omitempty"`
+	// SrcNonGo is set when the package also reads every file in the
+	// source that isn't Go (block.srcNonGo).
+	SrcNonGo bool `json:"srcNonGo,omitempty"`
 	// Gohdr is set when the script runs the helper's tool, as the link
 	// does for its build ID.
 	Gohdr  bool   `json:"gohdr,omitempty"`
@@ -50,7 +53,7 @@ func toNode(b *block, blocks map[string]*block, outside map[string]string, conc 
 	deps := append([]string(nil), b.deps...)
 	sort.Slice(deps, func(i, j int) bool { return blocks[deps[i]].name < blocks[deps[j]].name })
 	n := &node{ID: b.id, Name: b.name, ImportPath: b.importPath, Deps: deps,
-		SrcFiles: b.srcFiles, ModFiles: b.modFiles, Output: b.output(),
+		SrcFiles: b.srcFiles, SrcNonGo: b.srcNonGo, ModFiles: b.modFiles, Output: b.output(),
 		Script: b.script(blocks, outside, conc), Profile: b.profile != "", Link: b.isLink}
 	seen := map[string]bool{}
 	for _, d := range deps {
@@ -72,6 +75,9 @@ type walker struct {
 	base  *dagger.Container
 	tools *dagger.Directory
 	src   *dagger.Directory
+	// nonGo is the source's files that aren't Go, which a package with C or
+	// assembly there reads (srcNonGo); nil when no package does.
+	nonGo *dagger.Directory
 	// mods is the module cache, evaluated: see fileTree.
 	mods  *dagger.Directory
 	roots roots
@@ -161,6 +167,10 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 			}
 			if len(n.SrcFiles) > 0 {
 				srcDir, at := selected(w.src, n.SrcFiles)
+				if n.SrcNonGo {
+					srcDir = w.nonGo.WithDirectory(path.Join(".", at), srcDir)
+					at = ""
+				}
 				ctr = ctr.WithMountedDirectory(path.Join(w.roots.Src, at), srcDir)
 			}
 			if len(n.ModFiles) > 0 {
@@ -517,4 +527,39 @@ func outsideSet(blocks map[string]*block) map[string]bool {
 	// The PGO profile's preprocessing runs on its own, before anything that
 	// reads it, even when the profile is outside the source.
 	return closedSet(blocks, func(b *block) bool { return len(b.srcFiles) == 0 && !b.isLink && !b.isProfile })
+}
+
+// nonGoSource is the files in src that aren't Go. Leaving out *.go leaves
+// out a directory named like a Go file whole, so what such directories hold
+// comes back, less goDirGo, the Go files in them, left out by their escaped
+// paths in the same filter, which keeps the selection keyed by what it
+// holds. A path the filter would trim, with space at either end, isn't left
+// out: a Go file kept, as one missing from goDirGo would be, changes keys,
+// not what builds.
+func nonGoSource(src *dagger.Directory, goDirGo []string) *dagger.Directory {
+	var exclude []string
+	for _, f := range goDirGo {
+		if strings.TrimSpace(f) == f {
+			exclude = append(exclude, f)
+		}
+	}
+	return src.Filter(dagger.DirectoryFilterOpts{Exclude: []string{"**/*.go"}}).
+		WithDirectory(".", src.Filter(dagger.DirectoryFilterOpts{Include: []string{"**/*.go/**"}, Exclude: literalPatterns(exclude)}))
+}
+
+// literalPatterns are filter patterns that each match one path as written,
+// with the characters a pattern reads specially escaped.
+func literalPatterns(paths []string) []string {
+	out := make([]string, len(paths))
+	for i, p := range paths {
+		var b strings.Builder
+		for j, c := range p {
+			if strings.ContainsRune(`*?[]^\`, c) || (j == 0 && c == '!') {
+				b.WriteByte('\\')
+			}
+			b.WriteRune(c)
+		}
+		out[i] = b.String()
+	}
+	return out
 }
