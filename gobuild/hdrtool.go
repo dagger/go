@@ -8,7 +8,9 @@ import "dagger/gobuild/internal/dagger"
 // like Go files. "gohdr weigh" weighs the plan's steps by the Go
 // source they compile. "gohdr cc" answers the plan's C compiler probes.
 // "gohdr linkid" makes a link's build ID. "gohdr modunzip" extracts a
-// downloaded module, checking its checksum.
+// downloaded module, checking its checksum. "gohdr scope" lists the
+// packages a lint target's archives are compiled for, and "gohdr manifest"
+// describes those archives for golangci-lint's export driver.
 func hdrTool() *dagger.File {
 	// A standalone tool, so it is built with a pinned toolchain, statically,
 	// and runs in whatever image the module builds with.
@@ -28,7 +30,11 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"go/scanner"
+	"go/token"
 	"io"
 	"io/fs"
 	"os"
@@ -434,6 +440,221 @@ func modUnzip(zipPath, prefix, dir, sum string) error {
 	return nil
 }
 
+// listPackage is a package as "go list -json" prints it.
+type listPackage struct {
+	ImportPath, Dir, ForTest string
+	GoFiles, CgoFiles       []string
+	// What go/packages calls OtherFiles.
+	CFiles, CXXFiles, MFiles, HFiles, FFiles, SFiles []string
+	SwigFiles, SwigCXXFiles, SysoFiles              []string
+	EmbedFiles                                      []string
+}
+
+func readList(listPath string) ([]listPackage, error) {
+	f, err := os.Open(listPath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var pkgs []listPackage
+	dec := json.NewDecoder(f)
+	for {
+		var p listPackage
+		if err := dec.Decode(&p); err == io.EOF {
+			return pkgs, nil
+		} else if err != nil {
+			return nil, err
+		}
+		pkgs = append(pkgs, p)
+	}
+}
+
+// archived reports whether a package "go list -deps -test" lists gets an
+// archive: a plain package with Go files to compile, not a test variant, an
+// external test package or a test main. unsafe has none: the compiler knows
+// it.
+func archived(p listPackage) bool {
+	return p.ForTest == "" && !strings.Contains(p.ImportPath, " [") && !strings.HasSuffix(p.ImportPath, ".test") &&
+		p.ImportPath != "unsafe" && len(p.GoFiles)+len(p.CgoFiles) > 0
+}
+
+// scope prints the import path of each package of a "go list -deps -test
+// -json" listing that gets an archive, one per line.
+func scope(listPath string) error {
+	pkgs, err := readList(listPath)
+	if err != nil {
+		return err
+	}
+	w := bufio.NewWriter(os.Stdout)
+	for _, p := range pkgs {
+		if archived(p) {
+			fmt.Fprintln(w, p.ImportPath)
+		}
+	}
+	return w.Flush()
+}
+
+// manifest prints the manifest golangci-lint's export driver reads for a
+// directory of archives: the settings they were compiled with, from "go env
+// -json" (env) and the build's tags, and for each package a line of entries
+// names, "<import path> <archive> [<cgo output>...]", the archive's path in
+// the directory and what it was compiled from, from the "go list" listing.
+// A cgo package's entry names the Go files cgo wrote for its compile, in
+// the compile's order.
+func manifest(listPath, envPath, entriesPath, tags string) error {
+	pkgs, err := readList(listPath)
+	if err != nil {
+		return err
+	}
+	byPath := map[string]listPackage{}
+	for _, p := range pkgs {
+		if archived(p) {
+			byPath[p.ImportPath] = p
+		}
+	}
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		return err
+	}
+	var env struct{ GOVERSION, GOOS, GOARCH, CGO_ENABLED string }
+	if err := json.Unmarshal(data, &env); err != nil {
+		return fmt.Errorf("%s: %w", envPath, err)
+	}
+	data, err = os.ReadFile(entriesPath)
+	if err != nil {
+		return err
+	}
+	var lines [][]string
+	for _, l := range strings.Split(string(data), "\n") {
+		if f := strings.Fields(l); len(f) >= 2 {
+			lines = append(lines, f)
+		}
+	}
+	type entry struct{ archive, sources string }
+	entries := make([]entry, len(lines))
+	errs := make([]error, len(lines))
+	sem := make(chan struct{}, runtime.NumCPU())
+	var wg sync.WaitGroup
+	for i, f := range lines {
+		p, ok := byPath[f[0]]
+		if !ok {
+			return fmt.Errorf("%s: not a package go list lists for the archives", f[0])
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			entries[i].archive = f[1]
+			entries[i].sources, errs[i] = sourcesDigest(p, f[2:])
+		}()
+	}
+	wg.Wait()
+	packages := map[string]any{}
+	for i, f := range lines {
+		if errs[i] != nil {
+			return fmt.Errorf("%s: %w", f[0], errs[i])
+		}
+		packages[f[0]] = map[string]string{"archive": entries[i].archive, "sources": entries[i].sources}
+	}
+	buildTags := strings.FieldsFunc(tags, func(r rune) bool { return r == ',' })
+	sort.Strings(buildTags)
+	if buildTags == nil {
+		buildTags = []string{}
+	}
+	out, err := json.MarshalIndent(map[string]any{
+		"version":    1,
+		"goVersion":  env.GOVERSION,
+		"goos":       env.GOOS,
+		"goarch":     env.GOARCH,
+		"cgoEnabled": env.CGO_ENABLED == "1",
+		"buildTags":  buildTags,
+		"packages":   packages,
+	}, "", "  ")
+	if err != nil {
+		return err
+	}
+	_, err = os.Stdout.Write(append(out, '\n'))
+	return err
+}
+
+// sourcesDigest is the export driver's digest of what a package's archive is
+// compiled from: sha256 over the sorted lines "<name> <sha256 of content>\n"
+// of its Go files, its other source files and its embedded files, each named
+// by its path relative to the package directory. For a cgo package, whose
+// compile reads cgo's output (generated) rather than its cgo files, a line
+// "cgo\n", its plain Go files, and cgo's output, each named
+// "cgo-output-<i>" by its place in the compile and hashed without its
+// //line directives, which name the directory cgo ran in.
+func sourcesDigest(p listPackage, generated []string) (string, error) {
+	var lines []string
+	add := func(name, file string, gen bool) error {
+		h, err := fileSHA256(file, gen)
+		if err != nil {
+			return err
+		}
+		lines = append(lines, name+" "+h+"\n")
+		return nil
+	}
+	if len(p.CgoFiles) > 0 {
+		if len(generated) == 0 {
+			return "", fmt.Errorf("a cgo package without cgo's output")
+		}
+		lines = append(lines, "cgo\n")
+		for i, g := range generated {
+			if err := add(fmt.Sprintf("cgo-output-%d", i), g, true); err != nil {
+				return "", err
+			}
+		}
+	}
+	for _, group := range [][]string{p.GoFiles, p.CFiles, p.CXXFiles, p.MFiles, p.HFiles, p.FFiles, p.SFiles,
+		p.SwigFiles, p.SwigCXXFiles, p.SysoFiles, p.EmbedFiles} {
+		for _, f := range group {
+			if err := add(f, filepath.Join(p.Dir, f), false); err != nil {
+				return "", err
+			}
+		}
+	}
+	sort.Strings(lines)
+	sum := sha256.New()
+	for _, l := range lines {
+		io.WriteString(sum, l)
+	}
+	return "sha256:" + hex.EncodeToString(sum.Sum(nil)), nil
+}
+
+// fileSHA256 hashes a file's content, for a generated Go file without the
+// comments, as the Go scanner finds them, that start with "//line ".
+func fileSHA256(file string, generated bool) (string, error) {
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return "", err
+	}
+	h := sha256.New()
+	if !generated {
+		h.Write(data)
+		return hex.EncodeToString(h.Sum(nil)), nil
+	}
+	fset := token.NewFileSet()
+	tf := fset.AddFile(file, -1, len(data))
+	var s scanner.Scanner
+	s.Init(tf, data, nil, scanner.ScanComments)
+	last := 0
+	for {
+		pos, tok, lit := s.Scan()
+		if tok == token.EOF {
+			break
+		}
+		if tok == token.COMMENT && strings.HasPrefix(lit, "//line ") {
+			off := tf.Offset(pos)
+			h.Write(data[last:off])
+			last = off + len(lit)
+		}
+	}
+	h.Write(data[last:])
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
 func main() {
 	args := os.Args[1:]
 	var err error
@@ -448,8 +669,12 @@ func main() {
 		err = linkID(args[1], args[2])
 	case len(args) == 5 && args[0] == "modunzip":
 		err = modUnzip(args[1], args[2], args[3], args[4])
+	case len(args) == 2 && args[0] == "scope":
+		err = scope(args[1])
+	case len(args) == 5 && args[0] == "manifest":
+		err = manifest(args[1], args[2], args[3], args[4])
 	default:
-		err = fmt.Errorf("usage: gohdr unpack <pack> <dir> <list>, gohdr weigh <plan>, gohdr cc <plan>, gohdr linkid <importcfg> <salt>, or gohdr modunzip <zip> <module>@<version> <dir> <checksum>")
+		err = fmt.Errorf("usage: gohdr unpack <pack> <dir> <list>, gohdr weigh <plan>, gohdr cc <plan>, gohdr linkid <importcfg> <salt>, gohdr modunzip <zip> <module>@<version> <dir> <checksum>, gohdr scope <list>, or gohdr manifest <list> <env> <entries> <tags>")
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gohdr:", err)

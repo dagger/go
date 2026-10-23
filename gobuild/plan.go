@@ -77,6 +77,8 @@ var (
 	reLinkOut = regexp.MustCompile(`^mv \$WORK/(b\d+)/(exe/\S+) `)
 	// A test link's output, which no move follows: $WORK/bNNN/<pkg>.test.
 	reTestLinkOut = regexp.MustCompile(`/link -o \$WORK/(b\d+)/([^/\s]+) `)
+	// A link's import config, the first of its steps.
+	reLinkCfg = regexp.MustCompile(`^cat >\$WORK/(b\d+)/importcfg\.link << 'EOF'`)
 	// The go command's build ID for a link, before any of the call's own
 	// -ldflags, and the link's import config.
 	reLinkBuildID = regexp.MustCompile(` -buildid=\S+`)
@@ -113,6 +115,17 @@ func stableName(importPath string) string {
 // parsePlan splits a go build -n plan into per-package blocks and records
 // each block's input files and dependencies.
 func parsePlan(plan string, r roots) (map[string]*block, error) {
+	return parseBlocks(plan, r, false)
+}
+
+// parseArchivePlan is parsePlan for a plan of many packages whose archives
+// are what's wanted: a main package's block is its compile, without the
+// link that follows it, and no block links.
+func parseArchivePlan(plan string, r roots) (map[string]*block, error) {
+	return parseBlocks(plan, r, true)
+}
+
+func parseBlocks(plan string, r roots, archives bool) (map[string]*block, error) {
 	blocks := map[string]*block{}
 	var cur *block
 	cwd := r.Cwd
@@ -123,6 +136,9 @@ func parsePlan(plan string, r roots) (map[string]*block, error) {
 	// of its work directory in some Go releases (1.24) and after it in
 	// others, so a header waits for a block without one.
 	pending := ""
+	// The block whose link is being left out, from its import config to the
+	// next block.
+	linking := ""
 	lines := strings.Split(plan, "\n")
 	for i := 0; i < len(lines); i++ {
 		// go -n prints its work directory as "$WORK", which is not an
@@ -148,6 +164,16 @@ func parsePlan(plan string, r roots) (map[string]*block, error) {
 			inHeredoc = !strings.HasSuffix(line, "EOF")
 		} else if reHeredoc.MatchString(line) {
 			inHeredoc = true
+		}
+		if linking != "" {
+			if m := reMkdir.FindStringSubmatch(line); m == nil || m[1] == linking {
+				continue
+			}
+			linking = ""
+		}
+		if m := reLinkCfg.FindStringSubmatch(line); archives && m != nil && !content {
+			linking = m[1]
+			continue
 		}
 		// A test binary's main package has its work directory made before
 		// any other's, and its steps (with -cover, a cover run before its
@@ -263,8 +289,10 @@ func parsePlan(plan string, r roots) (map[string]*block, error) {
 			return nil, fmt.Errorf("plan step %s has no package header", id)
 		}
 	}
-	if err := markLink(blocks); err != nil {
-		return nil, err
+	if !archives {
+		if err := markLink(blocks); err != nil {
+			return nil, err
+		}
 	}
 	for id, b := range blocks {
 		// Assembly and cgo's C compiles can #include files from anywhere in
@@ -834,6 +862,31 @@ func (b *block) linkLine() string {
 		return ""
 	}
 	return b.lines[b.linkAt-1]
+}
+
+// cgoOutputs are the Go files cgo writes that a cgo package's compile reads,
+// by their names in its work directory, in the compile's order.
+func (b *block) cgoOutputs() []string {
+	var out []string
+	for _, l := range b.lines {
+		if !reCompile.MatchString(l) {
+			continue
+		}
+		for _, w := range shellWords(l) {
+			if f, ok := strings.CutPrefix(w, "$WORK/"+b.id+"/"); ok && strings.HasSuffix(f, ".go") {
+				out = append(out, f)
+			}
+		}
+	}
+	return out
+}
+
+func shJoin(args []string) string {
+	quoted := make([]string, len(args))
+	for i, a := range args {
+		quoted[i] = shQuote(a)
+	}
+	return strings.Join(quoted, " ")
 }
 
 // cgoHeader is the C header cgo writes for a package's exported functions.

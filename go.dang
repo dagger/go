@@ -1344,6 +1344,41 @@ type GoModule {
     out
   }
 
+  """
+  The compiled packages a lint of this module reads, for golangci-lint's
+  export driver: a directory of their archives, the full output of go tool
+  compile -pack, under archives/, and manifest.json, which describes them:
+  the Go version, target and build tags they were compiled for, and for each
+  package, by import path, its archive and a digest of the files it was
+  compiled from.
+
+  The packages are this module's, main packages included, and every package
+  they and their tests import, for the engine's platform, with buildFlags.
+  Each compiles in a cached exec of its own, as a binary's packages do, so
+  a package compiled the same way for a build is shared.
+  """
+  archives(ws: Workspace!): Directory! {
+    let ctr = platformBase(ws, gomod.hostPlatform)
+    let flags = buildFlags + (ctr.envVariable("GOFLAGS") ?? "").split(" ").filter { f => f != "" }
+    if (gccgo(flags)) {
+      raise "Go module " + path + ": a gccgo build has no archives for the export driver, which reads gc's"
+    }
+    let out = gobuild.archives(
+      base: ctr,
+      image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
+      from: if (baseImage == null) { null } else { baseImage.withoutEntrypoint },
+      source: source(ws, test: true),
+      headers: lib.scan(ws).sync.file("_headers_.gohdr"),
+      mountPath: mountPath,
+      workdir: path,
+      flags: buildFlags,
+    )
+    out.sync rescue {
+      err: Error => raise "Go archives of module " + path + ": " + err.message
+    }
+    out
+  }
+
   # The binaries of the main packages among pkgPaths, one build each: they
   # share the packages they have in common through the cache.
   let binaryFiles(ws: Workspace!, platform: String!, pkgPaths: [String!]!): Directory! {

@@ -133,6 +133,141 @@ func (m *Gobuild) TestBinary(
 	return linked.file, nil
 }
 
+// Archives compiles, one exec per package as Binary builds, every package of
+// the module in workdir and every package it and its tests import, and
+// returns a directory of their archives, the full output of "go tool compile
+// -pack", under archives/, with manifest.json, which describes them for
+// golangci-lint's export driver: the Go version, target and build tags they
+// were compiled for, and for each package, by import path, its archive and a
+// digest of what it was compiled from. The packages are those "go list -deps
+// -test ./..." lists but test variants, external test packages and test
+// mains: main packages too, which the driver loads plainly as well.
+func (m *Gobuild) Archives(
+	ctx context.Context,
+	// The Go container to build in, as for Binary.
+	base *dagger.Container,
+	// The image base was made from, as for Binary.
+	// +optional
+	image string,
+	// The custom container base was made from, as for Binary.
+	// +optional
+	from *dagger.Container,
+	// The source tree, with its test files, which name packages the tests
+	// import.
+	source *dagger.Directory,
+	// The header pack of source's Go files, test files included, and go.mod
+	// files, from the go module's scan.
+	headers *dagger.File,
+	// Where source is mounted.
+	mountPath string,
+	// The module's directory, relative to mountPath.
+	// +default="."
+	workdir string,
+	// Flags for go build, as for Binary: the build tags among them are the
+	// manifest's.
+	// +optional
+	flags []string,
+) (*dagger.Directory, error) {
+	cwd := path.Join(mountPath, workdir)
+	b, err := newBuild(ctx, base, image, from, source, mountPath, cwd, flags)
+	if err != nil {
+		return nil, err
+	}
+	goflags, err := b.base.EnvVariable(ctx, "GOFLAGS")
+	if err != nil {
+		return nil, err
+	}
+	envFlags, err := splitGOFLAGS(goflags)
+	if err != nil {
+		return nil, fmt.Errorf("GOFLAGS: %w", err)
+	}
+	// go list names the packages, from the plan's view of the source, which
+	// has every import; go build -n compiles them, a main package without
+	// its link. With none, go build would build ".", so it doesn't run, and
+	// the plan is empty.
+	list := append(append([]string{"go", "list", "-deps", "-test", "-json=" + listFields}, flags...), "./...")
+	pre := shJoin(list) + " > /gobuild/list.json" +
+		" && /gobuild/gohdr scope /gobuild/list.json > /gobuild/pkgs.txt" +
+		" && go env -json GOVERSION GOOS GOARCH CGO_ENABLED > /gobuild/env.json && "
+	goCmd := "{ [ ! -s /gobuild/pkgs.txt ] || " + shJoin(append([]string{"go", "build", "-n"}, flags...)) + " $(cat /gobuild/pkgs.txt); }"
+	p, err := b.planWith(ctx, headers, pre, goCmd)
+	if err != nil {
+		return nil, err
+	}
+	blocks, err := parseArchivePlan(p.plan, b.roots)
+	if err != nil {
+		return nil, err
+	}
+	results, err := b.walk(ctx, blocks, p.weights, p.cc, p.goDirs, nil)
+	if err != nil {
+		return nil, err
+	}
+	pkgs, err := p.ran.File("/gobuild/pkgs.txt").Contents(ctx)
+	if err != nil {
+		return nil, err
+	}
+	byPath := map[string]*block{}
+	for _, bl := range blocks {
+		if !bl.isProfile {
+			byPath[bl.importPath] = bl
+		}
+	}
+	// The digests are of the source whole, and of what cgo wrote for a cgo
+	// package's compile, read from the package's exec.
+	ctr := b.base.
+		WithMountedFile("/gobuild/gohdr", hdrTool()).
+		WithMountedDirectory(b.roots.Mod, b.mods).
+		WithMountedDirectory(b.roots.Src, b.src)
+	var entries strings.Builder
+	var archives []*dagger.File
+	for _, ip := range strings.Fields(pkgs) {
+		bl, ok := byPath[ip]
+		if !ok {
+			return nil, fmt.Errorf("%s: no compile for it in the plan", ip)
+		}
+		r := results[bl.id]
+		archives = append(archives, r.file)
+		entries.WriteString(ip + " archives/" + bl.output())
+		if bl.cgo {
+			at := "/gobuild/cgo/" + bl.name
+			ctr = ctr.WithMountedDirectory(at, r.dir)
+			for _, f := range bl.cgoOutputs() {
+				entries.WriteString(" " + at + "/" + f)
+			}
+		}
+		entries.WriteString("\n")
+	}
+	manifest := ctr.
+		WithMountedFile("/gobuild/list.json", p.ran.File("/gobuild/list.json")).
+		WithMountedFile("/gobuild/env.json", p.ran.File("/gobuild/env.json")).
+		WithNewFile("/gobuild/entries.txt", entries.String()).
+		WithExec([]string{"sh", "-c", "/gobuild/gohdr manifest /gobuild/list.json /gobuild/env.json /gobuild/entries.txt " +
+			shQuote(strings.Join(buildTags(append(envFlags, flags...)), ",")) + " > /gobuild/manifest.json"}, bare).
+		File("/gobuild/manifest.json")
+	return dag.Directory().WithFiles("archives", archives).WithFile("manifest.json", manifest), nil
+}
+
+// listFields are the fields of go list's output Archives reads: the
+// packages, and the files their digests cover.
+const listFields = "ImportPath,Dir,ForTest,GoFiles,CgoFiles,CFiles,CXXFiles,MFiles,HFiles,FFiles,SFiles,SwigFiles,SwigCXXFiles,SysoFiles,EmbedFiles"
+
+// buildTags is the -tags value in go build flags, the last one's, as a list.
+func buildTags(flags []string) []string {
+	var tags []string
+	for i := 0; i < len(flags); i++ {
+		name, value, ok := strings.Cut(strings.TrimLeft(flags[i], "-"), "=")
+		if name != "tags" || !strings.HasPrefix(flags[i], "-") {
+			continue
+		}
+		if !ok && i+1 < len(flags) {
+			i++
+			value = flags[i]
+		}
+		tags = strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ' ' })
+	}
+	return tags
+}
+
 // run builds pkg's binary, or with test its test binary, and returns the
 // plan's blocks and the link's result.
 func run(ctx context.Context, base *dagger.Container, image string, from *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir, pkg string, flags []string, test bool) (map[string]*block, *result, error) {
@@ -154,6 +289,25 @@ func run(ctx context.Context, base *dagger.Container, image string, from *dagger
 	if err != nil {
 		return nil, nil, err
 	}
+	results, err := b.walk(ctx, blocks, weights, cc, goDirs, func(w *walker) (err error) {
+		if test {
+			if w.testmain, err = b.testmain(ctx, headers, flags, pkg); err != nil {
+				return fmt.Errorf("test main: %w", err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return blocks, results[linkID(blocks)], nil
+}
+
+// walk runs a plan's blocks, one exec per package, and returns their results
+// by block id. goDirs is the plan's list of the source's Go files in
+// directories named like Go files. prepare, when set, readies the walker once
+// the module downloads have started.
+func (b *build) walk(ctx context.Context, blocks map[string]*block, weights map[string]int64, cc ccInfo, goDirs *dagger.File, prepare func(*walker) error) (map[string]*result, error) {
 	// A package with C or assembly in the source reads its files that
 	// aren't Go (nonGoSource), which the Go files in directories named like
 	// Go files are left out of by name.
@@ -162,7 +316,7 @@ func run(ctx context.Context, base *dagger.Container, image string, from *dagger
 		if bl.srcNonGo {
 			list, err := goDirs.Contents(ctx)
 			if err != nil {
-				return nil, nil, fmt.Errorf("Go files in directories named like Go files: %w", err)
+				return nil, fmt.Errorf("Go files in directories named like Go files: %w", err)
 			}
 			var goDirGo []string
 			for _, f := range strings.Split(list, "\n") {
@@ -170,7 +324,7 @@ func run(ctx context.Context, base *dagger.Container, image string, from *dagger
 					goDirGo = append(goDirGo, f)
 				}
 			}
-			nonGo = nonGoSource(source, goDirGo)
+			nonGo = nonGoSource(b.src, goDirGo)
 			break
 		}
 	}
@@ -179,11 +333,11 @@ func run(ctx context.Context, base *dagger.Container, image string, from *dagger
 	}
 	sums, err := moduleSums(ctx, b.base, b.mods)
 	if err != nil {
-		return nil, nil, fmt.Errorf("module checksums: %w", err)
+		return nil, fmt.Errorf("module checksums: %w", err)
 	}
 	mods := &modules{root: b.roots.Mod, all: b.mods, sums: sums}
 	if err := mods.expandLoose(ctx, blocks); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	mods.fetch(ctx, blocks)
 	// Go 1.25 and later run "go tool pack" for packages with assembly, the
@@ -192,17 +346,17 @@ func run(ctx context.Context, base *dagger.Container, image string, from *dagger
 	if needsTools(blocks) {
 		go b.tools.Sync(ctx)
 	}
-	w := &walker{base: b.base, tools: b.tools, src: source, mods: mods, roots: b.roots, nonGo: nonGo}
-	if test {
-		if w.testmain, err = b.testmain(ctx, headers, flags, pkg); err != nil {
-			return nil, nil, fmt.Errorf("test main: %w", err)
+	w := &walker{base: b.base, tools: b.tools, src: b.src, mods: mods, roots: b.roots, nonGo: nonGo}
+	if prepare != nil {
+		if err := prepare(w); err != nil {
+			return nil, err
 		}
 	}
 	// A PGO profile is preprocessed first: every compile reads it.
 	for _, bl := range blocks {
 		if bl.isProfile {
 			if w.profile, err = b.profileStep(ctx, bl, blocks, mods); err != nil {
-				return nil, nil, fmt.Errorf("pgo profile: %w", err)
+				return nil, fmt.Errorf("pgo profile: %w", err)
 			}
 		}
 	}
@@ -223,11 +377,7 @@ func run(ctx context.Context, base *dagger.Container, image string, from *dagger
 		nodes[id] = toNode(bl, blocks, conc)
 	}
 	w.heights = heightsOf(blocks, weights)
-	results, err := w.walk(ctx, nodes)
-	if err != nil {
-		return nil, nil, err
-	}
-	return blocks, results[linkID(blocks)], nil
+	return w.walk(ctx, nodes)
 }
 
 // profileStep runs the plan's PGO profile preprocessing, from the profile in
@@ -448,10 +598,25 @@ func (b *build) plan(ctx context.Context, headers *dagger.File, flags []string, 
 	}
 	cmd = append(cmd, flags...)
 	cmd = append(cmd, "-o", planOut+"/out", pkg)
-	quoted := make([]string, len(cmd))
-	for i, c := range cmd {
-		quoted[i] = shQuote(c)
+	p, err := b.planWith(ctx, headers, "", shJoin(cmd))
+	if err != nil {
+		return "", nil, ccInfo{}, nil, err
 	}
+	return p.plan, p.weights, p.cc, p.goDirs, nil
+}
+
+// planned is a plan with what plan reads with it, and the exec that made it.
+type planned struct {
+	ran     *dagger.Container
+	plan    string
+	weights map[string]int64
+	cc      ccInfo
+	goDirs  *dagger.File
+}
+
+// planWith makes a plan as plan does, with goCmd the go command that prints
+// it, run after pre, which may be empty or a command ending in "&&".
+func (b *build) planWith(ctx context.Context, headers *dagger.File, pre, goCmd string) (*planned, error) {
 	ran := b.base.
 		WithMountedFile("/gobuild/gohdr", hdrTool()).
 		WithMountedDirectory(b.roots.Mod, b.mods).
@@ -462,21 +627,21 @@ func (b *build) plan(ctx context.Context, headers *dagger.File, flags []string, 
 		// A failed plan prints go build's error, such as a //go:embed
 		// pattern it rejects, rather than leaving it in the plan file.
 		WithExec([]string{"sh", "-c", "/gobuild/gohdr unpack /gobuild/src.hdr " + shQuote(b.roots.Src) + " /gobuild/godirs.txt" +
-			" && cd " + shQuote(b.roots.Cwd) + " && { " + strings.Join(quoted, " ") + " 2> /gobuild/plan.txt" +
+			" && cd " + shQuote(b.roots.Cwd) + " && " + pre + "{ " + goCmd + " 2> /gobuild/plan.txt" +
 			" || { status=$?; cat /gobuild/plan.txt >&2; exit $status; }; }" +
 			" && /gobuild/gohdr weigh /gobuild/plan.txt > /gobuild/weights.txt" +
 			" && /gobuild/gohdr cc /gobuild/plan.txt > /gobuild/cc.txt"}, bare)
 	plan, err := ran.File("/gobuild/plan.txt").Contents(ctx)
 	if err != nil {
-		return "", nil, ccInfo{}, nil, b.planError(ctx, err)
+		return nil, b.planError(ctx, err)
 	}
 	out, err := ran.File("/gobuild/weights.txt").Contents(ctx)
 	if err != nil {
-		return "", nil, ccInfo{}, nil, err
+		return nil, err
 	}
 	ccOut, err := ran.File("/gobuild/cc.txt").Contents(ctx)
 	if err != nil {
-		return "", nil, ccInfo{}, nil, err
+		return nil, err
 	}
 	weights := map[string]int64{}
 	for _, line := range strings.Split(out, "\n") {
@@ -486,11 +651,11 @@ func (b *build) plan(ctx context.Context, headers *dagger.File, flags []string, 
 		id, n, _ := strings.Cut(line, " ")
 		v, err := strconv.ParseInt(n, 10, 64)
 		if err != nil {
-			return "", nil, ccInfo{}, nil, fmt.Errorf("plan weights: %q: %w", line, err)
+			return nil, fmt.Errorf("plan weights: %q: %w", line, err)
 		}
 		weights[id] = v
 	}
-	return plan, weights, parseCC(ccOut), ran.File("/gobuild/godirs.txt"), nil
+	return &planned{ran: ran, plan: plan, weights: weights, cc: parseCC(ccOut), goDirs: ran.File("/gobuild/godirs.txt")}, nil
 }
 
 // testmain is the _testmain.go the go command writes for pkg's test binary.

@@ -910,6 +910,59 @@ type GoDev {
   }
 
   """
+  A module's archives are what golangci-lint's export driver reads: the
+  manifest lists every plain package go list -deps -test lists, main
+  packages and what only tests import included, with the settings go env
+  reports and the digest the driver computes from go list's files, cgo's
+  output for a cgo package; and the module's packages type-check against the
+  archives' export data. archivescheck, a copy of the driver's digest, checks
+  them against the go command in a container that mounts the source
+  elsewhere.
+  """
+  archivesCheck: Void @check {
+    let source = directory
+      .withNewFile("go.mod", "module example.com/archives\n\ngo 1.26.1\n")
+      .withNewFile("cg/cg.go", "package cg\n\n// #include \"add.h\"\nimport \"C\"\n\n// Add adds in C.\nfunc Add(a, b int) int { return int(C.add(C.int(a), C.int(b))) }\n")
+      .withNewFile("cg/add.c", "#include \"add.h\"\nint add(int a, int b) { return a + b; }\n")
+      .withNewFile("cg/add.h", "int add(int a, int b);\n")
+      .withNewFile("cg/plain.go", "package cg\n\n// Twice is plain Go next to cgo.\nfunc Twice(n int) int { return Add(n, n) }\n")
+      .withNewFile("cg/cg_test.go", "package cg_test\n\nimport (\n\t\"net/http/httptest\"\n\t\"testing\"\n\n\t\"example.com/archives/cg\"\n\t\"example.com/archives/testonly\"\n)\n\nfunc TestTwice(t *testing.T) {\n\t_ = httptest.NewRecorder()\n\tif cg.Twice(2) != testonly.Want() {\n\t\tt.Fatal(\"wrong\")\n\t}\n}\n")
+      .withNewFile("emb/emb.go", "package emb\n\nimport _ \"embed\"\n\n//go:embed data.txt\nvar Data string\n")
+      .withNewFile("emb/data.txt", "hello\n")
+      .withNewFile("testonly/testonly.go", "package testonly\n\n// Want is for tests.\nfunc Want() int { return 4 }\n")
+      .withNewFile("cmd/tool/main.go", "package main\n\nimport (\n\t\"fmt\"\n\t\"os/user\"\n\n\t\"example.com/archives/cg\"\n\t\"example.com/archives/emb\"\n)\n\nfunc main() {\n\tu, _ := user.Current()\n\tfmt.Println(cg.Twice(2), emb.Data, u)\n}\n")
+    let ws = source.asWorkspace
+    let archives = go(base: cgoCxxBase).module(ws, ".").archives(ws)
+    let manifest = archives.file("manifest.json").contents
+    let checked = cgoCxxBase
+      .withDirectory("/check", currentModule.source.directory("archivescheck"))
+      .withNewFile("/check/go.mod", "module archivescheck\n\ngo 1.26\n")
+      .withWorkdir("/check")
+      .withExec(["go", "build", "-o", "/usr/local/bin/archivescheck", "."])
+      .withDirectory("/elsewhere", source)
+      .withDirectory("/archives", archives)
+      .withWorkdir("/elsewhere")
+      .withExec(["archivescheck", "/archives"])
+      .stdout
+    assert(checked.trimSpace.split("\n").length == 1 and checked.hasPrefix("checked "), "the archives: " + checked)
+    let wanted = ["\"example.com/archives/cmd/tool\"", "\"example.com/archives/testonly\"", "\"net/http/httptest\"", "\"runtime/cgo\""]
+    let missing = wanted.filter { p => manifest.contains(p + ": {") == false }
+    assert(missing.length == 0, "the manifest lacks " + missing.join(", ") + ": " + manifest)
+    assert(manifest.contains("example.com/archives/cg [") == false and manifest.contains(".test\"") == false, "the manifest lists test packages: " + manifest)
+
+    # A module with no package to compile has archives of nothing.
+    let none = directory
+      .withNewFile("go.mod", "module example.com/none\n\ngo 1.26.1\n")
+      .withNewFile("p.go", "//go:build notenabled\n\npackage p\n")
+      .asWorkspace
+    let empty = go(base: cgoCxxBase).module(none, ".").archives(none)
+    let emptyManifest = empty.file("manifest.json").contents
+    assert(emptyManifest.contains("\"packages\": {}"), "the manifest of no packages: " + emptyManifest)
+    assert(empty.entries == ["manifest.json"], "the archives of no packages: " + empty.entries.join(", "))
+    null
+  }
+
+  """
   A cgo package with no //export builds as a C archive or shared library as
   plain go build builds it, byte for byte but for its build IDs, and with no
   C header beside it: cgo writes none, and go build installs none.

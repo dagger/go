@@ -733,3 +733,102 @@ func TestParseSums(t *testing.T) {
 		}
 	}
 }
+
+// A plan of many packages for their archives keeps each main package's
+// compile and leaves out its link, from its import config on: no block
+// links, and a main package depends on what it imports, not on what its
+// link reads.
+func TestParseArchivePlan(t *testing.T) {
+	link := func(id string) []string {
+		return []string{
+			"cat >$WORK/" + id + "/importcfg.link << 'EOF' # internal",
+			"packagefile example.com/m/cmd/" + id + "=$WORK/" + id + "/_pkg_.a",
+			"packagefile example.com/m/lib=$WORK/b002/_pkg_.a",
+			"packagefile runtime=$WORK/b009/_pkg_.a",
+			"EOF",
+			"mkdir -p $WORK/" + id + "/exe/",
+			"cd .",
+			"/usr/local/go/pkg/tool/linux_amd64/link -o $WORK/" + id + "/exe/a.out -importcfg $WORK/" + id + "/importcfg.link -buildmode=exe $WORK/" + id + "/_pkg_.a",
+			"go tool buildid -w $WORK/" + id + "/exe/a.out # internal",
+		}
+	}
+	compile := func(id, pkg string, deps ...string) []string {
+		lines := []string{"mkdir -p $WORK/" + id + "/", "", "#", "# " + pkg, "#", "", "cat >$WORK/" + id + "/importcfg << 'EOF' # internal"}
+		for _, d := range deps {
+			lines = append(lines, "packagefile "+d+"=$WORK/"+map[string]string{"example.com/m/lib": "b002"}[d]+"/_pkg_.a")
+		}
+		return append(lines, "EOF",
+			"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/"+id+"/_pkg_.a -p "+pkg+" -importcfg $WORK/"+id+"/importcfg -pack ./"+id+".go",
+			"go tool buildid -w $WORK/"+id+"/_pkg_.a # internal")
+	}
+	var lines []string
+	lines = append(lines, compile("b002", "example.com/m/lib")...)
+	lines = append(lines, compile("b001", "example.com/m/cmd/b001", "example.com/m/lib")...)
+	lines = append(lines, link("b001")...)
+	lines = append(lines, compile("b003", "example.com/m/cmd/b003", "example.com/m/lib")...)
+	lines = append(lines, link("b003")...)
+	plan := strings.Join(lines, "\n")
+	if _, err := parsePlan(plan, testRoots); err == nil {
+		t.Fatal("parsePlan took a plan with two links")
+	}
+	blocks, err := parseArchivePlan(plan, testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 3 {
+		t.Fatalf("%d blocks, want 3", len(blocks))
+	}
+	for _, id := range []string{"b001", "b003"} {
+		b := blocks[id]
+		if b.isLink || b.linkAt != 0 || b.output() != b.name+".a" {
+			t.Errorf("%s: isLink %v, linkAt %d, output %s", id, b.isLink, b.linkAt, b.output())
+		}
+		if !slices.Equal(b.deps, []string{"b002"}) {
+			t.Errorf("%s: deps %v, want [b002]", id, b.deps)
+		}
+		script := b.script(blocks, soloCompileC)
+		if strings.Contains(script, "importcfg.link") || strings.Contains(script, "/link ") || strings.Contains(script, "exe/") {
+			t.Errorf("%s: the script links:\n%s", id, script)
+		}
+		if !strings.Contains(script, "/compile ") {
+			t.Errorf("%s: the script doesn't compile:\n%s", id, script)
+		}
+	}
+}
+
+// A cgo package's compile reads cgo's Go output from its work directory,
+// which cgoOutputs names in the compile's order.
+func TestCgoOutputs(t *testing.T) {
+	blocks, err := parsePlan(mainLink(
+		"cd /src",
+		"TERM='dumb' CGO_LDFLAGS='' /usr/local/go/pkg/tool/linux_amd64/cgo -objdir $WORK/b001/ -importpath example.com/m -- -I $WORK/b001/ -O2 -g ./main.go ./b.go",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main -pack ./plain.go $WORK/b001/_cgo_gotypes.go $WORK/b001/main.cgo1.go $WORK/b001/b.cgo1.go $WORK/b001/_cgo_import.go",
+	), testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := blocks["b001"].cgoOutputs()
+	want := []string{"_cgo_gotypes.go", "main.cgo1.go", "b.cgo1.go", "_cgo_import.go"}
+	if !slices.Equal(got, want) {
+		t.Errorf("cgoOutputs: %q, want %q", got, want)
+	}
+}
+
+// The manifest's build tags are go build's: the last -tags flag's, whatever
+// its form.
+func TestBuildTags(t *testing.T) {
+	for _, c := range []struct {
+		flags []string
+		want  []string
+	}{
+		{nil, nil},
+		{[]string{"-race", "-ldflags=-X a.b=c"}, nil},
+		{[]string{"-tags=b,a"}, []string{"b", "a"}},
+		{[]string{"-tags", "x y", "-trimpath"}, []string{"x", "y"}},
+		{[]string{"--tags=one", "-tags=two"}, []string{"two"}},
+	} {
+		if got := buildTags(c.flags); !slices.Equal(got, c.want) {
+			t.Errorf("buildTags(%q): %q, want %q", c.flags, got, c.want)
+		}
+	}
+}
