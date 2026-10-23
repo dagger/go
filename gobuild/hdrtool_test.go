@@ -286,3 +286,24 @@ func TestHdrToolWeighOwnSource(t *testing.T) {
 		t.Errorf("weights %q and %q, want %q for both", without, with, want)
 	}
 }
+
+// gohdr sizes lists each Go file's size, by its path under the directory.
+func TestHdrToolSizes(t *testing.T) {
+	gohdr := filepath.Join(buildHdrTool(t), "gohdr")
+	dir := t.TempDir()
+	for name, size := range map[string]int{"a.go": 10, "p/b.go": 2000, "p/c.txt": 5} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, name)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), make([]byte, size), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out, err := exec.Command(gohdr, "sizes", dir).CombinedOutput()
+	if err != nil {
+		t.Fatalf("sizes: %v: %s", err, out)
+	}
+	if want := "10 a.go\n2000 p/b.go\n"; string(out) != want {
+		t.Errorf("sizes = %q, want %q", out, want)
+	}
+}

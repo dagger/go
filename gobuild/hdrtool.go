@@ -118,6 +118,32 @@ func unpack(src, dst, list string) (err error) {
 	}
 }
 
+// sizes prints a line "<size> <path>" for each Go file under dir, the path
+// relative to dir: the real size of the source the plan sees only the
+// headers of.
+func sizes(dir string) error {
+	w := bufio.NewWriter(os.Stdout)
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".go") || !d.Type().IsRegular() {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, p)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "%d %s\n", info.Size(), filepath.ToSlash(rel))
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return w.Flush()
+}
+
 // weigh prints a line "<step> <weight>" for each step (bNNN) of a go build
 // -n plan, as weighPlan weighs them.
 func weigh(planPath string) error {
@@ -687,6 +713,8 @@ func main() {
 		err = unpack(args[1], args[2], args[3])
 	case len(args) == 2 && args[0] == "weigh":
 		err = weigh(args[1])
+	case len(args) == 2 && args[0] == "sizes":
+		err = sizes(args[1])
 	case len(args) == 2 && args[0] == "cc":
 		err = cc(args[1])
 	case len(args) == 3 && args[0] == "linkid":
@@ -698,7 +726,7 @@ func main() {
 	case len(args) == 5 && args[0] == "manifest":
 		err = manifest(args[1], args[2], args[3], args[4])
 	default:
-		err = fmt.Errorf("usage: gohdr unpack <pack> <dir> <list>, gohdr weigh <plan>, gohdr cc <plan>, gohdr linkid <importcfg> <salt>, gohdr modunzip <zip> <module>@<version> <dir> <checksum>, gohdr scope <list>, or gohdr manifest <list> <env> <entries> <tags>")
+		err = fmt.Errorf("usage: gohdr unpack <pack> <dir> <list>, gohdr weigh <plan>, gohdr sizes <dir>, gohdr cc <plan>, gohdr linkid <importcfg> <salt>, gohdr modunzip <zip> <module>@<version> <dir> <checksum>, gohdr scope <list>, or gohdr manifest <list> <env> <entries> <tags>")
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gohdr:", err)

@@ -859,3 +859,27 @@ func TestByHeight(t *testing.T) {
 		t.Errorf("byHeight = %v, want %v", got, want)
 	}
 }
+
+// A source package weighs its Go files' real sizes, not the headers the plan
+// saw; a dependency keeps the plan's weight.
+func TestWeighSource(t *testing.T) {
+	blocks := map[string]*block{
+		"b001": {srcFiles: []string{"cmd/x/main.go", "cmd/x/big.go", "cmd/x/**"}},
+		"b002": {},
+	}
+	weights := map[string]int64{"b001": 9000, "b002": 50000}
+	sizes, err := parseSizes("100 cmd/x/main.go\n2000000 cmd/x/big.go\n7 other/o.go\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	weighSource(blocks, weights, sizes)
+	if want := int64(8<<10 + 100 + 2000000); weights["b001"] != want {
+		t.Errorf("source package weight %d, want %d", weights["b001"], want)
+	}
+	if weights["b002"] != 50000 {
+		t.Errorf("dependency weight %d, want 50000", weights["b002"])
+	}
+	if _, err := parseSizes("x cmd/x/main.go\n"); err == nil {
+		t.Error("a malformed line parsed")
+	}
+}
