@@ -103,25 +103,46 @@ func (m *modules) mount(ctr *dagger.Container, files []string) *dagger.Container
 }
 
 // fetch downloads every module blocks read now, a few at once, so a
-// package doesn't wait for its modules when its turn comes. An error shows
-// again where the module is used.
-func (m *modules) fetch(ctx context.Context, blocks map[string]*block) {
-	var names []string
-	for _, b := range blocks {
+// package doesn't wait for its modules when its turn comes. The modules of
+// the highest packages (heights) go first, as the packages do. An error
+// shows again where the module is used.
+func (m *modules) fetch(ctx context.Context, blocks map[string]*block, heights map[string]int64) {
+	need := map[string]int64{}
+	for id, b := range blocks {
 		for _, f := range b.modFiles {
 			if name := m.downloaded(f); name != "" {
-				names = appendUniq(names, name)
+				need[name] = max(need[name], heights[id])
 			}
 		}
 	}
-	sem := make(chan struct{}, 16)
+	names := byHeight(need)
+	queue := make(chan string, len(names))
 	for _, name := range names {
+		queue <- name
+	}
+	close(queue)
+	for range min(16, len(names)) {
 		go func() {
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			m.dir(name).Sync(ctx)
+			for name := range queue {
+				m.dir(name).Sync(ctx)
+			}
 		}()
 	}
+}
+
+// byHeight is need's modules, the one needed by the highest package first.
+func byHeight(need map[string]int64) []string {
+	names := make([]string, 0, len(need))
+	for name := range need {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		if need[names[i]] != need[names[j]] {
+			return need[names[i]] > need[names[j]]
+		}
+		return names[i] < names[j]
+	})
+	return names
 }
 
 // moduleSums lists the checksum of every module a module cache holds, by its

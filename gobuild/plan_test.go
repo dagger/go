@@ -851,3 +851,11 @@ func TestCompileC(t *testing.T) {
 		}
 	}
 }
+
+func TestByHeight(t *testing.T) {
+	got := byHeight(map[string]int64{"a@v1": 5, "b@v1": 90, "c@v1": 5, "d@v1": 40})
+	want := []string{"b@v1", "d@v1", "a@v1", "c@v1"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("byHeight = %v, want %v", got, want)
+	}
+}

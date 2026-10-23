@@ -339,7 +339,8 @@ func (b *build) walk(ctx context.Context, blocks map[string]*block, weights map[
 	if err := mods.expandLoose(ctx, blocks); err != nil {
 		return nil, err
 	}
-	mods.fetch(ctx, blocks)
+	heights := heightsOf(blocks, weights)
+	mods.fetch(ctx, blocks, heights)
 	// Go 1.25 and later run "go tool pack" for packages with assembly, the
 	// runtime among the first: build the tool now, not when the runtime
 	// waits for it. An error shows again where it's used.
@@ -372,7 +373,7 @@ func (b *build) walk(ctx context.Context, blocks map[string]*block, weights map[
 		}
 		nodes[id] = toNode(bl, blocks, compileC(outside[id], weights[id]))
 	}
-	w.heights = heightsOf(blocks, weights)
+	w.heights = heights
 	return w.walk(ctx, nodes)
 }
 
