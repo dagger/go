@@ -184,6 +184,47 @@ func (r *Gobuild) TestBinary(base *Container, source *Directory, headers *File, 
 	}
 }
 
+// GobuildTestSuiteOpts contains options for Gobuild.TestSuite
+type GobuildTestSuiteOpts struct {
+	Image string
+	// A test selection, expressed as go test's -run regular expression.
+	RunPattern string
+}
+
+// TestSuite builds selected packages with the same cached compile steps as
+// TestBinary. Its directory holds binaries and an otelgotest manifest. Run it
+// at outputPath, with the source and testdata mounted at mountPath. Build
+// failures remain per-package results, so unrelated tests can still run.
+// As with TestBinary, vet is left to lint checks.
+func (r *Gobuild) TestSuite(base *Container, source *Directory, headers *File, mountPath string, workdir string, modulePath string, packages []string, opts ...GobuildTestSuiteOpts) *Directory {
+	assertNotNil("base", base)
+	assertNotNil("source", source)
+	assertNotNil("headers", headers)
+	q := r.query.Select("testSuite")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `image` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Image) {
+			q = q.Arg("image", opts[i].Image)
+		}
+		// `runPattern` optional argument
+		if !querybuilder.IsZeroValue(opts[i].RunPattern) {
+			q = q.Arg("runPattern", opts[i].RunPattern)
+		}
+	}
+	q = q.Arg("base", base)
+	q = q.Arg("source", source)
+	q = q.Arg("headers", headers)
+	q = q.Arg("mountPath", mountPath)
+	q = q.Arg("workdir", workdir)
+	q = q.Arg("modulePath", modulePath)
+	q = q.Arg("packages", packages)
+
+	return &Directory{
+		query:     q,
+		refetchID: r.refetchID,
+	}
+}
+
 func (r *Query) Gobuild() *Gobuild { // gobuild (../../../../:0:0)
 	q := r.query.Select("gobuild")
 
