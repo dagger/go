@@ -119,10 +119,7 @@ func unpack(src, dst, list string) (err error) {
 }
 
 // weigh prints a line "<step> <weight>" for each step (bNNN) of a go build
-// -n plan: the bytes of Go source the step's lines name, plus a fixed cost
-// for starting a compile, a stand-in for its compile time. A relative file is
-// in the directory the plan last changed to, from the current one, as the go
-// command prints "cd" only when the directory changes.
+// -n plan, as weighPlan weighs them.
 func weigh(planPath string) error {
 	data, err := os.ReadFile(planPath)
 	if err != nil {
@@ -132,11 +129,36 @@ func weigh(planPath string) error {
 	if err != nil {
 		return err
 	}
+	steps, weights := weighPlan(string(data), start)
+	w := bufio.NewWriter(os.Stdout)
+	for _, step := range steps {
+		fmt.Fprintf(w, "%s %d\n", step, weights[step])
+	}
+	return w.Flush()
+}
+
+// valueFlags are the tool flags in a plan whose value is the next word: an
+// import path, such as -p's, or a path, which may end in ".go" without being
+// a source file of the step.
+var valueFlags = map[string]bool{
+	"-p": true, "-o": true, "-D": true, "-I": true, "-trimpath": true,
+	"-importcfg": true, "-embedcfg": true, "-buildid": true, "-lang": true,
+	"-goversion": true, "-asmhdr": true, "-symabis": true, "-pgoprofile": true,
+	"-coveragecfg": true, "-objdir": true, "-importpath": true, "-srcdir": true,
+}
+
+// weighPlan weighs each step (bNNN) of a go build -n plan: the bytes of Go
+// source files its lines name, plus a fixed cost for starting a compile, a
+// stand-in for its compile time. The weight is the step's own: neither a
+// flag's value nor a comment names a source file, even when it ends in ".go". A relative file is
+// in the directory the plan last changed to, from start, as the go command
+// prints "cd" only when the directory changes.
+func weighPlan(plan, start string) ([]string, map[string]int64) {
 	dir := start
 	weights := map[string]int64{}
 	var steps []string
 	step := ""
-	for _, line := range strings.Split(string(data), "\n") {
+	for _, line := range strings.Split(plan, "\n") {
 		if rest, ok := strings.CutPrefix(line, "mkdir -p $WORK/b"); ok {
 			if n, _, ok := strings.Cut(rest, "/"); ok && n != "" && strings.Trim(n, "0123456789") == "" {
 				step = "b" + n
@@ -153,10 +175,16 @@ func weigh(planPath string) error {
 			}
 			continue
 		}
-		if step == "" {
+		// A comment, such as the package header "# example.com/dep.go",
+		// names no file.
+		if step == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		for _, f := range strings.Fields(line) {
+		fields := strings.Fields(line)
+		for i, f := range fields {
+			if i > 0 && valueFlags[fields[i-1]] {
+				continue
+			}
 			f = strings.Trim(f, "\"'")
 			if !strings.HasSuffix(f, ".go") {
 				continue
@@ -169,11 +197,7 @@ func weigh(planPath string) error {
 			}
 		}
 	}
-	w := bufio.NewWriter(os.Stdout)
-	for _, step := range steps {
-		fmt.Fprintf(w, "%s %d\n", step, weights[step])
-	}
-	return w.Flush()
+	return steps, weights
 }
 
 // probedFlags are the C compiler flags the go command adds only when a probe

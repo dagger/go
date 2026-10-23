@@ -247,3 +247,42 @@ func TestHdrToolManifest(t *testing.T) {
 		t.Errorf("manifest:\n%s\nwant:\n%v", out, want)
 	}
 }
+
+// A dependency's weight is its own: a file of the project named like its
+// import path doesn't change it.
+func TestHdrToolWeighOwnSource(t *testing.T) {
+	gohdr := filepath.Join(buildHdrTool(t), "gohdr")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), make([]byte, 100), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	planPath := filepath.Join(dir, "plan.txt")
+	// As go build -n prints it: each package's step after a header naming
+	// the package, here the dependency's after its importer's.
+	plan := "#\n# example.com/top\n#\n\nmkdir -p $WORK/b001/\ncd " + dir + "\n/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p example.com/top -pack ./a.go\n" +
+		"#\n# example.com/dep.go\n#\n\nmkdir -p $WORK/b002/\n/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b002/_pkg_.a -trimpath \"$WORK/b002=>\" -p example.com/dep.go -lang=go1.26 -complete -pack ./a.go\n"
+	if err := os.WriteFile(planPath, []byte(plan), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	weigh := func() string {
+		cmd := exec.Command(gohdr, "weigh", planPath)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("weigh: %v: %s", err, out)
+		}
+		return string(out)
+	}
+	without := weigh()
+	if err := os.MkdirAll(filepath.Join(dir, "example.com"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "example.com/dep.go"), make([]byte, 5000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	with := weigh()
+	want := fmt.Sprintf("b001 %d\nb002 %d\n", 8<<10+100, 8<<10+100)
+	if without != want || with != want {
+		t.Errorf("weights %q and %q, want %q for both", without, with, want)
+	}
+}

@@ -370,11 +370,7 @@ func (b *build) walk(ctx context.Context, blocks map[string]*block, weights map[
 		if bl.isProfile {
 			continue
 		}
-		conc := soloCompileC
-		if outside[id] {
-			conc = depCompileC
-		}
-		nodes[id] = toNode(bl, blocks, conc)
+		nodes[id] = toNode(bl, blocks, compileC(outside[id], weights[id]))
 	}
 	w.heights = heightsOf(blocks, weights)
 	return w.walk(ctx, nodes)

@@ -832,3 +832,22 @@ func TestBuildTags(t *testing.T) {
 		}
 	}
 }
+
+func TestCompileC(t *testing.T) {
+	for _, tc := range []struct {
+		outside bool
+		weight  int64
+		want    string
+	}{
+		{false, 8 << 10, soloCompileC},
+		{false, 8 << 20, soloCompileC},
+		{true, 8 << 10, depCompileC},
+		{true, heavyWeight - 1, depCompileC},
+		{true, heavyWeight, soloCompileC},
+		{true, 8 << 20, soloCompileC},
+	} {
+		if got := compileC(tc.outside, tc.weight); got != tc.want {
+			t.Errorf("compileC(%v, %d) = %s, want %s", tc.outside, tc.weight, got, tc.want)
+		}
+	}
+}
