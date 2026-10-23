@@ -386,7 +386,7 @@ func (b *build) profileStep(ctx context.Context, bl *block, blocks map[string]*b
 	ctr := b.base
 	if len(bl.srcFiles) > 0 {
 		srcDir, at := selected(b.src, bl.srcFiles)
-		ctr = ctr.WithMountedDirectory(path.Join(b.roots.Src, at), srcDir)
+		ctr = ctr.WithMountedDirectory(path.Join(b.roots.Src, at), srcDir, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
 	}
 	ctr = mods.mount(ctr, bl.modFiles)
 	out := "/work/" + bl.name

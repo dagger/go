@@ -93,7 +93,7 @@ func (m *modules) mount(ctr *dagger.Container, files []string) *dagger.Container
 		}
 	}
 	if len(loose) > 0 {
-		ctr = ctr.WithMountedDirectory(m.root, fileTree(m.all, loose))
+		ctr = ctr.WithMountedDirectory(m.root, fileTree(m.all, loose), dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
 	}
 	sort.Strings(names)
 	for _, name := range names {

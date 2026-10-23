@@ -118,14 +118,17 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 				}
 				depFiles = append(depFiles, dr.file)
 			}
+			// A package's exec writes only its own directory. Its inputs are
+			// mounted read-only: a writable mount is one of the exec's
+			// outputs, a copy made for it to write and kept after.
 			if len(depFiles) > 0 {
-				ctr = ctr.WithMountedDirectory("/work/lib", assemble(depFiles))
+				ctr = ctr.WithMountedDirectory("/work/lib", assemble(depFiles), dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
 			}
 			if n.Tools {
 				ctr = ctr.WithMountedDirectory(toolsDir, w.tools, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
 			}
 			if n.Gohdr {
-				ctr = ctr.WithMountedFile("/gobuild/gohdr", hdrTool())
+				ctr = ctr.WithMountedFile("/gobuild/gohdr", hdrTool(), dagger.ContainerWithMountedFileOpts{ReadOnly: true})
 			}
 			if n.Profile {
 				ctr = ctr.WithMountedDirectory(w.profile.path, w.profile.dir, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
@@ -139,7 +142,7 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 					srcDir = w.nonGo.WithDirectory(path.Join(".", at), srcDir)
 					at = ""
 				}
-				ctr = ctr.WithMountedDirectory(path.Join(w.roots.Src, at), srcDir)
+				ctr = ctr.WithMountedDirectory(path.Join(w.roots.Src, at), srcDir, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
 			}
 			ctr = w.mods.mount(ctr, n.ModFiles)
 			// A script past the kernel's argument-size limit (the link's
