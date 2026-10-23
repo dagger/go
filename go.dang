@@ -190,7 +190,12 @@ type Go {
   # the module the working directory is inside.
   let moduleRootsHere(ws: Workspace!): [String!]! {
     let cwd = ws.cwd.trimPrefix("/").trimSuffix("/")
-    let roots = discoveryLines(ws).filter { line => line.hasPrefix("module\t") }.map { line => lineField(line, 1) }
+    let roots = discoveryLines(ws).filter { line => line.hasPrefix("module\t") }.map { line =>
+      lineField(
+        line,
+        1,
+      )
+    }
     if (cwd == "" or cwd == ".") {
       roots
     } else {
@@ -252,7 +257,16 @@ type Go {
     let paths = [dir, pathIn(root, dir)]
     let selecting = build.filter { p => p.hasPrefix("!") == false }
     let excluding = build.filter { p => p.hasPrefix("!") }
-    (selecting.length == 0 or selecting.any { p => paths.any { at => selectedBy(at, [p]) } })
+    (
+      selecting.length == 0 or selecting.any { p =>
+        paths.any { at =>
+          selectedBy(
+            at,
+            [p],
+          )
+        }
+      }
+    )
       and excluding.any { p => paths.any { at => selectedBy(at, [p]) == false } } == false
   }
 
@@ -274,16 +288,30 @@ type Go {
   # Workspace paths of the packages with something to do: tests to run in a
   # module the test setting selects, a main package the build setting selects,
   # or go:generate commands the generate setting selects.
-  let packageKeys(ws: Workspace!): [String!]! {
+  let packageKeys(ws: Workspace!, modulePath: String = null): [String!]! {
     let empty: [String!]! = []
     let roots = moduleRootsHere(ws)
     let generateAll = generate.length == 1 and generate.contains("**")
     let included = generate.filter { p => p.hasPrefix("!") == false }
     let excluded = generate.filter { p => p.hasPrefix("!") }.map { p => p.trimPrefix("!") }
-    let includeDirs = if (generateAll) { empty } else { matchingDirectories(ws, included) }
-    let excludeDirs = if (generateAll) { empty } else { matchingDirectories(ws, excluded) }
+    let includeDirs = if (generateAll) { empty } else {
+      matchingDirectories(
+        ws,
+        included,
+      )
+    }
+    let excludeDirs = if (generateAll) { empty } else {
+      matchingDirectories(
+        ws,
+        excluded,
+      )
+    }
     discoveryLines(ws)
-      .filter { line => line.hasPrefix("package\t") and roots.contains(lineField(line, 1)) }
+      .filter { line =>
+        line.hasPrefix("package\t")
+          and roots.contains(lineField(line, 1))
+          and (modulePath == null or lineField(line, 1) == modulePath)
+      }
       .filter { line =>
         let root = lineField(line, 1)
         let dir = lineField(line, 2)
@@ -300,15 +328,13 @@ type Go {
   """
   Go modules at or below the working directory.
   """
-  modules(
+  moduleList(
     ws: Workspace!,
     include: [String!]! = [],
     exclude: [String!]! = [],
     includeSkipTest: Boolean! = true,
     includeSkipGenerate: Boolean! = true,
   ): [GoModule!]! {
-    # A list rather than a collection: modules decide how a package is mounted
-    # and which toolchain it gets, but they are not something to select.
     let roots = if (include.length == 0 and exclude.length == 0) {
       moduleRootsHere(ws)
     } else {
@@ -323,10 +349,22 @@ type Go {
   }
 
   """
-  Go packages at or below the working directory, keyed by directory.
+  Go modules, keyed by their workspace-relative root.
   """
-  packages(ws: Workspace!): GoPackages! {
-    GoPackages(
+  modules(ws: Workspace!): GoModules! {
+    GoModules(
+      paths: sorted(moduleRootsHere(ws)),
+      mountPath: workspaceMountPath(ws),
+      tool: self,
+    )
+  }
+
+  """
+  Manual package operations across the workspace. Artifact discovery uses
+  modules -> packages; this compatibility helper is not a collection.
+  """
+  packages(ws: Workspace!): GoPackageSet! {
+    GoPackageSet(
       paths: sorted(packageKeys(ws)),
       mountPath: workspaceMountPath(ws),
       tool: self,
@@ -381,6 +419,7 @@ type Go {
   # Gomod.modules returns them, and null otherwise.
   let goModuleAt(modPath: String!, mount: String!): GoModule! {
     GoModule(
+      tool: self,
       path: modPath,
       configuredVersion: version,
       warnings: warnings,
@@ -401,13 +440,48 @@ type Go {
 # See dagger/dagger#13476.
 
 """
-Go packages in a workspace, keyed by directory.
+Go modules in a workspace, keyed by root directory.
+"""
+type GoModules @collection {
+  paths: [String!]! @keys
+  let mountPath: String!
+  let tool: Go!
+
+  module(path: String!): GoModule! @get { tool.goModuleAt(path, mountPath) }
+}
+
+"""
+Go packages in one module, keyed by workspace-relative directory.
 """
 type GoPackages @collection {
+  paths: [String!]! @keys
+  delta: CollectionDelta @delta
+  let mountPath: String!
+  let tool: Go!
+
+  package(path: String!): GoPackage! @get {
+    GoPackage(path: path, mountPath: mountPath, tool: tool)
+  }
+
+  let operations: GoPackageSet! {
+    GoPackageSet(
+      paths: paths,
+      mountPath: mountPath,
+      tool: tool,
+    )
+  }
+
+  binary(ws: Workspace!): Directory! { operations.binary(ws) }
+
+  generate(ws: Workspace!): Changeset! { operations.generate(ws) }
+}
+
+# Manual operations remain available without adding a second artifact path.
+type GoPackageSet {
   """
   Package directories, relative to the workspace.
   """
-  paths: [String!]! @keys
+  paths: [String!]!
 
   # Held instead of the workspace, which would stop the collection caching.
   let mountPath: String!
@@ -417,8 +491,27 @@ type GoPackages @collection {
   """
   The package in this directory.
   """
-  package(path: String!): GoPackage! @get {
+  package(path: String!): GoPackage! {
     GoPackage(path: path, mountPath: mountPath, tool: tool)
+  }
+
+  keys: [String!]! { paths }
+
+  get(key: String!): GoPackage! {
+    if (paths.contains(key) == false) { raise "package is outside this set: " + key }
+    self.package(key)
+  }
+
+  list: [GoPackage!]! { paths.map { path => self.package(path) } }
+
+  subset(keys: [String!]!): GoPackageSet! {
+    if (keys.uniq.length != keys.length) { raise "duplicate package keys" }
+    if (keys.any { key => paths.contains(key) == false }) { raise "unknown package key" }
+    GoPackageSet(
+      paths: paths.filter { path => keys.contains(path) },
+      mountPath: mountPath,
+      tool: tool,
+    )
   }
 
   # The modules holding the selected packages, each once.
@@ -473,7 +566,7 @@ type GoPackages @collection {
   """
   Run go generate in the selected packages.
   """
-  generate(ws: Workspace!): Changeset! @generate {
+  generate(ws: Workspace!): Changeset! {
     # Packages run together per module, in lexical order, each seeing the
     # output of the ones before it: with every package selected, this is
     # go generate ./... for that module.
@@ -576,7 +669,7 @@ type GoPlatforms @collection {
   """
   Platforms selected in or out since the collection was discovered.
   """
-  delta: CollectionDelta
+  delta: CollectionDelta @delta
 
   let path: String!
   let mountPath: String!
@@ -650,6 +743,21 @@ type GoPlatform {
 A Go module rooted at a workspace-relative path.
 """
 type GoModule {
+  let tool: Go!
+
+  """
+  Packages owned by this module. Nested Go modules have their own collection.
+  """
+  packages(ws: Workspace!): GoPackages! {
+    GoPackages(
+      paths: tool.sorted(
+        tool.packageKeys(ws, path),
+      ),
+      mountPath: mountPath,
+      tool: tool,
+    )
+  }
+
   """
   Module root, relative to the workspace.
   """
@@ -1145,7 +1253,7 @@ type GoModule {
   Run the named tests in one package, or all of them when names is empty,
   naming the package when they fail.
   """
-  let runTests(ws: Workspace!, dir: String!, names: [String!]!): Void {
+  let runPackageTests(ws: Workspace!, dir: String!, names: [String!]!): Void {
     let run = if (names.length == 0) { [] } else { ["-run", "^(" + names.join("|") + ")$"] }
     testEnv(ws)
       .withWorkdir(path)
@@ -1154,6 +1262,37 @@ type GoModule {
       err: Error => raise "Go tests in " + packagePath(dir) + ": " + err.message
     }
     null
+  }
+
+  """
+  One command and report shared by every selected test in this Go module.
+  """
+  let runTests(ws: Workspace!): GoTestResults! {
+    let packages = self.packages(ws)
+    let discovered = packages.paths.map { pkg => packages.package(pkg).tests(ws) }
+    let selected = discovered.filter { tests => tests.names.length > 0 }
+    if (selected.length == 0) { raise "no tests selected in module " + path }
+    let empty: [String!]! = []
+    let names = tool.sorted(selected.reduce(empty) { all, tests => all + tests.names }.uniq)
+    let narrowed = discovered.any { tests => tests.delta == null or tests.delta!.removedKeys.length > 0 }
+    let whole = packages.delta != null and packages.delta!.removedKeys.length == 0 and narrowed == false
+    let dirs = if (whole) { ["./..."] } else {
+      tool.sorted(selected.map { tests => packageArg(tests.directory) })
+    }
+    let run = if (narrowed) { ["-run", "^(" + names.join("|") + ")$"] } else { empty }
+    let executed = testEnv(ws)
+      .withWorkdir(path)
+      .withExec(
+        ["otelgotest", "-json"] + run + dirs,
+        expect: ANY,
+        redirectStdout: "/go-test-report.json",
+        experimentalPrivilegedNesting: true,
+      )
+    GoTestResults(
+      report: executed.file("/go-test-report.json"),
+      exitCode: executed.exitCode,
+      stderr: executed.stderr,
+    )
   }
 
   # Main packages are found by searching the source, like test names, so
@@ -1177,7 +1316,16 @@ type GoModule {
     let paths = [pkg, packagePath(pkg)]
     let selecting = buildPatterns.filter { p => p.hasPrefix("!") == false }
     let excluding = buildPatterns.filter { p => p.hasPrefix("!") }
-    (selecting.length == 0 or selecting.any { p => paths.any { at => rootSelected(normalized(at), [p]) } })
+    (
+      selecting.length == 0 or selecting.any { p =>
+        paths.any { at =>
+          rootSelected(
+            normalized(at),
+            [p],
+          )
+        }
+      }
+    )
       and excluding.any { p => paths.any { at => rootSelected(normalized(at), [p]) == false } } == false
   }
 
@@ -1204,7 +1352,12 @@ type GoModule {
   # build names it, and for a c-archive or c-shared build the C header next to
   # it. A gc build runs one cached exec per package, so an edit rebuilds only
   # the packages it reaches.
-  let buildOutputs(ws: Workspace!, platform: String!, pkg: String!, name: String!): Directory! {
+  let buildOutputs(
+    ws: Workspace!,
+    platform: String!,
+    pkg: String!,
+    name: String!,
+  ): Directory! {
     let ctr = platformBase(ws, platform)
     let flags = buildFlags + (ctr.envVariable("GOFLAGS") ?? "").split(" ").filter { f => f != "" }
     let out = if (gccgo(flags)) {
@@ -1240,7 +1393,12 @@ type GoModule {
   }
 
   # A gc build, one cached exec per package.
-  let perPackageBuild(ws: Workspace!, ctr: Container!, pkg: String!, name: String!): Directory! {
+  let perPackageBuild(
+    ws: Workspace!,
+    ctr: Container!,
+    pkg: String!,
+    name: String!,
+  ): Directory! {
     gobuild.binary(
       base: ctr,
       # The toolchain image the base starts from, so package execs can run in
@@ -1363,7 +1521,7 @@ type GoTests @collection {
   """
   Tests selected in or out since the collection was discovered.
   """
-  delta: CollectionDelta
+  delta: CollectionDelta @delta
 
   let directory: String!
 
@@ -1379,7 +1537,7 @@ type GoTests @collection {
   """
   Run the selected tests in this package.
   """
-  test(ws: Workspace!): Void @check {
+  test(ws: Workspace!): Void {
     # With nothing selected out, run the package as a whole rather than listing
     # every name in a -run pattern. Without a delta, the pattern is the safe
     # choice.
@@ -1389,9 +1547,9 @@ type GoTests @collection {
       delta.addedKeys.length == 0 and delta.removedKeys.length == 0
     }
     if (whole) {
-      module.runTests(ws, directory, [])
+      module.runPackageTests(ws, directory, [])
     } else if (names.length > 0) {
-      module.runTests(ws, directory, names)
+      module.runPackageTests(ws, directory, names)
     }
     null
   }
@@ -1414,7 +1572,8 @@ type GoTest {
   Run this test.
   """
   test(ws: Workspace!): Void @check {
-    module.runTests(ws, directory, [name])
+    let pkg = module.importPath(ws) + (if (directory == ".") { "" } else { "/" + directory })
+    module.runTests(ws).assertPassed(module.packagePath(directory), pkg, name)
   }
 }
 
@@ -1422,4 +1581,42 @@ type GoTest {
 type GoGeneration {
   let container: Container!
   let value: String!
+}
+
+# go test -json uses exported Go field names. Missing Test denotes a package event.
+type GoTestEvent {
+  action: String! @JSON.field(name: "Action")
+  pkg: String @JSON.field(name: "Package")
+  buildPkg: String @JSON.field(name: "ImportPath")
+  test: String @JSON.field(name: "Test")
+  output: String @JSON.field(name: "Output")
+}
+
+type GoTestResults {
+  let report: File!
+  let exitCode: Int!
+  let stderr: String!
+
+  let events: [GoTestEvent!]! {
+    report.contents.split("\n").filter { line => line != "" }.map { line => JSON.decode(line) :: GoTestEvent! }
+  }
+
+  let assertPassed(directory: String!, pkg: String!, name: String!): Void {
+    let packageEvents = events.filter { event => (event.pkg ?? event.buildPkg) == pkg }
+    let testEvents = packageEvents.filter { event => event.test == name }
+    let failed = testEvents.any { event => event.action == "fail" }
+    let finished = testEvents.any { event => event.action == "pass" or event.action == "skip" }
+    let packagePassed = packageEvents.any { event => event.test == null and (event.action == "pass" or event.action == "skip") }
+    if (failed) {
+      raise "Go tests in " + directory + ": " + name + " failed\n" + testEvents.map { event => event.output ?? "" }.join("")
+    } else if (finished or packagePassed) {
+      # A successful package with no event for a discovered name can result
+      # from a build constraint. Preserve the previous behavior: it passes.
+      null
+    } else {
+      raise "Go tests in " + directory + ": no successful result for " + name
+        + " (go test exit " + `${exitCode}` + ")\n"
+        + packageEvents.map { event => event.output ?? "" }.join("") + stderr
+    }
+  }
 }
