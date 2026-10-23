@@ -163,6 +163,34 @@ type Go {
   """
   let lib: Gomod! { gomod(includeExtraFiles: includeExtraFiles) }
 
+  # Cross the engine boundary so all selected item checks share preparation.
+  let api: Dagger.Go! {
+    go(
+      version: version,
+      base: base,
+      includeExtraFiles: includeExtraFiles,
+      test: test,
+      generate: generate,
+      build: build,
+      buildFlags: buildFlags,
+      goflags: goflags,
+      mountPath: mountPath,
+    )
+  }
+
+  """
+  The shared report for this module under the active artifact selection.
+  Source, settings, module path and artifact view form the engine cache key.
+  """
+  testResults(ws: Workspace!, modulePath: String!): GoTestResults! {
+    goModule(ws, modulePath).prepareTests(ws)
+  }
+
+  let cachedTestResults(ws: Workspace!, modulePath: String!): GoTestResults! {
+    let result = api.testResults(ws: ws, modulePath: modulePath)
+    GoTestResults(report: result.report, exitCode: result.exitCode, stderr: result.stderr)
+  }
+
   # The scan's package discovery, which gomod's scanner writes in its one pass
   # over every Go file (go-includes, discovery.go): a "module" line per Go
   # module, then a "package" line per package directory with something to do.
@@ -1272,6 +1300,10 @@ type GoModule {
   One command and report shared by every selected test in this Go module.
   """
   let runTests(ws: Workspace!): GoTestResults! {
+    tool.cachedTestResults(ws, path)
+  }
+
+  let prepareTests(ws: Workspace!): GoTestResults! {
     let packages = self.packages(ws)
     let index = testMatches(ws)
     let discovered = packages.paths.map { pkg =>
@@ -1638,9 +1670,9 @@ type GoTestEvent {
 }
 
 type GoTestResults {
-  let report: File!
-  let exitCode: Int!
-  let stderr: String!
+  report: File!
+  exitCode: Int!
+  stderr: String!
 
   let events: [GoTestEvent!]! {
     report.contents.split("\n").filter { line => line != "" }.map { line => JSON.decode(line) :: GoTestEvent! }

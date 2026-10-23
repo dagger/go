@@ -1,5 +1,6 @@
 > This experimental branch requires dagger/dagger PR 14802 with the local Dang
-> collection-view fix. It shares test execution across packages in each Go module.
+> collection-view and self-call alias fixes. It shares preparation and test
+> execution across packages in each Go module.
 
 # go
 
@@ -130,9 +131,11 @@ but is not a collection and creates no second artifact path.
 #### Tests
 
 Each selected test has its own check. All checks in a Go module call the same
-helper, which runs one `otelgotest -json` command and returns a shared report.
-The engine deduplicates identical container operations. Separate modules use
-separate commands and their own toolchains.
+engine-cached `testResults` function. It prepares the selected collections once,
+runs one `otelgotest -json` command, and returns a shared report. Its cache key
+includes the source, settings, module path, and active artifact view, so different
+selections cannot reuse the wrong report. Separate modules use separate commands
+and their own toolchains.
 
 Test discovery uses a module-wide index cached by `gomod`. It includes the
 search-result fields, so each check can select test names locally without
