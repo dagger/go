@@ -782,6 +782,107 @@ type GoDev {
   }
 
   """
+  A module whose go directive asks for a newer Go than the base's builds with
+  the toolchain the go command switches to, as go build would, and the
+  binary reports that Go; so does a dependency that asks for it too, served
+  from a file proxy in the base, the toolchain from the default proxy.
+  """
+  toolchainSwitchCheck: Void @check {
+    let dep = directory
+      .withNewFile("go.mod", "module example.com/newgo\n\ngo 1.26.1\n")
+      .withNewFile("newgo.go", "package newgo\n\nconst Answer = 42\n")
+    let made = container
+      .from("golang:1.25-alpine")
+      .withExec(["apk", "add", "--no-cache", "zip"])
+      .withDirectory("/z/example.com/newgo@v1.0.0", dep)
+      .withExec(["sh", "-c", "set -e; p=/proxy/example.com/newgo/@v; mkdir -p $p; cd /z; zip -qr $p/v1.0.0.zip example.com/newgo@v1.0.0; cp example.com/newgo@v1.0.0/go.mod $p/v1.0.0.mod; printf 'v1.0.0\\n' > $p/list; printf '{\"Version\":\"v1.0.0\"}' > $p/v1.0.0.info"])
+    let base = container
+      .from("golang:1.25-alpine")
+      .withDirectory("/proxy", made.directory("/proxy"))
+      .withEnvVariable("GOPROXY", "file:///proxy,https://proxy.golang.org")
+      .withEnvVariable("GONOSUMDB", "example.com")
+      .withEnvVariable("GOTOOLCHAIN", "auto")
+    let ws = base
+      .withNewFile("/ws/go.mod", "module example.com/switch\n\ngo 1.26.1\n\nrequire example.com/newgo v1.0.0\n")
+      .withNewFile("/ws/main.go", "package main\n\nimport (\n\t\"fmt\"\n\t\"runtime\"\n\n\t\"example.com/newgo\"\n)\n\nfunc main() { fmt.Println(runtime.Version(), newgo.Answer) }\n")
+      .withWorkdir("/ws")
+      .withExec(["go", "mod", "tidy"])
+      .directory("/ws")
+      .asWorkspace
+    let built = go(base: base).packages(ws).get(key: ".").binary(ws)
+    let out = base.withFile("/usr/local/bin/switch", built).withExec(["switch"]).stdout
+    assert(out == "go1.26.1 42\n", "the binary's Go and its dependency: " + out)
+    null
+  }
+
+  """
+  A downloaded dependency's cgo and assembly #include files from elsewhere in
+  its module, including a testdata directory, which no plan line names: each
+  package's exec still has them, and the binary runs. The dependency comes
+  from a file proxy in the base, as from any module proxy.
+  """
+  depIncludesCheck: Void @check {
+    let dep = directory
+      .withNewFile("go.mod", "module example.com/incdep\n\ngo 1.25\n")
+      .withNewFile("shared/value.h", "#define CGO_VALUE 42\n")
+      .withNewFile("cgo/value.go", "package cgo\n\n// #include \"../shared/value.h\"\n// static int value(void) { return CGO_VALUE; }\nimport \"C\"\n\nfunc Value() int { return int(C.value()) }\n")
+      .withNewFile("testdata/value.inc", "#define ASM_VALUE $7\n")
+      .withNewFile("asm/value_amd64.go", "package asm\n\nfunc Value() int64\n")
+      .withNewFile("asm/value_amd64.s", "#include \"textflag.h\"\n#include \"../testdata/value.inc\"\n\nTEXT ·Value(SB), NOSPLIT, $0-8\n\tMOVQ ASM_VALUE, AX\n\tMOVQ AX, ret+0(FP)\n\tRET\n")
+      # Elsewhere than amd64 the assembly, and what it includes, isn't built.
+      .withNewFile("asm/value_other.go", "//go:build !amd64\n\npackage asm\n\nfunc Value() int64 { return 7 }\n")
+    let main = directory
+      .withNewFile("go.mod", "module example.com/depinc\n\ngo 1.25\n\nrequire example.com/incdep v1.0.0\n")
+      .withNewFile("main.go", "package main\n\nimport (\n\t\"fmt\"\n\n\t\"example.com/incdep/asm\"\n\t\"example.com/incdep/cgo\"\n)\n\nfunc main() { fmt.Println(cgo.Value(), asm.Value()) }\n")
+    # The proxy serves the module as go mod download fetches it, and the
+    # module's go.sum is written from it.
+    let made = cgoCxxBase
+      .withExec(["apk", "add", "--no-cache", "zip"])
+      .withDirectory("/z/example.com/incdep@v1.0.0", dep)
+      .withDirectory("/ws", main)
+      .withExec(["sh", "-c", "set -e; p=/proxy/example.com/incdep/@v; mkdir -p $p; cd /z; zip -qr $p/v1.0.0.zip example.com/incdep@v1.0.0; cp example.com/incdep@v1.0.0/go.mod $p/v1.0.0.mod; printf 'v1.0.0\\n' > $p/list; printf '{\"Version\":\"v1.0.0\"}' > $p/v1.0.0.info; cd /ws; GOPROXY=file:///proxy GOSUMDB=off go mod tidy"])
+    let base = cgoCxxBase
+      .withDirectory("/proxy", made.directory("/proxy"))
+      .withEnvVariable("GOPROXY", "file:///proxy")
+      .withEnvVariable("GOSUMDB", "off")
+      .withEnvVariable("CGO_ENABLED", "1")
+    let ws = made.directory("/ws").asWorkspace
+    let built = go(base: base).packages(ws).get(key: ".").binary(ws)
+    let out = base.withFile("/usr/local/bin/depinc", built).withExec(["depinc"]).stdout
+    assert(out == "42 7\n", "the dependency's included values: " + out)
+    null
+  }
+
+  """
+  A cgo or assembly package in the source #includes files from elsewhere in
+  it, which no plan line names: outside its module, of names no pattern
+  covers, that the caller adds with includeExtraFiles, and in directories
+  named like Go files, inside and outside its module. The package's exec has
+  them, and the binary runs.
+  """
+  srcIncludesCheck: Void @check {
+    let ws = directory
+      .withNewFile("native/defs.inc", "#define CGO_BASE 40\n")
+      .withNewFile("native/asm.inc", "#define ASM_VALUE $7\n")
+      .withNewFile("hdr.go/extra.h", "#define CGO_EXTRA 2\n")
+      .withNewFile("app/go.mod", "module example.com/srcinc\n\ngo 1.25\n")
+      .withNewFile("app/inc.go/sub.go/m[1].h", "#define CGO_MORE 0\n")
+      .withNewFile("app/inc.go/unused.go", "package unused\n\nfunc F() int { return 1 }\n")
+      .withNewFile("app/cgo/value.go", "package cgo\n\n// #include \"../../native/defs.inc\"\n// #include \"../../hdr.go/extra.h\"\n// #include \"../inc.go/sub.go/m[1].h\"\n// static int value(void) { return CGO_BASE + CGO_EXTRA + CGO_MORE; }\nimport \"C\"\n\nfunc Value() int { return int(C.value()) }\n")
+      .withNewFile("app/asm/value_amd64.go", "package asm\n\nfunc Value() int64\n")
+      .withNewFile("app/asm/value_amd64.s", "#include \"textflag.h\"\n#include \"../../native/asm.inc\"\n\nTEXT ·Value(SB), NOSPLIT, $0-8\n\tMOVQ ASM_VALUE, AX\n\tMOVQ AX, ret+0(FP)\n\tRET\n")
+      # Elsewhere than amd64 the assembly, and what it includes, isn't built.
+      .withNewFile("app/asm/value_other.go", "//go:build !amd64\n\npackage asm\n\nfunc Value() int64 { return 7 }\n")
+      .withNewFile("app/main.go", "package main\n\nimport (\n\t\"fmt\"\n\n\t\"example.com/srcinc/asm\"\n\t\"example.com/srcinc/cgo\"\n)\n\nfunc main() { fmt.Println(cgo.Value(), asm.Value()) }\n")
+      .asWorkspace
+    let base = cgoCxxBase.withEnvVariable("CGO_ENABLED", "1")
+    let built = go(base: base, includeExtraFiles: ["native/**", "hdr.go/**"]).packages(ws).get(key: "app").binary(ws)
+    let out = base.withFile("/usr/local/bin/srcinc", built).withExec(["srcinc"]).stdout
+    assert(out == "42 7\n", "the source's included values: " + out)
+    null
+  }
+
+  """
   A cgo main package builds with -cover as plain go build -cover builds it,
   byte for byte but for its build IDs, and runs: go hands the cgo tool the
   cover tool's output from its work directory.
@@ -805,6 +906,59 @@ type GoDev {
         """])
       .stdout
     assert(compared == "42\n", "the cgo -cover binary: " + compared)
+    null
+  }
+
+  """
+  A module's archives are what golangci-lint's export driver reads: the
+  manifest lists every plain package go list -deps -test lists, main
+  packages and what only tests import included, with the settings go env
+  reports and the digest the driver computes from go list's files, cgo's
+  output for a cgo package; and the module's packages type-check against the
+  archives' export data. archivescheck, a copy of the driver's digest, checks
+  them against the go command in a container that mounts the source
+  elsewhere.
+  """
+  archivesCheck: Void @check {
+    let source = directory
+      .withNewFile("go.mod", "module example.com/archives\n\ngo 1.26.1\n")
+      .withNewFile("cg/cg.go", "package cg\n\n// #include \"add.h\"\nimport \"C\"\n\n// Add adds in C.\nfunc Add(a, b int) int { return int(C.add(C.int(a), C.int(b))) }\n")
+      .withNewFile("cg/add.c", "#include \"add.h\"\nint add(int a, int b) { return a + b; }\n")
+      .withNewFile("cg/add.h", "int add(int a, int b);\n")
+      .withNewFile("cg/plain.go", "package cg\n\n// Twice is plain Go next to cgo.\nfunc Twice(n int) int { return Add(n, n) }\n")
+      .withNewFile("cg/cg_test.go", "package cg_test\n\nimport (\n\t\"net/http/httptest\"\n\t\"testing\"\n\n\t\"example.com/archives/cg\"\n\t\"example.com/archives/testonly\"\n)\n\nfunc TestTwice(t *testing.T) {\n\t_ = httptest.NewRecorder()\n\tif cg.Twice(2) != testonly.Want() {\n\t\tt.Fatal(\"wrong\")\n\t}\n}\n")
+      .withNewFile("emb/emb.go", "package emb\n\nimport _ \"embed\"\n\n//go:embed data.txt\nvar Data string\n")
+      .withNewFile("emb/data.txt", "hello\n")
+      .withNewFile("testonly/testonly.go", "package testonly\n\n// Want is for tests.\nfunc Want() int { return 4 }\n")
+      .withNewFile("cmd/tool/main.go", "package main\n\nimport (\n\t\"fmt\"\n\t\"os/user\"\n\n\t\"example.com/archives/cg\"\n\t\"example.com/archives/emb\"\n)\n\nfunc main() {\n\tu, _ := user.Current()\n\tfmt.Println(cg.Twice(2), emb.Data, u)\n}\n")
+    let ws = source.asWorkspace
+    let archives = go(base: cgoCxxBase).module(ws, ".").archives(ws)
+    let manifest = archives.file("manifest.json").contents
+    let checked = cgoCxxBase
+      .withDirectory("/check", currentModule.source.directory("archivescheck"))
+      .withNewFile("/check/go.mod", "module archivescheck\n\ngo 1.26\n")
+      .withWorkdir("/check")
+      .withExec(["go", "build", "-o", "/usr/local/bin/archivescheck", "."])
+      .withDirectory("/elsewhere", source)
+      .withDirectory("/archives", archives)
+      .withWorkdir("/elsewhere")
+      .withExec(["archivescheck", "/archives"])
+      .stdout
+    assert(checked.trimSpace.split("\n").length == 1 and checked.hasPrefix("checked "), "the archives: " + checked)
+    let wanted = ["\"example.com/archives/cmd/tool\"", "\"example.com/archives/testonly\"", "\"net/http/httptest\"", "\"runtime/cgo\""]
+    let missing = wanted.filter { p => manifest.contains(p + ": {") == false }
+    assert(missing.length == 0, "the manifest lacks " + missing.join(", ") + ": " + manifest)
+    assert(manifest.contains("example.com/archives/cg [") == false and manifest.contains(".test\"") == false, "the manifest lists test packages: " + manifest)
+
+    # A module with no package to compile has archives of nothing.
+    let none = directory
+      .withNewFile("go.mod", "module example.com/none\n\ngo 1.26.1\n")
+      .withNewFile("p.go", "//go:build notenabled\n\npackage p\n")
+      .asWorkspace
+    let empty = go(base: cgoCxxBase).module(none, ".").archives(none)
+    let emptyManifest = empty.file("manifest.json").contents
+    assert(emptyManifest.contains("\"packages\": {}"), "the manifest of no packages: " + emptyManifest)
+    assert(empty.entries == ["manifest.json"], "the archives of no packages: " + empty.entries.join(", "))
     null
   }
 
@@ -1094,6 +1248,22 @@ type GoDev {
     )
 
     mod.test(ws)
+
+    # A custom base may carry Go caches in volumes of its own. The
+    # per-package build leaves them out, as it does the module's: they
+    # would shadow the module sources each package mounts, and live on one
+    # engine.
+    let cached = base
+      .withMountedCache("/go/pkg/mod", cacheVolume("go-dev-custom-base-mod"))
+      .withMountedCache("/root/.cache/go-build", cacheVolume("go-dev-custom-base-build"))
+    let built = go(base: cached).packages(ws).get(key: baseFixturePath + "/cmd/writegenerated").binary(ws)
+    assert(built.size > 0, "a custom base with Go cache volumes built an empty binary")
+
+    # A base whose module cache is where the per-package build makes its
+    # module download, here through a symlink, as GOMODCACHE is the module's.
+    let linked = base.withExec(["sh", "-c", "mkdir -p /gobuild/modcache /go/pkg && rm -rf /go/pkg/mod && ln -s /gobuild/modcache /go/pkg/mod"])
+    let builtLinked = go(base: linked).packages(ws).get(key: baseFixturePath + "/cmd/writegenerated").binary(ws)
+    assert(builtLinked.size > 0, "a custom base whose module cache is the per-package download's built an empty binary")
 
     let changes = mod.generate(ws)
     assert(

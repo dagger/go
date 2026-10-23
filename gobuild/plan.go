@@ -31,8 +31,11 @@ type block struct {
 	name       string // stable directory name under /work
 	lines      []string
 	deps       []string // other block ids
-	srcFiles   []string // relative to roots.Src; may hold patterns ("**/*.h", "<dir>/**")
+	srcFiles   []string // relative to roots.Src; may hold patterns ("<dir>/**")
 	modFiles   []string // relative to roots.Mod; may hold "<dir>/**" patterns
+	// srcNonGo marks a package in the source with C or assembly, which
+	// also reads every file in the source that isn't Go.
+	srcNonGo bool
 	// isLink marks the main package's block (b001), which compiles and links.
 	isLink bool
 	// linkAt is 1 plus the index in lines of the command that runs the
@@ -74,6 +77,8 @@ var (
 	reLinkOut = regexp.MustCompile(`^mv \$WORK/(b\d+)/(exe/\S+) `)
 	// A test link's output, which no move follows: $WORK/bNNN/<pkg>.test.
 	reTestLinkOut = regexp.MustCompile(`/link -o \$WORK/(b\d+)/([^/\s]+) `)
+	// A link's import config, the first of its steps.
+	reLinkCfg = regexp.MustCompile(`^cat >\$WORK/(b\d+)/importcfg\.link << 'EOF'`)
 	// The go command's build ID for a link, before any of the call's own
 	// -ldflags, and the link's import config.
 	reLinkBuildID = regexp.MustCompile(` -buildid=\S+`)
@@ -110,6 +115,17 @@ func stableName(importPath string) string {
 // parsePlan splits a go build -n plan into per-package blocks and records
 // each block's input files and dependencies.
 func parsePlan(plan string, r roots) (map[string]*block, error) {
+	return parseBlocks(plan, r, false)
+}
+
+// parseArchivePlan is parsePlan for a plan of many packages whose archives
+// are what's wanted: a main package's block is its compile, without the
+// link that follows it, and no block links.
+func parseArchivePlan(plan string, r roots) (map[string]*block, error) {
+	return parseBlocks(plan, r, true)
+}
+
+func parseBlocks(plan string, r roots, archives bool) (map[string]*block, error) {
 	blocks := map[string]*block{}
 	var cur *block
 	cwd := r.Cwd
@@ -120,6 +136,9 @@ func parsePlan(plan string, r roots) (map[string]*block, error) {
 	// of its work directory in some Go releases (1.24) and after it in
 	// others, so a header waits for a block without one.
 	pending := ""
+	// The block whose link is being left out, from its import config to the
+	// next block.
+	linking := ""
 	lines := strings.Split(plan, "\n")
 	for i := 0; i < len(lines); i++ {
 		// go -n prints its work directory as "$WORK", which is not an
@@ -145,6 +164,16 @@ func parsePlan(plan string, r roots) (map[string]*block, error) {
 			inHeredoc = !strings.HasSuffix(line, "EOF")
 		} else if reHeredoc.MatchString(line) {
 			inHeredoc = true
+		}
+		if linking != "" {
+			if m := reMkdir.FindStringSubmatch(line); m == nil || m[1] == linking {
+				continue
+			}
+			linking = ""
+		}
+		if m := reLinkCfg.FindStringSubmatch(line); archives && m != nil && !content {
+			linking = m[1]
+			continue
 		}
 		// A test binary's main package has its work directory made before
 		// any other's, and its steps (with -cover, a cover run before its
@@ -260,25 +289,33 @@ func parsePlan(plan string, r roots) (map[string]*block, error) {
 			return nil, fmt.Errorf("plan step %s has no package header", id)
 		}
 	}
-	if err := markLink(blocks); err != nil {
-		return nil, err
+	if !archives {
+		if err := markLink(blocks); err != nil {
+			return nil, err
+		}
 	}
 	for id, b := range blocks {
-		// Assembly can #include headers from elsewhere in its module, which
-		// the plan never names: mount every header of the module.
+		// Assembly and cgo's C compiles can #include files from anywhere in
+		// their module, which the plan never names: a package in the module
+		// cache that has either reads its whole module.
+		withC := b.cgo
 		for _, f := range b.modFiles {
-			if path.Ext(f) == ".s" {
-				if i := strings.Index(f, "@"); i >= 0 {
-					if j := strings.Index(f[i:], "/"); j >= 0 {
-						b.modFiles = appendUniq(b.modFiles, f[:i+j]+"/**/*.h")
-					}
+			withC = withC || path.Ext(f) == ".s"
+		}
+		if withC {
+			for _, f := range b.modFiles {
+				if root := moduleRoot(f); root != "" {
+					b.modFiles = appendUniq(b.modFiles, root+"/**")
 				}
 			}
 		}
+		// In the source, they include files by paths relative to their
+		// directory ("../native/defs.inc"), of any name, including ones
+		// the caller adds with includeExtraFiles: a package there that has
+		// either reads every file in the source but the Go ones, which
+		// leaves its key alone when Go code elsewhere changes.
 		for _, f := range b.srcFiles {
-			if path.Ext(f) == ".s" {
-				b.srcFiles = appendUniq(b.srcFiles, "**/*.h")
-			}
+			b.srcNonGo = b.srcNonGo || b.cgo || path.Ext(f) == ".s"
 		}
 		b.name = stableName(b.importPath)
 		seen := map[string]bool{}
@@ -289,9 +326,8 @@ func parsePlan(plan string, r roots) (map[string]*block, error) {
 				}
 				seen[m[1]] = true
 				// The profile isn't a dependency: every compile reads it,
-				// and its output is mounted into every exec instead, so it
-				// doesn't pull the standard library and dependencies out
-				// of their tiers.
+				// and its output is mounted into every exec instead, so a
+				// package's dependencies are the packages it imports.
 				if blocks[m[1]].isProfile {
 					b.profile = m[1]
 					continue
@@ -304,6 +340,20 @@ func parsePlan(plan string, r roots) (map[string]*block, error) {
 		sort.Strings(b.modFiles)
 	}
 	return blocks, nil
+}
+
+// moduleRoot is the module directory a path in the module cache is in,
+// "<module>@<version>", or "" outside one.
+func moduleRoot(f string) string {
+	i := strings.Index(f, "@")
+	if i < 0 {
+		return ""
+	}
+	j := strings.Index(f[i:], "/")
+	if j < 0 {
+		return ""
+	}
+	return f[:i+j]
 }
 
 // errUnsupported marks what the per-package build doesn't do yet.
@@ -481,32 +531,31 @@ func appendUniq(xs []string, x string) []string {
 // is the same on every engine; the compiler's output doesn't depend on it,
 // and it uses 1 where its flags don't allow more. A package built in its
 // own exec mostly compiles alone, as the big packages at the end of a build
-// do, so it gets what go build passes on a 16-CPU machine. A tier runs as
-// many compiles at once as there are CPUs, so each gets 4: in dagger's
-// build, 16 there slowed the tiers more than it sped their packages.
+// do, so it gets what go build passes on a 16-CPU machine. The standard
+// library and dependencies build many at once, so each gets 4: in dagger's
+// build, 16 there slowed them more than it sped their packages.
 const (
 	soloCompileC = "16"
-	tierCompileC = "4"
+	depCompileC  = "4"
 )
 
 // script renders a block as one shell script for its exec. A dependency's
-// archive is read from /work/lib, or from /work/t/<tier> when a tier built
-// it (outside, by package). Archives get no Go build ID: the plan's are
+// archive is read from /work/lib. Archives get no Go build ID: the plan's are
 // temporary, and leaving them out lets early cutoff compare archives by
 // their bytes. The link gets one made from what it reads (gohdr linkid).
-func (b *block) script(blocks map[string]*block, outside map[string]string, conc string) string {
+func (b *block) script(blocks map[string]*block, conc string) string {
 	dirs := []string{"/work/" + b.name}
 	var body strings.Builder
 	var heredoc []string
 	heredocTarget := ""
 	needed := cdNeeded(b.lines)
 	for i, l := range b.lines {
-		// A cgo package's C compiles name its files by bare names in the
-		// directory the plan changed to, so it keeps every change the plan
-		// prints; the one carried in from the previous step stays only when
-		// needed, as elsewhere, so it doesn't tie the step to the project.
-		carried := strings.HasPrefix(l, "mkdir -p ")
-		if isCd(l) && !needed[i] && (!b.cgo || carried) {
+		// A cgo package's C compiles name its files by bare names in its
+		// directory, so it keeps every change the plan prints to it; any
+		// other change stays only when needed, as elsewhere, such as the
+		// one carried in from the previous step or one back to the build's
+		// directory, so it doesn't tie the step to the project.
+		if isCd(l) && !needed[i] && (!b.cgo || !cdTo(l, b.dir)) {
 			continue
 		}
 		link := b.isLink && i == b.linkAt-1
@@ -527,9 +576,6 @@ func (b *block) script(blocks map[string]*block, outside map[string]string, conc
 			name := blocks[id].name
 			if id == b.id {
 				return "/work/" + name + "/" + name + ".a"
-			}
-			if k, ok := outside[id]; ok {
-				return "/work/t/" + k + "/" + name + ".a"
 			}
 			return "/work/lib/" + name + ".a"
 		})
@@ -583,6 +629,12 @@ func (b *block) script(blocks map[string]*block, outside map[string]string, conc
 // "cd", or the "mkdir -p DIR && cd DIR" parsePlan starts each block with.
 func isCd(l string) bool {
 	return strings.HasPrefix(l, "cd ") || (strings.HasPrefix(l, "mkdir -p ") && strings.Contains(l, " && cd "))
+}
+
+// cdTo reports whether a plan line is the go command's own change to dir.
+func cdTo(l, dir string) bool {
+	w := shellWords(l)
+	return len(w) == 2 && w[0] == "cd" && w[1] == dir
 }
 
 // cdNeeded reports, by line index, which directory changes matter: the
@@ -810,6 +862,31 @@ func (b *block) linkLine() string {
 		return ""
 	}
 	return b.lines[b.linkAt-1]
+}
+
+// cgoOutputs are the Go files cgo writes that a cgo package's compile reads,
+// by their names in its work directory, in the compile's order.
+func (b *block) cgoOutputs() []string {
+	var out []string
+	for _, l := range b.lines {
+		if !reCompile.MatchString(l) {
+			continue
+		}
+		for _, w := range shellWords(l) {
+			if f, ok := strings.CutPrefix(w, "$WORK/"+b.id+"/"); ok && strings.HasSuffix(f, ".go") {
+				out = append(out, f)
+			}
+		}
+	}
+	return out
+}
+
+func shJoin(args []string) string {
+	quoted := make([]string, len(args))
+	for i, a := range args {
+		quoted[i] = shQuote(a)
+	}
+	return strings.Join(quoted, " ")
 }
 
 // cgoHeader is the C header cgo writes for a package's exported functions.

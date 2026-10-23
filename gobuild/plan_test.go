@@ -66,7 +66,7 @@ func TestParsePlanCgo(t *testing.T) {
 	if b.out != "exe/a.out" {
 		t.Errorf("out: %q", b.out)
 	}
-	script := b.script(blocks, nil, soloCompileC)
+	script := b.script(blocks, soloCompileC)
 	if strings.Contains(script, "/dev/null || true") {
 		t.Error("a flag probe was kept")
 	}
@@ -75,6 +75,55 @@ func TestParsePlanCgo(t *testing.T) {
 	}
 	if strings.Contains(script, "$WORK") {
 		t.Errorf("$WORK left in the script:\n%s", script)
+	}
+}
+
+// A downloaded module's package reads its module whole, by name, whatever
+// the plan names of it: cgo and assembly can #include any file of the module.
+func TestParsePlanModuleIncludes(t *testing.T) {
+	plan := strings.Join([]string{
+		"mkdir -p $WORK/b002/",
+		"",
+		"#",
+		"# example.com/dep/asm",
+		"#",
+		"",
+		"cd /go/pkg/mod/example.com/dep@v1.0.0/asm",
+		"/usr/local/go/pkg/tool/linux_amd64/asm -p example.com/dep/asm -trimpath \"$WORK/b002=>\" -I $WORK/b002/ -I /usr/local/go/pkg/include -o $WORK/b002/value_amd64.o ./value_amd64.s",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b002/_pkg_.a -trimpath \"$WORK/b002=>\" -p example.com/dep/asm -pack ./value.go",
+		"mkdir -p $WORK/b003/",
+		"",
+		"#",
+		"# example.com/dep/cgo",
+		"#",
+		"",
+		"cd /go/pkg/mod/example.com/dep@v1.0.0/cgo",
+		"TERM='dumb' CGO_LDFLAGS='' /usr/local/go/pkg/tool/linux_amd64/cgo -objdir $WORK/b003/ -importpath example.com/dep/cgo -- -I $WORK/b003/ -O2 -g ./value.go",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b003/_pkg_.a -trimpath \"$WORK/b003=>\" -p example.com/dep/cgo -pack $WORK/b003/_cgo_gotypes.go $WORK/b003/value.cgo1.go",
+		"mkdir -p $WORK/b004/",
+		"",
+		"#",
+		"# example.com/other/pure",
+		"#",
+		"",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b004/_pkg_.a -trimpath \"$WORK/b004=>\" -p example.com/other/pure -pack /go/pkg/mod/example.com/other@v1.0.0/pure/pure.go",
+	}, "\n") + "\n" + mainLink(
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main -importcfg $WORK/b001/importcfg -pack ./main.go",
+	)
+	blocks, err := parsePlan(plan, testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]string{"b002": "example.com/dep@v1.0.0", "b003": "example.com/dep@v1.0.0", "b004": "example.com/other@v1.0.0"} {
+		b := blocks[id]
+		if len(b.modFiles) == 0 {
+			t.Errorf("%s (%s) reads no module files", id, b.importPath)
+		}
+		for _, f := range b.modFiles {
+			if moduleRoot(f) != want {
+				t.Errorf("%s (%s): %q is not in %s", id, b.importPath, f, want)
+			}
+		}
 	}
 }
 
@@ -95,8 +144,8 @@ func TestParsePlanEmbedcfg(t *testing.T) {
 }
 
 // A PGO profile's preprocessing has no package header, and every compile
-// reads its output: it isn't a dependency, so it doesn't pull the packages
-// that read it out of their tiers.
+// reads its output: it isn't a dependency, so the standard library and
+// dependencies that read it stay outside the source.
 func TestParsePlanProfile(t *testing.T) {
 	plan := strings.Join([]string{
 		"mkdir -p $WORK/b002/",
@@ -174,19 +223,22 @@ func TestParsePlanCdIsNotAnInput(t *testing.T) {
 	}
 }
 
-// A cgo step keeps the directory changes the plan prints, but not the one
-// carried in from the step before, which would tie it to the project.
+// A cgo step keeps the plan's changes to its package's directory, but not the
+// one carried in from the step before or one back to the build's directory,
+// which would tie it to the project.
 func TestCgoScriptDropsCarriedDirectory(t *testing.T) {
 	plan := mainLink(
 		"cd /usr/local/go/src/runtime/cgo",
 		"TERM='dumb' /usr/local/go/pkg/tool/linux_amd64/cgo -objdir $WORK/b001/ -importpath runtime/cgo -- -I $WORK/b001/ ./cgo.go",
 		"TERM='dumb' gcc -I . -o $WORK/b001/_x001.o -c gcc_linux.c",
+		"cd /proj/sub",
+		"TERM='dumb' gcc -I /usr/local/go/src/runtime/cgo -o $WORK/b001/_cgo_.o $WORK/b001/_cgo_main.o $WORK/b001/_x001.o",
 	)
 	blocks, err := parsePlan(plan, roots{Src: "/proj", Mod: "/go/pkg/mod", Cwd: "/proj/sub"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := blocks["b001"].script(blocks, nil, soloCompileC)
+	script := blocks["b001"].script(blocks, soloCompileC)
 	if strings.Contains(script, "/proj/sub") {
 		t.Errorf("the project's directory is in the script:\n%s", script)
 	}
@@ -209,22 +261,8 @@ func TestParsePlanQuotedDirectory(t *testing.T) {
 	if !slices.Contains(b.srcFiles, "my dir/main.go") {
 		t.Errorf("srcFiles: %q", b.srcFiles)
 	}
-	if script := b.script(blocks, nil, soloCompileC); !strings.Contains(script, "cd '/src/my dir'") {
+	if script := b.script(blocks, soloCompileC); !strings.Contains(script, "cd '/src/my dir'") {
 		t.Errorf("the directory isn't quoted:\n%s", script)
-	}
-}
-
-func TestSplitPattern(t *testing.T) {
-	for in, want := range map[string][2]string{
-		"m@v1/**/*.h":  {"m@v1", "**/*.h"},
-		"m@v1/inc/**":  {"m@v1/inc", "**"},
-		"m@v1/x/y.h":   {"m@v1/x", "y.h"},
-		"m@v1/a/*/b.h": {"m@v1/a", "*/b.h"},
-	} {
-		dir, glob := splitPattern(in)
-		if dir != want[0] || glob != want[1] {
-			t.Errorf("splitPattern(%q) = %q, %q; want %q, %q", in, dir, glob, want[0], want[1])
-		}
 	}
 }
 
@@ -326,7 +364,7 @@ func TestScriptKeepsLinkDirectory(t *testing.T) {
 	if b.cgo {
 		t.Fatal("no cgo step here")
 	}
-	script := b.script(blocks, nil, soloCompileC)
+	script := b.script(blocks, soloCompileC)
 	if !strings.Contains(script, "cd /work/"+b.name+"/exe/\n") || !strings.Contains(script, "link -o a.out.so ") {
 		t.Errorf("the link's directory change was dropped:\n%s", script)
 	}
@@ -340,7 +378,7 @@ func TestScriptCompileConcurrency(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return blocks["b001"].script(blocks, nil, soloCompileC)
+		return blocks["b001"].script(blocks, soloCompileC)
 	}
 	with := script("/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main -c=4 -nolocalimports -pack ./main.go")
 	without := script("/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main -nolocalimports -pack ./main.go")
@@ -363,7 +401,7 @@ func TestScriptLinkBuildID(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := blocks["b001"]
-	script := b.script(blocks, nil, soloCompileC)
+	script := b.script(blocks, soloCompileC)
 	if !strings.Contains(script, "id=$(/gobuild/gohdr linkid /work/"+b.name+"/importcfg.link ") ||
 		!strings.Contains(script, " -buildid=$id -X main.v=1 ") || strings.Contains(script, "Plan") {
 		t.Errorf("link build ID:\n%s", script)
@@ -372,7 +410,7 @@ func TestScriptLinkBuildID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s := user["b001"].script(user, nil, soloCompileC); !strings.Contains(s, " -buildid=$id -buildid= ") {
+	if s := user["b001"].script(user, soloCompileC); !strings.Contains(s, " -buildid=$id -buildid= ") {
 		t.Errorf("the call's own -buildid was dropped:\n%s", s)
 	}
 }
@@ -633,7 +671,7 @@ func TestParsePlanCgoCoverWorkFile(t *testing.T) {
 }
 
 // A profile outside the source, such as one a -pgo flag names in the base
-// image, is preprocessed on its own like any other, not in a tier.
+// image, is preprocessed on its own like any other, not as a package.
 func TestProfileOutsideTheSource(t *testing.T) {
 	plan := strings.Join([]string{
 		"mkdir -p $WORK/b002/",
@@ -649,6 +687,148 @@ func TestProfileOutsideTheSource(t *testing.T) {
 		t.Fatalf("profile step: %+v", p)
 	}
 	if outsideSet(blocks)["b002"] {
-		t.Error("the profile step is in the outside set, which tiers build")
+		t.Error("the profile step is in the outside set, which builds packages")
+	}
+}
+
+// The module cache writes an upper-case letter as "!" and the letter in lower
+// case; the go command takes the module and version as they are.
+func TestUnescapeModule(t *testing.T) {
+	for in, want := range map[string]string{
+		"github.com/!burnt!sushi/toml@v1.2.0": "github.com/BurntSushi/toml@v1.2.0",
+		"golang.org/x/sys@v0.30.0":            "golang.org/x/sys@v0.30.0",
+		"example.com/m@v1.0.0-!r!c1":          "example.com/m@v1.0.0-RC1",
+	} {
+		if got := unescapeModule(in); got != want {
+			t.Errorf("unescapeModule(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestSplitPattern(t *testing.T) {
+	for in, want := range map[string][2]string{
+		"m@v1/**/*.h":  {"m@v1", "**/*.h"},
+		"m@v1/inc/**":  {"m@v1/inc", "**"},
+		"m@v1/x/y.h":   {"m@v1/x", "y.h"},
+		"m@v1/a/*/b.h": {"m@v1/a", "*/b.h"},
+	} {
+		dir, glob := splitPattern(in)
+		if dir != want[0] || glob != want[1] {
+			t.Errorf("splitPattern(%q) = %q, %q; want %q, %q", in, dir, glob, want[0], want[1])
+		}
+	}
+}
+
+// The module cache records each download's checksum next to it, under the
+// escaped module path and version, which name the module's directory too.
+func TestParseSums(t *testing.T) {
+	sums := parseSums("./github.com/!burnt!sushi/toml/@v/v1.2.0.ziphash h1:abc=\n./golang.org/x/sys/@v/v0.30.0.ziphash h1:def=\n\n")
+	want := map[string]string{"github.com/!burnt!sushi/toml@v1.2.0": "h1:abc=", "golang.org/x/sys@v0.30.0": "h1:def="}
+	if len(sums) != len(want) {
+		t.Fatalf("sums: %q", sums)
+	}
+	for k, v := range want {
+		if sums[k] != v {
+			t.Errorf("sums[%q] = %q, want %q", k, sums[k], v)
+		}
+	}
+}
+
+// A plan of many packages for their archives keeps each main package's
+// compile and leaves out its link, from its import config on: no block
+// links, and a main package depends on what it imports, not on what its
+// link reads.
+func TestParseArchivePlan(t *testing.T) {
+	link := func(id string) []string {
+		return []string{
+			"cat >$WORK/" + id + "/importcfg.link << 'EOF' # internal",
+			"packagefile example.com/m/cmd/" + id + "=$WORK/" + id + "/_pkg_.a",
+			"packagefile example.com/m/lib=$WORK/b002/_pkg_.a",
+			"packagefile runtime=$WORK/b009/_pkg_.a",
+			"EOF",
+			"mkdir -p $WORK/" + id + "/exe/",
+			"cd .",
+			"/usr/local/go/pkg/tool/linux_amd64/link -o $WORK/" + id + "/exe/a.out -importcfg $WORK/" + id + "/importcfg.link -buildmode=exe $WORK/" + id + "/_pkg_.a",
+			"go tool buildid -w $WORK/" + id + "/exe/a.out # internal",
+		}
+	}
+	compile := func(id, pkg string, deps ...string) []string {
+		lines := []string{"mkdir -p $WORK/" + id + "/", "", "#", "# " + pkg, "#", "", "cat >$WORK/" + id + "/importcfg << 'EOF' # internal"}
+		for _, d := range deps {
+			lines = append(lines, "packagefile "+d+"=$WORK/"+map[string]string{"example.com/m/lib": "b002"}[d]+"/_pkg_.a")
+		}
+		return append(lines, "EOF",
+			"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/"+id+"/_pkg_.a -p "+pkg+" -importcfg $WORK/"+id+"/importcfg -pack ./"+id+".go",
+			"go tool buildid -w $WORK/"+id+"/_pkg_.a # internal")
+	}
+	var lines []string
+	lines = append(lines, compile("b002", "example.com/m/lib")...)
+	lines = append(lines, compile("b001", "example.com/m/cmd/b001", "example.com/m/lib")...)
+	lines = append(lines, link("b001")...)
+	lines = append(lines, compile("b003", "example.com/m/cmd/b003", "example.com/m/lib")...)
+	lines = append(lines, link("b003")...)
+	plan := strings.Join(lines, "\n")
+	if _, err := parsePlan(plan, testRoots); err == nil {
+		t.Fatal("parsePlan took a plan with two links")
+	}
+	blocks, err := parseArchivePlan(plan, testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 3 {
+		t.Fatalf("%d blocks, want 3", len(blocks))
+	}
+	for _, id := range []string{"b001", "b003"} {
+		b := blocks[id]
+		if b.isLink || b.linkAt != 0 || b.output() != b.name+".a" {
+			t.Errorf("%s: isLink %v, linkAt %d, output %s", id, b.isLink, b.linkAt, b.output())
+		}
+		if !slices.Equal(b.deps, []string{"b002"}) {
+			t.Errorf("%s: deps %v, want [b002]", id, b.deps)
+		}
+		script := b.script(blocks, soloCompileC)
+		if strings.Contains(script, "importcfg.link") || strings.Contains(script, "/link ") || strings.Contains(script, "exe/") {
+			t.Errorf("%s: the script links:\n%s", id, script)
+		}
+		if !strings.Contains(script, "/compile ") {
+			t.Errorf("%s: the script doesn't compile:\n%s", id, script)
+		}
+	}
+}
+
+// A cgo package's compile reads cgo's Go output from its work directory,
+// which cgoOutputs names in the compile's order.
+func TestCgoOutputs(t *testing.T) {
+	blocks, err := parsePlan(mainLink(
+		"cd /src",
+		"TERM='dumb' CGO_LDFLAGS='' /usr/local/go/pkg/tool/linux_amd64/cgo -objdir $WORK/b001/ -importpath example.com/m -- -I $WORK/b001/ -O2 -g ./main.go ./b.go",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main -pack ./plain.go $WORK/b001/_cgo_gotypes.go $WORK/b001/main.cgo1.go $WORK/b001/b.cgo1.go $WORK/b001/_cgo_import.go",
+	), testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := blocks["b001"].cgoOutputs()
+	want := []string{"_cgo_gotypes.go", "main.cgo1.go", "b.cgo1.go", "_cgo_import.go"}
+	if !slices.Equal(got, want) {
+		t.Errorf("cgoOutputs: %q, want %q", got, want)
+	}
+}
+
+// The manifest's build tags are go build's: the last -tags flag's, whatever
+// its form.
+func TestBuildTags(t *testing.T) {
+	for _, c := range []struct {
+		flags []string
+		want  []string
+	}{
+		{nil, nil},
+		{[]string{"-race", "-ldflags=-X a.b=c"}, nil},
+		{[]string{"-tags=b,a"}, []string{"b", "a"}},
+		{[]string{"-tags", "x y", "-trimpath"}, []string{"x", "y"}},
+		{[]string{"--tags=one", "-tags=two"}, []string{"two"}},
+	} {
+		if got := buildTags(c.flags); !slices.Equal(got, c.want) {
+			t.Errorf("buildTags(%q): %q, want %q", c.flags, got, c.want)
+		}
 	}
 }

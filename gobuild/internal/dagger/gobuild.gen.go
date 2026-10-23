@@ -8,6 +8,9 @@ import (
 
 type Gobuild = core.Gobuild
 
+// GobuildArchivesOpts contains options for Gobuild.Archives
+type GobuildArchivesOpts = core.GobuildArchivesOpts
+
 // GobuildBinaryOpts contains options for Gobuild.Binary
 type GobuildBinaryOpts = core.GobuildBinaryOpts
 

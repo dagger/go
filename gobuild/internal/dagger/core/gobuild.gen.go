@@ -28,6 +28,64 @@ func (r *Gobuild) WithGraphQLQuery(q *querybuilder.Selection) *Gobuild {
 	}
 }
 
+// GobuildArchivesOpts contains options for Gobuild.Archives
+type GobuildArchivesOpts struct {
+	// The image base was made from, as for Binary.
+	Image string
+	// The custom container base was made from, as for Binary.
+	From *Container
+	// The module's directory, relative to mountPath.
+	//
+	// Default: "."
+	Workdir string
+	// Flags for go build, as for Binary: the build tags among them are the
+	// manifest's.
+	Flags []string
+}
+
+// Archives compiles, one exec per package as Binary builds, every package of
+// the module in workdir and every package it and its tests import, and
+// returns a directory of their archives, the full output of "go tool compile
+// -pack", under archives/, with manifest.json, which describes them for
+// golangci-lint's export driver: the Go version, target and build tags they
+// were compiled for, and for each package, by import path, its archive and a
+// digest of what it was compiled from. The packages are those "go list -deps
+// -test ./..." lists but test variants, external test packages and test
+// mains: main packages too, which the driver loads plainly as well.
+func (r *Gobuild) Archives(base *Container, source *Directory, headers *File, mountPath string, opts ...GobuildArchivesOpts) *Directory {
+	assertNotNil("base", base)
+	assertNotNil("source", source)
+	assertNotNil("headers", headers)
+	q := r.query.Select("archives")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `image` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Image) {
+			q = q.Arg("image", opts[i].Image)
+		}
+		// `from` optional argument
+		if !querybuilder.IsZeroValue(opts[i].From) {
+			q = q.Arg("from", opts[i].From)
+		}
+		// `workdir` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Workdir) {
+			q = q.Arg("workdir", opts[i].Workdir)
+		}
+		// `flags` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Flags) {
+			q = q.Arg("flags", opts[i].Flags)
+		}
+	}
+	q = q.Arg("base", base)
+	q = q.Arg("source", source)
+	q = q.Arg("headers", headers)
+	q = q.Arg("mountPath", mountPath)
+
+	return &Directory{
+		query:     q,
+		refetchID: r.refetchID,
+	}
+}
+
 // GobuildBinaryOpts contains options for Gobuild.Binary
 type GobuildBinaryOpts struct {
 	// The image base was made from. Set, package execs run in that image
@@ -35,6 +93,9 @@ type GobuildBinaryOpts struct {
 	// made (a workdir at the project's mount path, its cache mounts), and
 	// projects with the same image and settings share them.
 	Image string
+	// The custom container base was made from, as image is for an image:
+	// package execs run in it with base's environment alone.
+	From *Container
 	// The directory to run go build in, relative to mountPath.
 	//
 	// Default: "."
@@ -56,6 +117,10 @@ func (r *Gobuild) Binary(base *Container, source *Directory, headers *File, moun
 		// `image` optional argument
 		if !querybuilder.IsZeroValue(opts[i].Image) {
 			q = q.Arg("image", opts[i].Image)
+		}
+		// `from` optional argument
+		if !querybuilder.IsZeroValue(opts[i].From) {
+			q = q.Arg("from", opts[i].From)
 		}
 		// `workdir` optional argument
 		if !querybuilder.IsZeroValue(opts[i].Workdir) {
@@ -138,6 +203,8 @@ func (r *Gobuild) UnmarshalJSON(bs []byte) error {
 type GobuildTestBinaryOpts struct {
 	// The image base was made from, as for Binary.
 	Image string
+	// The custom container base was made from, as for Binary.
+	From *Container
 	// The directory to run go test in, relative to mountPath.
 	//
 	// Default: "."
@@ -162,6 +229,10 @@ func (r *Gobuild) TestBinary(base *Container, source *Directory, headers *File, 
 		// `image` optional argument
 		if !querybuilder.IsZeroValue(opts[i].Image) {
 			q = q.Arg("image", opts[i].Image)
+		}
+		// `from` optional argument
+		if !querybuilder.IsZeroValue(opts[i].From) {
+			q = q.Arg("from", opts[i].From)
 		}
 		// `workdir` optional argument
 		if !querybuilder.IsZeroValue(opts[i].Workdir) {
