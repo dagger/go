@@ -4,13 +4,14 @@ set -euo pipefail
 module_source=$(cd "$(dirname "$0")/.." && pwd)
 probe=$(mktemp -d)
 dagger_bin=${DAGGER_BIN:-dagger}
+module_name=${MODULE_NAME:-go}
 trap 'result=$?; if [ "$result" -eq 0 ] && [ "${KEEP_ULTRABATCH_FIXTURE:-0}" != 1 ]; then rm -rf "$probe"; else printf "Fixture and logs: %s\n" "$probe"; fi' EXIT
 
-python3 - "$probe" "$module_source" <<'PY'
+python3 - "$probe" "$module_source" "$module_name" <<'PY'
 import json, sys
 from pathlib import Path
 root=Path(sys.argv[1])
-(root/'dagger.toml').write_text('[modules.go]\nsource = '+json.dumps(sys.argv[2])+'\n')
+(root/'dagger.toml').write_text('[modules.'+sys.argv[3]+']\nsource = '+json.dumps(sys.argv[2])+'\n')
 for module in ['m1','m2']:
     p=root/module;p.mkdir()
     (p/'go.mod').write_text(f'module example.com/{module}\n\ngo 1.26.1\n')
@@ -21,9 +22,25 @@ for module in ['m1','m2']:
 PY
 git -C "$probe" init -q
 cd "$probe"
-selection=(--go-package=m1/p1 --go-package=m1/p2 --go-package=m2/p1 --go-package=m2/p2 --go-test=TestFoo --go-test=TestBar)
+selection=("--$module_name-package=m1/p1" "--$module_name-package=m1/p2" "--$module_name-package=m2/p1" "--$module_name-package=m2/p2" "--$module_name-test=TestFoo" "--$module_name-test=TestBar")
 "$dagger_bin" check "${selection[@]}" >pass.stdout 2>pass.stderr
 grep -q '8 passed' pass.stderr
+
+# A cached module index must not retain an earlier package or test selection.
+if "$dagger_bin" check "--$module_name-package=m1/p1" "--$module_name-test=TestOther" >other.stdout 2>other.stderr; then
+    echo 'Expected the newly selected test to fail' >&2; exit 1
+fi
+grep -q '1 failed' other.stderr
+grep -q 'excluded test ran' other.stderr
+"$dagger_bin" check "--$module_name-package=m1/unused" "--$module_name-test=TestFoo" >changed-selection.stdout 2>changed-selection.stderr
+grep -q '1 passed' changed-selection.stderr
+"$dagger_bin" check "${selection[@]}" >repeat.stdout 2>repeat.stderr
+grep -q '8 passed' repeat.stderr
+
+# A source change must invalidate the cached index, including new names.
+printf '\nfunc TestAdded(t *testing.T) {}\n' >>m1/p1/tests_test.go
+"$dagger_bin" check "--$module_name-package=m1/p1" "--$module_name-test=TestAdded" >added.stdout 2>added.stderr
+grep -q '1 passed' added.stderr
 
 python3 - <<'PY'
 from pathlib import Path

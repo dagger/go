@@ -550,6 +550,28 @@ type GoMod {
   """
   goFiles: [String!]
 
+  """
+  Source declarations of test, fuzz and example functions under this module,
+  encoded as JSON records with filePath and matchedLines. Build constraints
+  are not evaluated. Callers select the records for each package directory.
+
+  The engine caches this scalar result, including the search-result fields,
+  so independent checks can reuse discovery without reading each field again.
+  """
+  testFunctions(ws: Workspace!): String! {
+    let matches = ws.search(
+      paths: [if (path == ".") { "/" } else { "/" + path }],
+      globs: ["*_test.go"],
+      pattern: `^func (Test([^a-z(]\w*)?\(\s*\w+\s+\*testing\.T\s*\)|Fuzz([^a-z(]\w*)?\(\s*\w+\s+\*testing\.F\s*\)|Example([^a-z(]\w*)?\(\s*\))`,
+    ).{{filePath, matchedLines}}.map { match =>
+      {{
+        filePath: match.filePath.trimPrefix("/").trimPrefix("./"),
+        matchedLines: match.matchedLines
+      }}
+    }
+    JSON.encode(matches)
+  }
+
   # This module with its Go files set.
   let withGoFiles(files: [String!]!): GoMod! {
     GoMod(path: path, includeExtraFiles: includeExtraFiles, goFiles: files)

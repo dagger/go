@@ -607,9 +607,7 @@ type GoPackage {
   Tests in this package, keyed by name.
   """
   tests(ws: Workspace!): GoTests! {
-    let mod = module(ws)
-    let dir = mod.relativeDir(path)
-    GoTests(names: mod.testNames(ws, dir), directory: dir, module: mod)
+    module(ws).testsInPackage(ws, path)
   }
 
   """
@@ -1007,59 +1005,45 @@ type GoModule {
     }
   }
 
-  # Test, fuzz and example names in one package directory, found by searching
-  # the source rather than asking go test, and without the scanner, so listing
-  # them runs no container. Build constraints are not evaluated: a test
-  # excluded by one is still listed, and selecting it runs nothing. Files are
-  # taken in byte order, so the keys, and the -run pattern built from them, are
-  # stable.
+  # The caller already knows the owning module. Keep that instance while
+  # traversing packages so its discovery and configuration are reused.
+  let testsInPackage(ws: Workspace!, pkgPath: String!): GoTests! {
+    let dir = relativeDir(pkgPath)
+    GoTests(names: testNames(ws, dir), directory: dir, module: self)
+  }
+
+  # The engine caches the module-wide index in gomod. Reading one value
+  # avoids repeating workspace globs and one API read per search-result field
+  # in every item check. Build constraints are intentionally not evaluated.
   let testNames(ws: Workspace!, dir: String!): [String!]! {
     let empty: [String!]! = []
-    # Only the package's own directory is listed: a package is never a nested
-    # module's root or under testdata, so its files are all this module's.
-    let pkgPath = packagePath(dir)
-    let files = if (skipTest) {
+    if (skipTest) { empty } else { namesFromIndex(testMatches(ws), dir) }
+  }
+
+  let namesFromIndex(
+    index: [{{filePath: String!, matchedLines: String!}}!]!,
+    dir: String!,
+  ): [String!]! {
+    let empty: [String!]! = []
+    if (skipTest) {
       empty
     } else {
-      sorted(
-        ws
-          .glob(if (pkgPath == ".") { "*_test.go" } else { pkgPath + "/*_test.go" })
-          .filter { file => file.hasSuffix("/") == false }
-          .map { file => file.trimPrefix("/").trimPrefix("./") },
-      )
-    }
-    if (files.length == 0) {
-      empty
-    } else {
-      # One search over the module tree, matched back to the package's files
-      # below. The search is the same for every package, so it runs once.
-      # Searching a subdirectory or the files by name would be narrower, but
-      # fails on a workspace built with withDirectory.
-      let matches = testMatches(ws)
-      files
-        .reduce(empty) { names, file =>
-          names + matches
-            .filter { match => match.filePath.trimPrefix("/").trimPrefix("./") == file }
-            .map { match =>
-              match.matchedLines.trimPrefix("func ").split("(").takeFirst(1).join("")
-            }
+      let pkgPath = packagePath(dir)
+      let matches = index.filter { match =>
+        let parent = match.filePath.split("/").dropLast(1).join("/")
+        (if (parent == "") { "." } else { parent }) == pkgPath
+      }
+      let files = sorted(matches.map { match => match.filePath }.uniq)
+      files.reduce(empty) { names, file =>
+        names + matches.filter { match => match.filePath == file }.map { match =>
+          match.matchedLines.trimPrefix("func ").split("(").takeFirst(1).join("")
         }
-        .uniq
+      }.uniq
     }
   }
 
-  # Test, fuzz and example function lines in this module's tree.
   let testMatches(ws: Workspace!): [{{filePath: String!, matchedLines: String!}}!]! {
-    ws.search(
-      paths: [if (path == ".") { "/" } else { "/" + path }],
-      globs: ["*_test.go"],
-      pattern: testFunctionPattern,
-    ).{{filePath, matchedLines}}
-  }
-
-  # A test, fuzz or example function declaration.
-  let testFunctionPattern: String! {
-    `^func (Test([^a-z(]\w*)?\(\s*\w+\s+\*testing\.T\s*\)|Fuzz([^a-z(]\w*)?\(\s*\w+\s+\*testing\.F\s*\)|Example([^a-z(]\w*)?\(\s*\))`
+    JSON.decode(lib.at(path).testFunctions(ws)) :: [{{filePath: String!, matchedLines: String!}}!]!
   }
 
   # Byte-order sort, as Go's sort.Strings: a merge sort, n log n comparisons.
@@ -1289,7 +1273,11 @@ type GoModule {
   """
   let runTests(ws: Workspace!): GoTestResults! {
     let packages = self.packages(ws)
-    let discovered = packages.paths.map { pkg => packages.package(pkg).tests(ws) }
+    let index = testMatches(ws)
+    let discovered = packages.paths.map { pkg =>
+      let dir = relativeDir(pkg)
+      GoTests(names: namesFromIndex(index, dir), directory: dir, module: self)
+    }
     let selected = discovered.filter { tests => tests.names.length > 0 }
     if (selected.length == 0) { raise "no tests selected in module " + path }
     let empty: [String!]! = []
