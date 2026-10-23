@@ -1,3 +1,6 @@
+> This experimental branch requires dagger/dagger PR 14802 with the local Dang
+> collection-view fix. It shares test execution across packages in each Go module.
+
 # go
 
 [Dagger](https://dagger.io) modules for Go tooling, written in the `.dang`
@@ -55,13 +58,14 @@ within each module or by their workspace path.
 
 | Function              | Description                                                   |
 | --------------------- | ------------------------------------------------------------- |
-| `packages`            | Packages discovered from the workspace, as a collection.      |
-| `modules`             | Modules discovered from the workspace, as a list.             |
+| `packages`            | Manual package operations across the workspace.               |
+| `modules`             | Go module collection, keyed by workspace-relative root.       |
+| `module-list`         | Module inspection with include/exclude options.               |
 | `module`              | The module containing a workspace path.                       |
 
 On a package: `tests`, `binary`, `platforms` and `generate`.
 
-On a module: `test`, `generate`, `skip-test`, `skip-generate`,
+On a module: `packages`, `test`, `generate`, `skip-test`, `skip-generate`,
 `has-generate-directives`, `generate-directories`, `base`, `include`,
 `include-base`, `include-discovered`, `source`, `test-data`.
 
@@ -94,9 +98,9 @@ it is mounted at `/src`.
 
 #### Packages
 
-`packages` is the collection to select on. It is keyed by package directory
-relative to the workspace root, e.g. `sdk/go/cmd/dagger`, which adds a
-`go-package` dimension. A directory is a package key when it has something to
+`modules` is a collection keyed by module root (`go-module`). Each module's
+`packages` collection is keyed by package directory relative to the workspace
+root, e.g. `sdk/go/cmd/dagger`, which adds a `go-package` dimension. A directory is a package key when it has something to
 do: tests to run, a `main` package to build, or `go:generate` commands to run.
 Each package's tests are a collection too, keyed by function name, which adds
 `go-test`.
@@ -117,20 +121,31 @@ lists the flags in effect.
 
 Packages are found in the Go modules at or below the workspace cwd, plus the
 enclosing module when the cwd is inside one, so `dagger -W ./sdk/go check`
-scopes every tool to that module without a flag. Modules are not a dimension:
-they decide how a package is mounted and which Go toolchain it gets, and
-`modules` and `module` remain for inspecting that. `include`/`exclude` filter
-the module roots `modules` finds; pass `findUp: false` to `module` when the
-path is already a module root.
+scopes every tool to that module without a flag. Use `--go-module=sdk/go` to
+select a module explicitly. `module-list` retains the include/exclude inspection
+options; pass `findUp: false` to `module` when the path is already a module root.
+The root `packages` helper retains manual get/subset/build/generate operations,
+but is not a collection and creates no second artifact path.
 
 #### Tests
 
-Tests run once per selected package, through the `GoTests` batch `test`. With
-every test in the package selected it runs `go test ./pkg`; with some filtered
-out it runs `go test -run` over the selected names. A test name in two packages
-is two keys, so `--go-test` alone selects both and `--go-package` picks one.
-Collections never batch across parent items, so packages run as separate
-execs, not one `go test ./...` per module.
+Each selected test has its own check. All checks in a Go module call the same
+helper, which runs one `otelgotest -json` command and returns a shared report.
+The engine deduplicates identical container operations. Separate modules use
+separate commands and their own toolchains.
+
+The helper reads the filtered package and test collections. A partial selection
+uses explicit package arguments and an anchored `-run` pattern. Packages without
+a selected test are omitted. With no keys removed, the command runs `./...`
+without `-run`. A test name in two packages selects both; `--go-package` narrows
+that selection.
+
+A failed test fails its own check. A package that fails to build fails its selected
+tests. Passing tests in other packages still pass. Logs and test spans belong to
+the check that starts the shared command; other checks share its result.
+
+`GoTests.test` remains a manual package helper, without a check marker. It does
+not replace individual checks. There is no `.batch` namespace.
 
 Test names come from searching the package's `_test.go` files for
 `func TestXxx(t *testing.T)`, `func FuzzXxx(f *testing.F)` and
@@ -146,15 +161,14 @@ check` does not run the same tests twice.
 
 `binary` on a package returns its binary for the engine's platform. Only a
 `main` package selected by the `build` setting has one; any other package
-fails, naming itself. The `GoPackages` batch `binary` compiles the selected
+fails, naming itself. The `GoPackages.binary` helper compiles the selected
 `main` packages with one `go build` per module, skips the rest, and returns one
 directory of binaries.
 
 A binary is named as `go build` names it: after the last element of the
 package's import path, or the one before when that is a major version such as
 `v2`. A module's root package takes its name from the module path in `go.mod`.
-Names can collide, as `cmd/foo` and `tools/foo` both build `foo`: the batch
-`binary` refuses such a pair and names both packages, while a single package's
+Names can collide, as `cmd/foo` and `tools/foo` both build `foo`: the `binary` helper refuses such a pair and names both packages, while a single package's
 `binary` does not mind.
 
 A directory is a `main` package when one of its own non-test `.go` files says
@@ -183,14 +197,14 @@ Go toolchain supports is a key (`gomod`'s `go-platforms`). Each platform's
 container with `GOOS` and `GOARCH` set; nothing is emulated. Windows binaries
 end in `.exe`.
 
-The `GoPlatforms` batch `binary` returns one subdirectory per platform, e.g.
+The `GoPlatforms.binary` helper returns one subdirectory per platform, e.g.
 `linux-amd64/`, `windows-amd64/`:
 
 - With no platform selected, it builds for the engine's platform only, e.g.
   `linux/arm64`.
 - With platforms selected, it builds for exactly those.
 
-The batch tells the two apart by its delta: an unnarrowed collection means no
+The helper tells the two apart by its delta: an unnarrowed collection means no
 platform was asked for. So selecting every platform explicitly looks the same
 as selecting none, and builds only the engine's. A single platform's `binary`
 has no such default; it builds for its own key.
@@ -221,15 +235,11 @@ For example: `["sdk/go/engineconn", "internal/**", "!internal/fixtures/**"]`.
 `go:generate:include` alone is not one. Each such directory is a package with a
 `generate` generator and its `stale` check.
 
-A package's own `generate` runs alone, against the committed source. The
-`GoPackages` batch `generate` replaces it and runs the selected packages
-together, per module, in lexical path order, each seeing the output of the ones
-before it: with every package selected, that is `go generate ./...` for each
-module. So a generator that reads another package's generated output sees it
-when the two are generated together, and sees the committed version when its
-package is generated alone. Modules run independently and cross-module
-dependencies are not inferred; use an explicit coordinating command when
-generators need a different order.
+A package's `generate` runs against the committed source. Collection-level
+`generate` is now an ordinary helper; it does not replace item generators.
+Calling that helper explicitly runs its selected packages in lexical order,
+each seeing the preceding output. Modules run independently. Use an explicit
+coordinating call when generators require an order.
 
 A directory can pick the container its generators run in with
 `//go:generate:container`, resolved with the caller's `Workspace.resolve` — a
@@ -241,7 +251,7 @@ see earlier output. Without the directive, the directory uses the module's own
 base container.
 
 A package's own `generate` fails when the scan could not read its module,
-naming the file, while the batch `generate` skips that module (see below).
+naming the file, while the manual `generate` helper skips that module (see below).
 
 Tests run with a nested Dagger engine, so a suite that drives Dagger works.
 
@@ -408,9 +418,9 @@ message about it names the module already.
 the workspace, so a module with an unreadable `go.mod` or a Go file that will
 not parse records the reason against itself and the pass carries on. Anything
 that needs that module's sources raises the reason, which names the file;
-everything else is unaffected. The batch `test` reports it beside the modules
-that passed, and the batch `generate` — which has to ask every selected module
-whether it holds generators — gets an answer rather than an error. Failing the
+everything else is unaffected. Test checks report their own failures. The manual
+`generate` helper can ask each selected module whether it holds generators and
+receive an answer rather than an error. Failing the
 whole scan instead would let one bad file stop every check in the repository,
 including for modules you had excluded.
 
@@ -435,15 +445,15 @@ the root serve every module, with a `.golangci.yml` in the ones golangci-lint
 lints. A tool keeps its own only when the fixture is specific to it —
 `golangci-lint/testdata/projects` fails under any configuration but the one
 each part is meant to get, and `golangci-lint/testdata/go-module-lint-fail`
-does not compile, so neither can live where `go`'s batch `test` would find it.
+does not compile, so neither can live where `go`'s module test helper would find it.
 
 ## Known problem: only one failure is reported
 
 A batch of three failing projects reports one failure, not three. The lint
 modules aggregate results into a directory and sync it, and the first error
 stops every later report; you repair one project, run again, and find the next.
-`go`'s batch `test` does not have this shape — it collects each module's failure
-and names them all.
+`go` reads the shared JSON report separately for each test check, so each failed
+test has its own result.
 
 The obvious repair for the lint modules — collecting exit codes rather than
 merging outputs — does report all three, but it loses the parallel run. Dang
@@ -452,11 +462,15 @@ once, in Dang, rather than twice here.
 
 ## Development
 
-One command runs all four suites:
+The Go changes can be checked with:
 
 ```sh
-dagger check
+dagger check -m .dagger/modules/go-dev
+DAGGER_BIN=/path/to/patched/dagger bash tests/ultrabatch.sh
 ```
+
+The lint suites still use the old batch API and need a separate migration for
+PR 14802.
 
 The root `dagger.toml` installs `go`'s suite as the entrypoint and each other
 suite under a `<tool>-checks` key, which prefixes its checks. Every module needs
@@ -496,3 +510,9 @@ Two differences are worth knowing before you switch:
 - A bare scan no longer implies test inputs. The standalone modules were
   embed-only in practice, so this changes nothing about what they mounted, but
   the flag now says so.
+
+### Filtered-view regression
+
+Run `DAGGER_BIN=/path/to/patched/dagger bash tests/ultrabatch.sh` to check two
+modules with multiple packages, excluded tests, isolated test failures, and
+package build failures. The command must use the patched PR engine.
