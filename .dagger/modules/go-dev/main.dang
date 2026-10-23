@@ -809,6 +809,24 @@ type GoDev {
   }
 
   """
+  A cgo main package in a module below the workspace root builds and runs:
+  the standard library's cgo packages build in execs that hold no project
+  directory, and the plan's change back to the build's directory, which
+  their steps don't need, doesn't go with them.
+  """
+  cgoSubmoduleCheck: Void @check {
+    let source = directory
+      .withNewFile("sub/go.mod", "module example.com/sub\n\ngo 1.26.1\n")
+      .withNewFile("sub/main.go", "package main\n\n// #define V 7\nimport \"C\"\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(C.V) }\n")
+    let ws = source.asWorkspace
+    let base = cgoCxxBase.withEnvVariable("CGO_ENABLED", "1")
+    let built = go(base: base).packages(ws).get(key: "sub").binary(ws)
+    let out = base.withFile("/usr/local/bin/sub", built).withExec(["sub"]).stdout
+    assert(out == "7\n", "the cgo binary in a module below the root: " + out)
+    null
+  }
+
+  """
   A cgo package with no //export builds as a C archive or shared library as
   plain go build builds it, byte for byte but for its build IDs, and with no
   C header beside it: cgo writes none, and go build installs none.
