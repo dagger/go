@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path"
 	"slices"
@@ -13,11 +14,16 @@ import (
 )
 
 type testSuite struct {
-	Packages []testPackage
-	Args     []string
-	Parallel int
+	Packages   []testPackage
+	Args       []string
+	Parallel   int
+	GoTestArgs []string
+	Dir        string
 }
-type testPackage struct{ Package, Binary, Dir, Error string }
+type testPackage struct {
+	Package, Binary, Dir, Error string
+	Skip                        bool
+}
 
 // TestSuite builds selected packages with the same cached compile steps as
 // TestBinary. Its directory holds binaries and an otelgotest manifest. Run it
@@ -48,6 +54,17 @@ func (m *Gobuild) TestSuite(
 		return nil, err
 	}
 	args, parallel, err := suiteFlags(flags)
+	if errors.Is(err, errSuiteOptions) {
+		args := slices.Clone(packages)
+		if runPattern != "" {
+			args = append([]string{"-run", runPattern}, args...)
+		}
+		data, marshalErr := json.Marshal(testSuite{GoTestArgs: args, Dir: path.Join(mountPath, workdir)})
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		return dag.Directory().WithNewFile("manifest.json", string(data)), nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -74,7 +91,11 @@ func (m *Gobuild) TestSuite(
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			entry.Error = buildErr.Error()
+			if errors.Is(buildErr, errNoTestBinary) {
+				entry.Skip = true
+			} else {
+				entry.Error = buildErr.Error()
+			}
 		} else {
 			out = out.WithFile(binary, file)
 		}
@@ -89,6 +110,8 @@ func (m *Gobuild) TestSuite(
 
 // Build flags stay on the build container. Only testing flags are passed to
 // binaries. GOFLAGS uses -flag=value, so quoting is handled before this step.
+var errSuiteOptions = errors.New("options require go test orchestration")
+
 func suiteFlags(flags []string) ([]string, int, error) {
 	var args []string
 	parallel := 0
@@ -107,9 +130,13 @@ func suiteFlags(flags []string) ([]string, int, error) {
 			if err != nil || parallel < 1 {
 				return nil, 0, fmt.Errorf("invalid -p value %q", value)
 			}
+		case "compiler":
+			if value == "gccgo" {
+				return nil, 0, errSuiteOptions
+			}
 		case "v", "json": // The runner always requests test2json framing.
 		case "exec", "fuzz", "fuzztime", "fuzzminimizetime", "coverprofile", "outputdir", "cpuprofile", "memprofile", "memprofilerate", "blockprofile", "blockprofilerate", "mutexprofile", "mutexprofilefraction", "trace", "list", "failfast":
-			return nil, 0, fmt.Errorf("prebuilt test batches do not support -%s; use GoModule.test for this option", name)
+			return nil, 0, fmt.Errorf("%w: -%s", errSuiteOptions, name)
 		}
 	}
 	return args, parallel, nil

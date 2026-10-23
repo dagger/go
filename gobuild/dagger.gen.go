@@ -421,29 +421,29 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 						dag.Function("TestBinary",
 							dag.TypeDef().WithObject("File")).
 							WithDescription("TestBinary builds the test binary of package pkg as \"go test -c\" would,\none exec per package as Binary builds a binary: the package compiled with\nits test files, its external test package, the packages it is imported\nthrough recompiled against it, and the test main the go command writes,\nlinked. Unlike go test -c, it does not run go vet, which is left to the\nlint checks. The binary's Go build ID is a hash of what its link reads,\nnot the one go test computes.").
-							WithSourceMap(dag.SourceMap("main.go", 100, 1)).
-							WithArg("base", dag.TypeDef().WithObject("Container"), dagger.FunctionWithArgOpts{Description: "The Go container to build in, as for Binary.", SourceMap: dag.SourceMap("main.go", 103, 2)}).
-							WithArg("image", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{Description: "The image base was made from, as for Binary.", SourceMap: dag.SourceMap("main.go", 106, 2)}).
-							WithArg("source", dag.TypeDef().WithObject("Directory"), dagger.FunctionWithArgOpts{Description: "The source tree, with the package's test files.", SourceMap: dag.SourceMap("main.go", 108, 2)}).
-							WithArg("headers", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{Description: "The header pack of source's Go files, test files included, and go.mod\nfiles, from the go module's scan.", SourceMap: dag.SourceMap("main.go", 111, 2)}).
-							WithArg("mountPath", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{Description: "Where source is mounted.", SourceMap: dag.SourceMap("main.go", 113, 2)}).
-							WithArg("workdir", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{Description: "The directory to run go test in, relative to mountPath.", SourceMap: dag.SourceMap("main.go", 116, 2), DefaultValue: dagger.JSON("\".\"")}).
-							WithArg("pkg", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{Description: "The go test package argument, e.g. \".\" or \"./pkg/foo\".", SourceMap: dag.SourceMap("main.go", 118, 2)}).
-							WithArg("flags", dag.TypeDef().WithListOf(dag.TypeDef().WithKind(dagger.TypeDefKindStringKind)).WithOptional(true), dagger.FunctionWithArgOpts{Description: "Flags for go test -c, before the package, e.g. -race or -ldflags.", SourceMap: dag.SourceMap("main.go", 121, 2)})).
+							WithSourceMap(dag.SourceMap("main.go", 102, 1)).
+							WithArg("base", dag.TypeDef().WithObject("Container"), dagger.FunctionWithArgOpts{Description: "The Go container to build in, as for Binary.", SourceMap: dag.SourceMap("main.go", 105, 2)}).
+							WithArg("image", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{Description: "The image base was made from, as for Binary.", SourceMap: dag.SourceMap("main.go", 108, 2)}).
+							WithArg("source", dag.TypeDef().WithObject("Directory"), dagger.FunctionWithArgOpts{Description: "The source tree, with the package's test files.", SourceMap: dag.SourceMap("main.go", 110, 2)}).
+							WithArg("headers", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{Description: "The header pack of source's Go files, test files included, and go.mod\nfiles, from the go module's scan.", SourceMap: dag.SourceMap("main.go", 113, 2)}).
+							WithArg("mountPath", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{Description: "Where source is mounted.", SourceMap: dag.SourceMap("main.go", 115, 2)}).
+							WithArg("workdir", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{Description: "The directory to run go test in, relative to mountPath.", SourceMap: dag.SourceMap("main.go", 118, 2), DefaultValue: dagger.JSON("\".\"")}).
+							WithArg("pkg", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{Description: "The go test package argument, e.g. \".\" or \"./pkg/foo\".", SourceMap: dag.SourceMap("main.go", 120, 2)}).
+							WithArg("flags", dag.TypeDef().WithListOf(dag.TypeDef().WithKind(dagger.TypeDefKindStringKind)).WithOptional(true), dagger.FunctionWithArgOpts{Description: "Flags for go test -c, before the package, e.g. -race or -ldflags.", SourceMap: dag.SourceMap("main.go", 123, 2)})).
 					WithFunction(
 						dag.Function("TestSuite",
 							dag.TypeDef().WithObject("Directory")).
-							WithDescription("TestSuite builds selected packages with the same cached compile steps as\nTestBinary. Its directory holds binaries and an otelgotest manifest. Run it\nat outputPath, with the source and testdata mounted at mountPath. Build\nfailures remain per-package results, so unrelated tests can still run.\nAs with TestBinary, vet is left to lint checks.").
-							WithSourceMap(dag.SourceMap("testsuite.go", 27, 1)).
-							WithArg("base", dag.TypeDef().WithObject("Container"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 29, 2)}).
-							WithArg("source", dag.TypeDef().WithObject("Directory"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 30, 2)}).
-							WithArg("headers", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 31, 2)}).
-							WithArg("mountPath", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 32, 2)}).
-							WithArg("workdir", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 33, 2)}).
-							WithArg("modulePath", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 34, 2)}).
-							WithArg("packages", dag.TypeDef().WithListOf(dag.TypeDef().WithKind(dagger.TypeDefKindStringKind)), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 35, 2)}).
-							WithArg("image", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 37, 2)}).
-							WithArg("runPattern", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{Description: "A test selection, expressed as go test's -run regular expression.", SourceMap: dag.SourceMap("testsuite.go", 40, 2)}))), nil
+							WithDescription("TestSuite builds selected packages with the same cached compile steps as\nTestBinary. Its directory holds binaries and an otelgotest manifest. Run it\nwith the source and testdata mounted at mountPath. Build\nfailures remain per-package results, so unrelated tests can still run.\nAs with TestBinary, vet is left to lint checks.").
+							WithSourceMap(dag.SourceMap("testsuite.go", 33, 1)).
+							WithArg("base", dag.TypeDef().WithObject("Container"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 35, 2)}).
+							WithArg("source", dag.TypeDef().WithObject("Directory"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 36, 2)}).
+							WithArg("headers", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 37, 2)}).
+							WithArg("mountPath", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 38, 2)}).
+							WithArg("workdir", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 39, 2)}).
+							WithArg("modulePath", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 40, 2)}).
+							WithArg("packages", dag.TypeDef().WithListOf(dag.TypeDef().WithKind(dagger.TypeDefKindStringKind)), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 41, 2)}).
+							WithArg("image", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 43, 2)}).
+							WithArg("runPattern", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{Description: "A test selection, expressed as go test's -run regular expression.", SourceMap: dag.SourceMap("testsuite.go", 46, 2)}))), nil
 	default:
 		return nil, fmt.Errorf("unknown object %s", parentName)
 	}
