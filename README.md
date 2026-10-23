@@ -134,6 +134,11 @@ helper, which runs one `otelgotest -json` command and returns a shared report.
 The engine deduplicates identical container operations. Separate modules use
 separate commands and their own toolchains.
 
+Test discovery uses a module-wide index cached by `gomod`. It includes the
+search-result fields, so each check can select test names locally without
+repeating workspace globs or fetching each result field from the engine.
+Selection still applies separately for each filtered view.
+
 The helper reads the filtered package and test collections. A partial selection
 uses explicit package arguments and an anchored `-run` pattern. Packages without
 a selected test are omitted. With no keys removed, the command runs `./...`
@@ -467,6 +472,7 @@ The Go changes can be checked with:
 ```sh
 dagger check -m .dagger/modules/go-dev
 DAGGER_BIN=/path/to/patched/dagger bash tests/ultrabatch.sh
+MODULE_NAME=golang DAGGER_BIN=/path/to/patched/dagger bash tests/ultrabatch.sh
 ```
 
 The lint suites still use the old batch API and need a separate migration for
