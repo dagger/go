@@ -525,17 +525,17 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 					WithFunction(
 						dag.Function("TestSuite",
 							dag.TypeDef().WithObject("Directory")).
-							WithDescription("TestSuite builds selected packages with the same cached compile steps as\nTestBinary. Its directory holds binaries and an otelgotest manifest. Run it\nat outputPath, with the source and testdata mounted at mountPath. Build\nfailures remain per-package results, so unrelated tests can still run.\nAs with TestBinary, vet is left to lint checks.").
-							WithSourceMap(dag.SourceMap("testsuite.go", 27, 1)).
-							WithArg("base", dag.TypeDef().WithObject("Container"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 29, 2)}).
-							WithArg("source", dag.TypeDef().WithObject("Directory"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 30, 2)}).
-							WithArg("headers", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 31, 2)}).
-							WithArg("mountPath", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 32, 2)}).
-							WithArg("workdir", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 33, 2)}).
-							WithArg("modulePath", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 34, 2)}).
-							WithArg("packages", dag.TypeDef().WithListOf(dag.TypeDef().WithKind(dagger.TypeDefKindStringKind)), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 35, 2)}).
-							WithArg("image", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 37, 2)}).
-							WithArg("runPattern", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{Description: "A test selection, expressed as go test's -run regular expression.", SourceMap: dag.SourceMap("testsuite.go", 40, 2)}))), nil
+							WithDescription("TestSuite builds selected packages with the same cached compile steps as\nTestBinary. Its directory holds binaries and an otelgotest manifest. Run it\nwith the source and testdata mounted at mountPath. Build\nfailures remain per-package results, so unrelated tests can still run.\nAs with TestBinary, vet is left to lint checks.").
+							WithSourceMap(dag.SourceMap("testsuite.go", 33, 1)).
+							WithArg("base", dag.TypeDef().WithObject("Container"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 35, 2)}).
+							WithArg("source", dag.TypeDef().WithObject("Directory"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 36, 2)}).
+							WithArg("headers", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 37, 2)}).
+							WithArg("mountPath", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 38, 2)}).
+							WithArg("workdir", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 39, 2)}).
+							WithArg("modulePath", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 40, 2)}).
+							WithArg("packages", dag.TypeDef().WithListOf(dag.TypeDef().WithKind(dagger.TypeDefKindStringKind)), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 41, 2)}).
+							WithArg("image", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 43, 2)}).
+							WithArg("runPattern", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{Description: "A test selection, expressed as go test's -run regular expression.", SourceMap: dag.SourceMap("testsuite.go", 46, 2)}))), nil
 	default:
 		return nil, fmt.Errorf("unknown object %s", parentName)
 	}

@@ -93,6 +93,8 @@ func (m *Gobuild) Binary(
 	return out, nil
 }
 
+var errNoTestBinary = errors.New("build constraints leave no test binary")
+
 // TestBinary builds the test binary of package pkg as "go test -c" would,
 // one exec per package as Binary builds a binary: the package compiled with
 // its test files, its external test package, the packages it is imported
@@ -284,6 +286,11 @@ func run(ctx context.Context, base *dagger.Container, image string, from *dagger
 	plan, weights, cc, goDirs, err := b.plan(ctx, headers, flags, pkg, test)
 	if err != nil {
 		return nil, nil, err
+	}
+	// A successful go test -c plan with no test linker means that build
+	// constraints left the package with no test files.
+	if test && !reTestLinkOut.MatchString(plan) {
+		return nil, nil, errNoTestBinary
 	}
 	blocks, err := parsePlan(plan, b.roots)
 	if err != nil {

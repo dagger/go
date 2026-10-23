@@ -1235,7 +1235,7 @@ type GoModule {
     gomod
       .toolBuilder
       .withEnvVariable("GOBIN", "/usr/local/bin")
-      .withExec(["go", "install", "github.com/dagger/otel-go/cmd/otelgotest@173d98fb92b4bad4b61c560db0a6503e617c6b2a"])
+      .withExec(["go", "install", "github.com/dagger/otel-go/cmd/otelgotest@2e5dc24e7c79c677dad50ff6635e1d33f70ee61e"])
       .file("/usr/local/bin/otelgotest")
   }
 

@@ -264,7 +264,7 @@ type GobuildTestSuiteOpts struct {
 
 // TestSuite builds selected packages with the same cached compile steps as
 // TestBinary. Its directory holds binaries and an otelgotest manifest. Run it
-// at outputPath, with the source and testdata mounted at mountPath. Build
+// with the source and testdata mounted at mountPath. Build
 // failures remain per-package results, so unrelated tests can still run.
 // As with TestBinary, vet is left to lint checks.
 func (r *Gobuild) TestSuite(base *Container, source *Directory, headers *File, mountPath string, workdir string, modulePath string, packages []string, opts ...GobuildTestSuiteOpts) *Directory {

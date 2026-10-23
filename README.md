@@ -158,8 +158,8 @@ The runner uses the module's `go tool test2json`, keeps package parallelism,
 and forwards runtime GOFLAGS such as `-count`, `-timeout`, `-short`, and `-run`.
 Build GOFLAGS such as `-race` and `-tags` apply to compilation. As with
 `testBinary`, vet belongs to the lint checks. Profile aggregation, fuzzing,
-`-exec`, `-list`, and batch-wide `-failfast` are not supported in this mode;
-use the manual module `test` function for those options. The pinned runner is
+`-exec`, `-list`, batch-wide `-failfast`, and gccgo use the ordinary
+`go test` path instead, so their Go command behavior stays intact. The pinned runner is
 installed for batch checks even when the custom base contains an older runner.
 
 `GoTests.test` remains a manual package helper, without a check marker. It does
