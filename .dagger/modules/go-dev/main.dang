@@ -854,6 +854,35 @@ type GoDev {
   }
 
   """
+  A cgo or assembly package in the source #includes files from elsewhere in
+  it, which no plan line names: outside its module, of names no pattern
+  covers, that the caller adds with includeExtraFiles, and in directories
+  named like Go files, inside and outside its module. The package's exec has
+  them, and the binary runs.
+  """
+  srcIncludesCheck: Void @check {
+    let ws = directory
+      .withNewFile("native/defs.inc", "#define CGO_BASE 40\n")
+      .withNewFile("native/asm.inc", "#define ASM_VALUE $7\n")
+      .withNewFile("hdr.go/extra.h", "#define CGO_EXTRA 2\n")
+      .withNewFile("app/go.mod", "module example.com/srcinc\n\ngo 1.25\n")
+      .withNewFile("app/inc.go/sub.go/m[1].h", "#define CGO_MORE 0\n")
+      .withNewFile("app/inc.go/unused.go", "package unused\n\nfunc F() int { return 1 }\n")
+      .withNewFile("app/cgo/value.go", "package cgo\n\n// #include \"../../native/defs.inc\"\n// #include \"../../hdr.go/extra.h\"\n// #include \"../inc.go/sub.go/m[1].h\"\n// static int value(void) { return CGO_BASE + CGO_EXTRA + CGO_MORE; }\nimport \"C\"\n\nfunc Value() int { return int(C.value()) }\n")
+      .withNewFile("app/asm/value_amd64.go", "package asm\n\nfunc Value() int64\n")
+      .withNewFile("app/asm/value_amd64.s", "#include \"textflag.h\"\n#include \"../../native/asm.inc\"\n\nTEXT ·Value(SB), NOSPLIT, $0-8\n\tMOVQ ASM_VALUE, AX\n\tMOVQ AX, ret+0(FP)\n\tRET\n")
+      # Elsewhere than amd64 the assembly, and what it includes, isn't built.
+      .withNewFile("app/asm/value_other.go", "//go:build !amd64\n\npackage asm\n\nfunc Value() int64 { return 7 }\n")
+      .withNewFile("app/main.go", "package main\n\nimport (\n\t\"fmt\"\n\n\t\"example.com/srcinc/asm\"\n\t\"example.com/srcinc/cgo\"\n)\n\nfunc main() { fmt.Println(cgo.Value(), asm.Value()) }\n")
+      .asWorkspace
+    let base = cgoCxxBase.withEnvVariable("CGO_ENABLED", "1")
+    let built = go(base: base, includeExtraFiles: ["native/**", "hdr.go/**"]).packages(ws).get(key: "app").binary(ws)
+    let out = base.withFile("/usr/local/bin/srcinc", built).withExec(["srcinc"]).stdout
+    assert(out == "42 7\n", "the source's included values: " + out)
+    null
+  }
+
+  """
   A cgo main package builds with -cover as plain go build -cover builds it,
   byte for byte but for its build IDs, and runs: go hands the cgo tool the
   cover tool's output from its work directory.

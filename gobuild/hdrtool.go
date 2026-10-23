@@ -4,7 +4,8 @@ import "dagger/gobuild/internal/dagger"
 
 // hdrTool builds gohdr, the helper's in-container tool. "gohdr unpack" writes
 // out a header pack, the go module's scan of each Go file up to the end of its
-// imports, for the plan. "gohdr weigh" weighs the plan's steps by the Go
+// imports, for the plan, and can list the pack's Go files in directories named
+// like Go files. "gohdr weigh" weighs the plan's steps by the Go
 // source they compile. "gohdr cc" answers the plan's C compiler probes.
 // "gohdr linkid" makes a link's build ID. "gohdr modunzip" extracts a
 // downloaded module, checking its checksum.
@@ -40,12 +41,23 @@ import (
 	"sync"
 )
 
-func unpack(src, dst string) error {
+// unpack writes out the pack at src under dst. With list, it also writes
+// there, one per line, the pack's Go files in a directory named like a Go
+// file, at any depth.
+func unpack(src, dst, list string) (err error) {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
+	var listed strings.Builder
+	if list != "" {
+		defer func() {
+			if werr := os.WriteFile(list, []byte(listed.String()), 0o644); werr != nil && err == nil {
+				err = werr
+			}
+		}()
+	}
 	r := bufio.NewReader(in)
 	line := func() (string, error) {
 		s, err := r.ReadString('\n')
@@ -81,6 +93,10 @@ func unpack(src, dst string) error {
 		data := make([]byte, size+1)
 		if _, err := io.ReadFull(r, data); err != nil {
 			return err
+		}
+		if dir := filepath.Dir(rel); list != "" && strings.HasSuffix(rel, ".go") &&
+			(strings.HasSuffix(dir, ".go") || strings.Contains(dir, ".go/")) {
+			listed.WriteString(rel + "\n")
 		}
 		p := filepath.Join(dst, rel)
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -425,7 +441,9 @@ func main() {
 	var err error
 	switch {
 	case len(args) == 3 && args[0] == "unpack":
-		err = unpack(args[1], args[2])
+		err = unpack(args[1], args[2], "")
+	case len(args) == 4 && args[0] == "unpack":
+		err = unpack(args[1], args[2], args[3])
 	case len(args) == 2 && args[0] == "weigh":
 		err = weigh(args[1])
 	case len(args) == 2 && args[0] == "cc":
@@ -435,7 +453,7 @@ func main() {
 	case len(args) == 5 && args[0] == "modunzip":
 		err = modUnzip(args[1], args[2], args[3], args[4])
 	default:
-		err = fmt.Errorf("usage: gohdr unpack <pack> <dir>, gohdr weigh <plan>, gohdr cc <plan>, gohdr linkid <importcfg> <salt>, or gohdr modunzip <zip> <module>@<version> <dir> <checksum>")
+		err = fmt.Errorf("usage: gohdr unpack <pack> <dir> [<list>], gohdr weigh <plan>, gohdr cc <plan>, gohdr linkid <importcfg> <salt>, or gohdr modunzip <zip> <module>@<version> <dir> <checksum>")
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gohdr:", err)

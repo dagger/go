@@ -146,13 +146,33 @@ func run(ctx context.Context, base *dagger.Container, image string, from *dagger
 	if err != nil {
 		return nil, nil, err
 	}
-	plan, weights, cc, err := b.plan(ctx, headers, flags, pkg, test)
+	plan, weights, cc, goDirs, err := b.plan(ctx, headers, flags, pkg, test)
 	if err != nil {
 		return nil, nil, err
 	}
 	blocks, err := parsePlan(plan, b.roots)
 	if err != nil {
 		return nil, nil, err
+	}
+	// A package with C or assembly in the source reads its files that
+	// aren't Go (nonGoSource), which the Go files in directories named like
+	// Go files are left out of by name.
+	var nonGo *dagger.Directory
+	for _, bl := range blocks {
+		if bl.srcNonGo {
+			list, err := goDirs.Contents(ctx)
+			if err != nil {
+				return nil, nil, fmt.Errorf("Go files in directories named like Go files: %w", err)
+			}
+			var goDirGo []string
+			for _, f := range strings.Split(list, "\n") {
+				if f != "" {
+					goDirGo = append(goDirGo, f)
+				}
+			}
+			nonGo = nonGoSource(source, goDirGo)
+			break
+		}
 	}
 	for _, bl := range blocks {
 		bl.addCFlags(cc)
@@ -172,7 +192,7 @@ func run(ctx context.Context, base *dagger.Container, image string, from *dagger
 	if needsTools(blocks) {
 		go b.tools.Sync(ctx)
 	}
-	w := &walker{base: b.base, tools: b.tools, src: source, mods: mods, roots: b.roots}
+	w := &walker{base: b.base, tools: b.tools, src: source, mods: mods, roots: b.roots, nonGo: nonGo}
 	if test {
 		if w.testmain, err = b.testmain(ctx, headers, flags, pkg); err != nil {
 			return nil, nil, fmt.Errorf("test main: %w", err)
@@ -419,8 +439,9 @@ func canonical(ctx context.Context, ctr *dagger.Container, from *dagger.Containe
 // content, so an edit inside function bodies leaves the plan exec a cache hit.
 // With it come the plan's step weights, by step id, from "gohdr weigh",
 // which order the execs waiting for a slot (for the source's packages they
-// weigh headers); and the answers to its C compiler probes, from "gohdr cc".
-func (b *build) plan(ctx context.Context, headers *dagger.File, flags []string, pkg string, test bool) (string, map[string]int64, ccInfo, error) {
+// weigh headers); the answers to its C compiler probes, from "gohdr cc"; and
+// the list of the source's Go files in directories named like Go files.
+func (b *build) plan(ctx context.Context, headers *dagger.File, flags []string, pkg string, test bool) (string, map[string]int64, ccInfo, *dagger.File, error) {
 	cmd := []string{"go", "build", "-n"}
 	if test {
 		cmd = []string{"go", "test", "-c", "-n"}
@@ -440,22 +461,22 @@ func (b *build) plan(ctx context.Context, headers *dagger.File, flags []string, 
 		WithEnvVariable("GOCACHE", "/gobuild/plancache").
 		// A failed plan prints go build's error, such as a //go:embed
 		// pattern it rejects, rather than leaving it in the plan file.
-		WithExec([]string{"sh", "-c", "/gobuild/gohdr unpack /gobuild/src.hdr " + shQuote(b.roots.Src) +
+		WithExec([]string{"sh", "-c", "/gobuild/gohdr unpack /gobuild/src.hdr " + shQuote(b.roots.Src) + " /gobuild/godirs.txt" +
 			" && cd " + shQuote(b.roots.Cwd) + " && { " + strings.Join(quoted, " ") + " 2> /gobuild/plan.txt" +
 			" || { status=$?; cat /gobuild/plan.txt >&2; exit $status; }; }" +
 			" && /gobuild/gohdr weigh /gobuild/plan.txt > /gobuild/weights.txt" +
 			" && /gobuild/gohdr cc /gobuild/plan.txt > /gobuild/cc.txt"}, bare)
 	plan, err := ran.File("/gobuild/plan.txt").Contents(ctx)
 	if err != nil {
-		return "", nil, ccInfo{}, b.planError(ctx, err)
+		return "", nil, ccInfo{}, nil, b.planError(ctx, err)
 	}
 	out, err := ran.File("/gobuild/weights.txt").Contents(ctx)
 	if err != nil {
-		return "", nil, ccInfo{}, err
+		return "", nil, ccInfo{}, nil, err
 	}
 	ccOut, err := ran.File("/gobuild/cc.txt").Contents(ctx)
 	if err != nil {
-		return "", nil, ccInfo{}, err
+		return "", nil, ccInfo{}, nil, err
 	}
 	weights := map[string]int64{}
 	for _, line := range strings.Split(out, "\n") {
@@ -465,11 +486,11 @@ func (b *build) plan(ctx context.Context, headers *dagger.File, flags []string, 
 		id, n, _ := strings.Cut(line, " ")
 		v, err := strconv.ParseInt(n, 10, 64)
 		if err != nil {
-			return "", nil, ccInfo{}, fmt.Errorf("plan weights: %q: %w", line, err)
+			return "", nil, ccInfo{}, nil, fmt.Errorf("plan weights: %q: %w", line, err)
 		}
 		weights[id] = v
 	}
-	return plan, weights, parseCC(ccOut), nil
+	return plan, weights, parseCC(ccOut), ran.File("/gobuild/godirs.txt"), nil
 }
 
 // testmain is the _testmain.go the go command writes for pkg's test binary.
@@ -494,7 +515,7 @@ func (b *build) testmain(ctx context.Context, headers *dagger.File, flags []stri
 		WithMountedFile("/gobuild/src.hdr", headers).
 		WithMountedDirectory("/gobuild/tests", tests).
 		WithEnvVariable("GOCACHE", "/gobuild/plancache").
-		WithExec([]string{"sh", "-c", "/gobuild/gohdr unpack /gobuild/src.hdr " + shQuote(b.roots.Src) +
+		WithExec([]string{"sh", "-c", "/gobuild/gohdr unpack /gobuild/src.hdr " + shQuote(b.roots.Src) + " /gobuild/godirs.txt" +
 			" && cp -R /gobuild/tests/. " + shQuote(b.roots.Src) + "/" +
 			" && cd " + shQuote(b.roots.Cwd) + " && { " + strings.Join(quoted, " ") + " 2> /gobuild/testmain.err; " +
 			`work=$(sed -n 's/^WORK=//p' /gobuild/testmain.err); ` +

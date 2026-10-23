@@ -31,8 +31,11 @@ type block struct {
 	name       string // stable directory name under /work
 	lines      []string
 	deps       []string // other block ids
-	srcFiles   []string // relative to roots.Src; may hold patterns ("**/*.h", "<dir>/**")
+	srcFiles   []string // relative to roots.Src; may hold patterns ("<dir>/**")
 	modFiles   []string // relative to roots.Mod; may hold "<dir>/**" patterns
+	// srcNonGo marks a package in the source with C or assembly, which
+	// also reads every file in the source that isn't Go.
+	srcNonGo bool
 	// isLink marks the main package's block (b001), which compiles and links.
 	isLink bool
 	// linkAt is 1 plus the index in lines of the command that runs the
@@ -278,10 +281,13 @@ func parsePlan(plan string, r roots) (map[string]*block, error) {
 				}
 			}
 		}
+		// In the source, they include files by paths relative to their
+		// directory ("../native/defs.inc"), of any name, including ones
+		// the caller adds with includeExtraFiles: a package there that has
+		// either reads every file in the source but the Go ones, which
+		// leaves its key alone when Go code elsewhere changes.
 		for _, f := range b.srcFiles {
-			if path.Ext(f) == ".s" {
-				b.srcFiles = appendUniq(b.srcFiles, "**/*.h")
-			}
+			b.srcNonGo = b.srcNonGo || b.cgo || path.Ext(f) == ".s"
 		}
 		b.name = stableName(b.importPath)
 		seen := map[string]bool{}
