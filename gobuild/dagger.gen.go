@@ -402,6 +402,76 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 				}
 			}
 			return (*Gobuild).TestBinary(&parent, ctx, base, image, from, source, headers, mountPath, workdir, pkg, flags)
+		case "TestSuite":
+			var parent Gobuild
+			err = json.Unmarshal(parentJSON, &parent)
+			if err != nil {
+				panic(fmt.Errorf("%s: %w", "failed to unmarshal parent object", err))
+			}
+			var base *dagger.Container
+			if inputArgs["base"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["base"]), &base)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg base", err))
+				}
+			}
+			var source *dagger.Directory
+			if inputArgs["source"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["source"]), &source)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg source", err))
+				}
+			}
+			var headers *dagger.File
+			if inputArgs["headers"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["headers"]), &headers)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg headers", err))
+				}
+			}
+			var mountPath string
+			if inputArgs["mountPath"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["mountPath"]), &mountPath)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg mountPath", err))
+				}
+			}
+			var workdir string
+			if inputArgs["workdir"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["workdir"]), &workdir)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg workdir", err))
+				}
+			}
+			var modulePath string
+			if inputArgs["modulePath"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["modulePath"]), &modulePath)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg modulePath", err))
+				}
+			}
+			var packages []string
+			if inputArgs["packages"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["packages"]), &packages)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg packages", err))
+				}
+			}
+			var image string
+			if inputArgs["image"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["image"]), &image)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg image", err))
+				}
+			}
+			var runPattern string
+			if inputArgs["runPattern"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["runPattern"]), &runPattern)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg runPattern", err))
+				}
+			}
+			return (*Gobuild).TestSuite(&parent, ctx, base, source, headers, mountPath, workdir, modulePath, packages, image, runPattern)
 		default:
 			return nil, fmt.Errorf("unknown function %s", fnName)
 		}
@@ -451,7 +521,21 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 							WithArg("mountPath", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{Description: "Where source is mounted.", SourceMap: dag.SourceMap("main.go", 119, 2)}).
 							WithArg("workdir", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{Description: "The directory to run go test in, relative to mountPath.", SourceMap: dag.SourceMap("main.go", 122, 2), DefaultValue: dagger.JSON("\".\"")}).
 							WithArg("pkg", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{Description: "The go test package argument, e.g. \".\" or \"./pkg/foo\".", SourceMap: dag.SourceMap("main.go", 124, 2)}).
-							WithArg("flags", dag.TypeDef().WithListOf(dag.TypeDef().WithKind(dagger.TypeDefKindStringKind)).WithOptional(true), dagger.FunctionWithArgOpts{Description: "Flags for go test -c, before the package, e.g. -race or -ldflags.", SourceMap: dag.SourceMap("main.go", 127, 2)}))), nil
+							WithArg("flags", dag.TypeDef().WithListOf(dag.TypeDef().WithKind(dagger.TypeDefKindStringKind)).WithOptional(true), dagger.FunctionWithArgOpts{Description: "Flags for go test -c, before the package, e.g. -race or -ldflags.", SourceMap: dag.SourceMap("main.go", 127, 2)})).
+					WithFunction(
+						dag.Function("TestSuite",
+							dag.TypeDef().WithObject("Directory")).
+							WithDescription("TestSuite builds selected packages with the same cached compile steps as\nTestBinary. Its directory holds binaries and an otelgotest manifest. Run it\nat outputPath, with the source and testdata mounted at mountPath. Build\nfailures remain per-package results, so unrelated tests can still run.\nAs with TestBinary, vet is left to lint checks.").
+							WithSourceMap(dag.SourceMap("testsuite.go", 27, 1)).
+							WithArg("base", dag.TypeDef().WithObject("Container"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 29, 2)}).
+							WithArg("source", dag.TypeDef().WithObject("Directory"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 30, 2)}).
+							WithArg("headers", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 31, 2)}).
+							WithArg("mountPath", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 32, 2)}).
+							WithArg("workdir", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 33, 2)}).
+							WithArg("modulePath", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 34, 2)}).
+							WithArg("packages", dag.TypeDef().WithListOf(dag.TypeDef().WithKind(dagger.TypeDefKindStringKind)), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 35, 2)}).
+							WithArg("image", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 37, 2)}).
+							WithArg("runPattern", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{Description: "A test selection, expressed as go test's -run regular expression.", SourceMap: dag.SourceMap("testsuite.go", 40, 2)}))), nil
 	default:
 		return nil, fmt.Errorf("unknown object %s", parentName)
 	}

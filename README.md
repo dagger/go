@@ -132,7 +132,8 @@ but is not a collection and creates no second artifact path.
 
 Each selected test has its own check. All checks in a Go module call the same
 engine-cached `testResults` function. It prepares the selected collections once,
-runs one `otelgotest -json` command, and returns a shared report. Its cache key
+builds the selected test binaries with separately cached package compiles,
+runs one `otelgotest --test-binaries ... -json` command, and returns a shared report. Its cache key
 includes the source, settings, module path, and active artifact view, so different
 selections cannot reuse the wrong report. Separate modules use separate commands
 and their own toolchains.
@@ -143,14 +144,23 @@ repeating workspace globs or fetching each result field from the engine.
 Selection still applies separately for each filtered view.
 
 The helper reads the filtered package and test collections. A partial selection
-uses explicit package arguments and an anchored `-run` pattern. Packages without
-a selected test are omitted. With no keys removed, the command runs `./...`
-without `-run`. A test name in two packages selects both; `--go-package` narrows
+uses explicit packages and an anchored `-test.run` pattern. Packages without
+a selected test are omitted. With no test keys removed, each selected binary
+runs without a run filter. A test name in two packages selects both; `--go-package` narrows
 that selection.
 
 A failed test fails its own check. A package that fails to build fails its selected
 tests. Passing tests in other packages still pass. Logs and test spans belong to
 the check that starts the shared command; other checks share its result.
+
+Each binary runs in its package directory, with the module's source and testdata.
+The runner uses the module's `go tool test2json`, keeps package parallelism,
+and forwards runtime GOFLAGS such as `-count`, `-timeout`, `-short`, and `-run`.
+Build GOFLAGS such as `-race` and `-tags` apply to compilation. As with
+`testBinary`, vet belongs to the lint checks. Profile aggregation, fuzzing,
+`-exec`, `-list`, and batch-wide `-failfast` are not supported in this mode;
+use the manual module `test` function for those options. The pinned runner is
+installed for batch checks even when the custom base contains an older runner.
 
 `GoTests.test` remains a manual package helper, without a check marker. It does
 not replace individual checks. There is no `.batch` namespace.

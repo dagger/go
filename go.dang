@@ -1235,7 +1235,7 @@ type GoModule {
     gomod
       .toolBuilder
       .withEnvVariable("GOBIN", "/usr/local/bin")
-      .withExec(["go", "install", "github.com/dagger/otel-go/cmd/otelgotest@main"])
+      .withExec(["go", "install", "github.com/dagger/otel-go/cmd/otelgotest@173d98fb92b4bad4b61c560db0a6503e617c6b2a"])
       .file("/usr/local/bin/otelgotest")
   }
 
@@ -1315,15 +1315,26 @@ type GoModule {
     let empty: [String!]! = []
     let names = tool.sorted(selected.reduce(empty) { all, tests => all + tests.names }.uniq)
     let narrowed = discovered.any { tests => tests.delta == null or tests.delta!.removedKeys.length > 0 }
-    let whole = packages.delta != null and packages.delta!.removedKeys.length == 0 and narrowed == false
-    let dirs = if (whole) { ["./..."] } else {
-      tool.sorted(selected.map { tests => packageArg(tests.directory) })
-    }
-    let run = if (narrowed) { ["-run", "^(" + names.join("|") + ")$"] } else { empty }
+    let dirs = tool.sorted(selected.map { tests => packageArg(tests.directory) })
+    let run = if (narrowed) { "^(" + names.join("|") + ")$" } else { "" }
+    let binaries = gobuild.testSuite(
+      base: base(ws),
+      image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
+      source: source(ws, test: true),
+      headers: lib.scan(ws).sync.file("_headers_.gohdr"),
+      mountPath: mountPath,
+      workdir: path,
+      modulePath: importPath(ws),
+      packages: dirs,
+      runPattern: run,
+    )
     let executed = testEnv(ws)
+      # This mode needs the pinned runner, even when a custom base has an older one.
+      .withFile("/usr/local/bin/otelgotest", testRunner)
+      .withDirectory("/go-test-binaries", binaries)
       .withWorkdir(path)
       .withExec(
-        ["otelgotest", "-json"] + run + dirs,
+        ["otelgotest", "--test-binaries", "/go-test-binaries/manifest.json", "-json"],
         expect: ANY,
         redirectStdout: "/go-test-report.json",
         experimentalPrivilegedNesting: true,
