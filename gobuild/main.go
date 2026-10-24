@@ -568,12 +568,13 @@ fi
 }
 
 // sourceSizes is the size of every Go file in the source, by its path in
-// it. It is read in an exec of its own, keyed by the source's Go files and
-// nothing else, so it reruns when a file changes and costs one exec then.
+// it. It is read in an exec of its own over the source as it is: a filtered
+// copy of a large source costs more than the listing, which reruns when the
+// source changes anyway and costs one exec then.
 func (b *build) sourceSizes(ctx context.Context) (map[string]int64, error) {
 	out, err := dag.Container().From(toolImage).
 		WithMountedFile("/gobuild/gohdr", hdrTool(), dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
-		WithMountedDirectory("/gobuild/src", b.src.Filter(dagger.DirectoryFilterOpts{Include: []string{"**/*.go"}}), dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true}).
+		WithMountedDirectory("/gobuild/src", b.src, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true}).
 		WithExec([]string{"/gobuild/gohdr", "sizes", "/gobuild/src"}, bare).
 		Stdout(ctx)
 	if err != nil {
