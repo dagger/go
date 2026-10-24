@@ -343,7 +343,10 @@ type GoModule {
       base(ws).withDirectory(".", source(ws)).withWorkdir(path),
       [
         "golangci-lint", "run",
-        "--path-prefix", path + "/",
+        # Relative paths follow the configuration's run.relative-path-mode,
+        # which by default is relative to the configuration file, not this
+        # module, so no fixed prefix fits a module nested below its config.
+        "--path-mode=abs",
         "--output.tab.path=stderr",
         "--output.tab.print-linter-name=true",
         "--output.tab.colors=false",

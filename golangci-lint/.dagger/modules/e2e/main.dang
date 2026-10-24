@@ -191,6 +191,29 @@ type E2e {
   }
 
   """
+  A diagnostic in a module nested below its configuration names the file once,
+  not with the module path repeated.
+  """
+  pathCheck: Void @check {
+    let ws = directory
+      .withNewFile(".golangci.yml", "version: \"2\"\n")
+      .withNewFile("sub/go.mod", "module example.com/sub\n\ngo 1.25.0\n")
+      .withNewFile("sub/bad.go", "package sub\n\nimport \"os\"\n\nfunc F() {\n\tos.Remove(\"x\")\n}\n")
+      .asWorkspace
+    let check = golangciLint.project(ws, ".").lint(ws)
+    assert(check.pass == false, "lint passed a file errcheck rejects")
+    # The check's message is only the exit code; the diagnostics are the failed
+    # command's stderr, which the error carries as a value.
+    let stderr = check.error.values.{{name, value}}
+      .filter { v => v.name == "stderr" }
+      .map { v => v.value }
+      .join("\n") ?? ""
+    assert(stderr.contains("sub/bad.go:6:11"), "lint did not report the nested file: " + stderr)
+    assert(stderr.contains("sub/sub/") == false, "the module path was doubled: " + stderr)
+    null
+  }
+
+  """
   golangci-lint finds each of its four configuration file spellings.
   """
   configCheck: Void @check {
