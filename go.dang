@@ -195,6 +195,15 @@ type Go {
     goModule(ws, modulePath).prepareTestOutcomes(ws)
   }
 
+  """
+  Prototype: run an explicit selection from the engine's discovery snapshot.
+  The JSON records contain packagePath and names. Collection discovery is not
+  repeated here; the engine owns and validates this selection.
+  """
+  snapshotTestOutcomes(ws: Workspace!, modulePath: String!, selection: String!): String! {
+    goModule(ws, modulePath).prepareSnapshotTestOutcomes(ws, selection)
+  }
+
   let cachedTestResults(ws: Workspace!, modulePath: String!): GoTestResults! {
     let result = api.testResults(ws: ws, modulePath: modulePath)
     GoTestResults(report: result.report, exitCode: result.exitCode, stderr: result.stderr)
@@ -1307,6 +1316,15 @@ type GoModule {
 
   let prepareTestOutcomes(ws: Workspace!): String! {
     let discovered = discoveredTests(ws)
+    let result = prepareSelectedTests(ws, discovered)
+    JSON.encode(result.outcomes(discovered, importPath(ws)))
+  }
+
+  let prepareSnapshotTestOutcomes(ws: Workspace!, selection: String!): String! {
+    let packages = JSON.decode(selection) :: [{{packagePath: String!, names: [String!]!}}!]!
+    let discovered = packages.map { pkg =>
+      GoTests(names: pkg.names, directory: relativeDir(pkg.packagePath), module: self)
+    }
     let result = prepareSelectedTests(ws, discovered)
     JSON.encode(result.outcomes(discovered, importPath(ws)))
   }
