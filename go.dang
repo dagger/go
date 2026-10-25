@@ -186,6 +186,15 @@ type Go {
     goModule(ws, modulePath).prepareTests(ws)
   }
 
+  """
+  Pass/fail messages for the selected tests, prepared once per Go module.
+  An empty message means success. Keys contain the workspace package path
+  and test name, separated by a newline.
+  """
+  testOutcomes(ws: Workspace!, modulePath: String!): String! {
+    goModule(ws, modulePath).prepareTestOutcomes(ws)
+  }
+
   let cachedTestResults(ws: Workspace!, modulePath: String!): GoTestResults! {
     let result = api.testResults(ws: ws, modulePath: modulePath)
     GoTestResults(report: result.report, exitCode: result.exitCode, stderr: result.stderr)
@@ -1283,13 +1292,26 @@ type GoModule {
     tool.cachedTestResults(ws, path)
   }
 
-  let prepareTests(ws: Workspace!): GoTestResults! {
+  let discoveredTests(ws: Workspace!): [GoTests!]! {
     let packages = self.packages(ws)
     let index = testMatches(ws)
-    let discovered = packages.paths.map { pkg =>
+    packages.paths.map { pkg =>
       let dir = relativeDir(pkg)
       GoTests(names: namesFromIndex(index, dir), directory: dir, module: self)
     }
+  }
+
+  let prepareTests(ws: Workspace!): GoTestResults! {
+    prepareSelectedTests(ws, discoveredTests(ws))
+  }
+
+  let prepareTestOutcomes(ws: Workspace!): String! {
+    let discovered = discoveredTests(ws)
+    let result = prepareSelectedTests(ws, discovered)
+    JSON.encode(result.outcomes(discovered, importPath(ws)))
+  }
+
+  let prepareSelectedTests(ws: Workspace!, discovered: [GoTests!]!): GoTestResults! {
     let selected = discovered.filter { tests => tests.names.length > 0 }
     if (selected.length == 0) { raise "no tests selected in module " + path }
     let empty: [String!]! = []
@@ -1603,8 +1625,17 @@ type GoTest {
   Run this test.
   """
   test(ws: Workspace!): Void @check {
-    let pkg = module.importPath(ws) + (if (directory == ".") { "" } else { "/" + directory })
-    module.runTests(ws).assertPassed(module.packagePath(directory), pkg, name)
+    let outcomes = JSON.decode(
+      module.tool.api.testOutcomes(ws: ws, modulePath: module.path),
+    ) :: [[String!]!]!
+    let key = module.packagePath(directory) + "\n" + name
+    let matches = outcomes.filter { entry => entry.takeFirst(1).join("") == key }
+    if (matches.length != 1) {
+      raise "Go tests in " + module.packagePath(directory) + ": no indexed result for " + name
+    }
+    let failure = matches.takeFirst(1).map { entry => entry.takeLast(1).join("") }.join("")
+    if (failure != "") { raise failure }
+    null
   }
 }
 
@@ -1632,20 +1663,48 @@ type GoTestResults {
     report.contents.split("\n").filter { line => line != "" }.map { line => JSON.decode(line) :: GoTestEvent! }
   }
 
+  # Parse the report once and partition it once per selected package. Item
+  # checks receive only the compact outcome index, including failure text.
+  let outcomes(selected: [GoTests!]!, importPath: String!): [[String!]!]! {
+    let allEvents = events
+    let empty: [[String!]!]! = []
+    selected.reduce(empty) { index, tests =>
+      let pkg = importPath + (if (tests.directory == ".") { "" } else { "/" + tests.directory })
+      let directory = tests.module.packagePath(tests.directory)
+      let packageEvents = allEvents.filter { event => (event.pkg ?? event.buildPkg) == pkg }
+      index + tests.names.map { name =>
+        [directory + "\n" + name, testFailure(directory, name, packageEvents)]
+      }
+    }
+  }
+
   let assertPassed(directory: String!, pkg: String!, name: String!): Void {
-    let packageEvents = events.filter { event => (event.pkg ?? event.buildPkg) == pkg }
+    let failure = testFailure(
+      directory,
+      name,
+      events.filter { event => (event.pkg ?? event.buildPkg) == pkg },
+    )
+    if (failure != "") { raise failure }
+    null
+  }
+
+  let testFailure(
+    directory: String!,
+    name: String!,
+    packageEvents: [GoTestEvent!]!,
+  ): String! {
     let testEvents = packageEvents.filter { event => event.test == name }
     let failed = testEvents.any { event => event.action == "fail" }
     let finished = testEvents.any { event => event.action == "pass" or event.action == "skip" }
     let packagePassed = packageEvents.any { event => event.test == null and (event.action == "pass" or event.action == "skip") }
     if (failed) {
-      raise "Go tests in " + directory + ": " + name + " failed\n" + testEvents.map { event => event.output ?? "" }.join("")
+      "Go tests in " + directory + ": " + name + " failed\n" + testEvents.map { event => event.output ?? "" }.join("")
     } else if (finished or packagePassed) {
       # A successful package with no event for a discovered name can result
       # from a build constraint. Preserve the previous behavior: it passes.
-      null
+      ""
     } else {
-      raise "Go tests in " + directory + ": no successful result for " + name
+      "Go tests in " + directory + ": no successful result for " + name
         + " (go test exit " + `${exitCode}` + ")\n"
         + packageEvents.map { event => event.output ?? "" }.join("") + stderr
     }
