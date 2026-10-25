@@ -204,6 +204,25 @@ type Go {
     goModule(ws, modulePath).prepareSnapshotTestOutcomes(ws, selection)
   }
 
+  """
+  Explicit selection with inputs captured during discovery. The stable provider
+  owns this helper so its dependencies do not inherit an individual test's identity.
+  """
+  preparedSnapshotTestOutcomes(
+    ws: Workspace!,
+    modulePath: String!,
+    selection: String!,
+    scan: Directory!,
+    lines: [String!]!,
+    workspaceID: String!,
+  ): String! {
+    let prepared = GoDiscovery(workspaceID: workspaceID, scan: scan, lines: lines)
+    goModuleAt(modulePath, workspaceMountPath(ws), prepared).prepareSnapshotTestOutcomes(
+      ws,
+      selection,
+    )
+  }
+
   let cachedTestResults(ws: Workspace!, modulePath: String!): GoTestResults! {
     let result = api.testResults(ws: ws, modulePath: modulePath)
     GoTestResults(report: result.report, exitCode: result.exitCode, stderr: result.stderr)
@@ -1682,13 +1701,6 @@ type GoTest {
   let directory: String!
 
   let module: GoModule!
-
-  """
-  Shared explicit-selection outcome using this test's discovered module inputs.
-  """
-  snapshotTestOutcomes(ws: Workspace!, selection: String!): String! {
-    module.prepareSnapshotTestOutcomes(ws, selection)
-  }
 
   """
   Run this test.
