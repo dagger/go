@@ -315,6 +315,31 @@ type GoDev {
   }
 
   """
+  Discovery metadata can be reused, but a different workspace must be read again.
+  """
+  preparedInputsCheck: Void @check {
+    let first = directory
+      .withNewFile("go.mod", "module example.com/first\n\ngo 1.26.1\n")
+      .withNewFile("x_test.go", "package sample\nimport \"testing\"\nfunc TestFirst(t *testing.T) {}\n")
+      .asWorkspace
+    let second = directory
+      .withNewFile("go.mod", "module example.com/second\n\ngo 1.25.1\n")
+      .withNewFile("x_test.go", "package sample\nimport \"testing\"\nfunc TestSecond(t *testing.T) {}\n")
+      .withNewFile("sub/y_test.go", "package sub\nimport \"testing\"\nfunc TestSub(t *testing.T) {}\n")
+      .asWorkspace
+    let tool = go(test: ["."], generate: ["!**"], build: ["!**"])
+    let mod = tool.modules(first).get(key: ".")
+    let pkg = mod.packages(first).get(key: ".")
+    assert(mod.version(first) == "1.26", "initial module version")
+    assert(pkg.tests(first).keys == ["TestFirst"], "initial test names")
+    assert(mod.version(second) == "1.25", "stored module used stale version")
+    assert(mod.packages(second).keys == [".", "sub"], "stored module used stale packages")
+    assert(pkg.tests(second).keys == ["TestSecond"], "stored package used stale tests")
+    assert(pkg.tests(first).keys == ["TestFirst"], "original snapshot was mutated")
+    null
+  }
+
+  """
   A package has a binary when it is a main package selected by build. Main packages
   are found by searching the source; binaries are named as go build names
   them; a batch builds every selected package, across modules; build patterns
@@ -692,10 +717,12 @@ type GoDev {
       let pkg = variant.split(";").takeFirst(1).join("")
       let flags = variant.split(";").dropFirst(1)
       let race = flags.contains("-race")
-      let tool = if (race) { go(base: cgo, buildFlags: flags) } else { go(
-        version: "1.26.1",
-        buildFlags: flags,
-      ) }
+      let tool = if (race) { go(base: cgo, buildFlags: flags) } else {
+        go(
+          version: "1.26.1",
+          buildFlags: flags,
+        )
+      }
       let built = tool.packages(ws).get(key: pkg).testBinary(ws)
       let compared = cgo
         .withEnvVariable("CGO_ENABLED", if (race) { "1" } else { "0" })
