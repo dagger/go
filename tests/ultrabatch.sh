@@ -22,24 +22,25 @@ for module in ['m1','m2']:
 PY
 git -C "$probe" init -q
 cd "$probe"
+check=("$dagger_bin" check --module "$module_name" --check test)
 selection=("--$module_name-package=m1/p1" "--$module_name-package=m1/p2" "--$module_name-package=m2/p1" "--$module_name-package=m2/p2" "--$module_name-test=TestFoo" "--$module_name-test=TestBar")
-"$dagger_bin" check "${selection[@]}" >pass.stdout 2>pass.stderr
+"${check[@]}" "${selection[@]}" >pass.stdout 2>pass.stderr
 grep -q '8 passed' pass.stderr
 
 # A cached module index must not retain an earlier package or test selection.
-if "$dagger_bin" check "--$module_name-package=m1/p1" "--$module_name-test=TestOther" >other.stdout 2>other.stderr; then
+if "${check[@]}" "--$module_name-package=m1/p1" "--$module_name-test=TestOther" >other.stdout 2>other.stderr; then
     echo 'Expected the newly selected test to fail' >&2; exit 1
 fi
 grep -q '1 failed' other.stderr
 grep -q 'excluded test ran' other.stderr
-"$dagger_bin" check "--$module_name-package=m1/unused" "--$module_name-test=TestFoo" >changed-selection.stdout 2>changed-selection.stderr
+"${check[@]}" "--$module_name-package=m1/unused" "--$module_name-test=TestFoo" >changed-selection.stdout 2>changed-selection.stderr
 grep -q '1 passed' changed-selection.stderr
-"$dagger_bin" check "${selection[@]}" >repeat.stdout 2>repeat.stderr
+"${check[@]}" "${selection[@]}" >repeat.stdout 2>repeat.stderr
 grep -q '8 passed' repeat.stderr
 
 # A source change must invalidate the cached index, including new names.
 printf '\nfunc TestAdded(t *testing.T) {}\n' >>m1/p1/tests_test.go
-"$dagger_bin" check "--$module_name-package=m1/p1" "--$module_name-test=TestAdded" >added.stdout 2>added.stderr
+"${check[@]}" "--$module_name-package=m1/p1" "--$module_name-test=TestAdded" >added.stdout 2>added.stderr
 grep -q '1 passed' added.stderr
 
 python3 - <<'PY'
@@ -47,7 +48,7 @@ from pathlib import Path
 p=Path('m1/p1/tests_test.go')
 p.write_text(p.read_text().replace('func TestFoo(t *testing.T) {}','func TestFoo(t *testing.T) { t.Fatal("selected failure") }'))
 PY
-if "$dagger_bin" check "${selection[@]}" >fail.stdout 2>fail.stderr; then
+if "${check[@]}" "${selection[@]}" >fail.stdout 2>fail.stderr; then
     echo 'Expected the selected test to fail' >&2; exit 1
 fi
 grep -q '7 passed' fail.stderr
@@ -60,10 +61,26 @@ p=Path('m1/p1/tests_test.go')
 p.write_text(p.read_text().replace('func TestFoo(t *testing.T) { t.Fatal("selected failure") }','func TestFoo(t *testing.T) {}'))
 Path('m2/p1/broken.go').write_text('package p1\nvar broken = undefinedSymbol\n')
 PY
-if "$dagger_bin" check "${selection[@]}" >build.stdout 2>build.stderr; then
+if "${check[@]}" "${selection[@]}" >build.stdout 2>build.stderr; then
     echo 'Expected the selected package to fail to build' >&2; exit 1
 fi
 grep -q '6 passed' build.stderr
 grep -q '2 failed' build.stderr
 grep -q 'Go tests in m2/p1:' build.stderr
+# Runtime skips and build constraints must retain their outcomes.
+rm m2/p1/broken.go
+cat >m1/p1/skip_test.go <<'GO'
+package p1
+import "testing"
+func TestSkipped(t *testing.T) { t.Skip("intentional skip") }
+GO
+cat >m1/p1/tagged_test.go <<'GO'
+//go:build ultrabatch_excluded
+
+package p1
+import "testing"
+func TestTaggedOut(t *testing.T) { t.Fatal("build constraint ignored") }
+GO
+"${check[@]}" "--$module_name-package=m1/p1" "--$module_name-test=TestSkipped" "--$module_name-test=TestTaggedOut" >skip.stdout 2>skip.stderr
+grep -q '2 passed' skip.stderr
 echo 'Ultrabatch checks passed'
