@@ -1,6 +1,10 @@
 package main
 
-import "dagger/gobuild/internal/dagger"
+import (
+	"sync"
+
+	"dagger/gobuild/internal/dagger"
+)
 
 // hdrTool builds gohdr, the helper's in-container tool. "gohdr unpack" writes
 // out a header pack, the go module's scan of each Go file up to the end of its
@@ -11,7 +15,10 @@ import "dagger/gobuild/internal/dagger"
 // downloaded module, checking its checksum. "gohdr scope" lists the
 // packages a lint target's archives are compiled for, and "gohdr manifest"
 // describes those archives for golangci-lint's export driver.
-func hdrTool() *dagger.File {
+//
+// It is one object for the whole module, so the SDK asks the engine for its
+// ID once, not once for every exec that mounts it.
+var hdrTool = sync.OnceValue(func() *dagger.File {
 	// A standalone tool, so it is built with a pinned toolchain, statically,
 	// and runs in whatever image the module builds with.
 	return dag.Container().From(toolImage).
@@ -20,7 +27,7 @@ func hdrTool() *dagger.File {
 		WithNewFile("/gohdr-src/main.go", hdrToolSrc).
 		WithWorkdir("/gohdr-src").
 		WithExec([]string{"go", "build", "-o", "/gohdr", "."}, bare).File("/gohdr")
-}
+})
 
 const hdrToolSrc = `package main
 
