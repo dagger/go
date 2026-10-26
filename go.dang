@@ -204,29 +204,6 @@ type Go {
     goModule(ws, modulePath).prepareSnapshotTestOutcomes(ws, selection)
   }
 
-  """
-  Explicit selection with inputs captured during discovery. The stable provider
-  owns this helper so its dependencies do not inherit an individual test's identity.
-  """
-  preparedSnapshotTestOutcomes(
-    ws: Workspace!,
-    modulePath: String!,
-    selection: String!,
-    scan: Directory!,
-    lines: [String!]!,
-    preparedWorkspace: Workspace!,
-  ): String! {
-    let prepared = GoDiscovery(
-      workspaceID: `${preparedWorkspace.id}`,
-      scan: scan,
-      lines: lines,
-    )
-    goModuleAt(modulePath, workspaceMountPath(ws), prepared).prepareSnapshotTestOutcomes(
-      ws,
-      selection,
-    )
-  }
-
   let cachedTestResults(ws: Workspace!, modulePath: String!): GoTestResults! {
     let result = api.testResults(ws: ws, modulePath: modulePath)
     GoTestResults(report: result.report, exitCode: result.exitCode, stderr: result.stderr)
@@ -257,9 +234,9 @@ type Go {
 
   # Workspace paths of the Go modules at or below the working directory, and of
   # the module the working directory is inside.
-  let moduleRootsHere(ws: Workspace!, lines: [String!] = null): [String!]! {
+  let moduleRootsHere(ws: Workspace!): [String!]! {
     let cwd = ws.cwd.trimPrefix("/").trimSuffix("/")
-    let roots = (lines ?? discoveryLines(ws)).filter { line => line.hasPrefix("module\t") }.map { line =>
+    let roots = discoveryLines(ws).filter { line => line.hasPrefix("module\t") }.map { line =>
       lineField(
         line,
         1,
@@ -357,13 +334,9 @@ type Go {
   # Workspace paths of the packages with something to do: tests to run in a
   # module the test setting selects, a main package the build setting selects,
   # or go:generate commands the generate setting selects.
-  let packageKeys(
-    ws: Workspace!,
-    modulePath: String = null,
-    lines: [String!] = null,
-  ): [String!]! {
+  let packageKeys(ws: Workspace!, modulePath: String = null): [String!]! {
     let empty: [String!]! = []
-    let roots = moduleRootsHere(ws, lines)
+    let roots = moduleRootsHere(ws)
     let generateAll = generate.length == 1 and generate.contains("**")
     let included = generate.filter { p => p.hasPrefix("!") == false }
     let excluded = generate.filter { p => p.hasPrefix("!") }.map { p => p.trimPrefix("!") }
@@ -379,7 +352,7 @@ type Go {
         excluded,
       )
     }
-    (lines ?? discoveryLines(ws))
+    discoveryLines(ws)
       .filter { line =>
         line.hasPrefix("package\t")
           and roots.contains(lineField(line, 1))
@@ -425,17 +398,10 @@ type Go {
   Go modules, keyed by their workspace-relative root.
   """
   modules(ws: Workspace!): GoModules! {
-    let scan = lib.scan(ws)
-    let prepared = GoDiscovery(
-      workspaceID: `${ws.id}`,
-      scan: scan,
-      lines: scan.file("_discovery_").contents.split("\n").filter { line => line != "" },
-    )
     GoModules(
-      paths: sorted(moduleRootsHere(ws, prepared.lines)),
+      paths: sorted(moduleRootsHere(ws)),
       mountPath: workspaceMountPath(ws),
       tool: self,
-      prepared: prepared,
     )
   }
 
@@ -495,8 +461,9 @@ type Go {
     goModuleAt(modPath, workspaceMountPath(ws))
   }
 
-  # Preserve discovery inputs when reached through the module collection.
-  let goModuleAt(modPath: String!, mount: String!, prepared: GoDiscovery = null): GoModule! {
+  # files is the module's Go files when the caller already has them, as
+  # Gomod.modules returns them, and null otherwise.
+  let goModuleAt(modPath: String!, mount: String!): GoModule! {
     GoModule(
       tool: self,
       path: modPath,
@@ -510,7 +477,6 @@ type Go {
       buildFlags: buildFlags,
       goflags: goflags,
       mountPath: mount,
-      prepared: prepared,
     )
   }
 }
@@ -526,21 +492,8 @@ type GoModules @collection {
   paths: [String!]! @keys
   let mountPath: String!
   let tool: Go!
-  let prepared: GoDiscovery!
 
-  module(path: String!): GoModule! @get {
-    tool.goModuleAt(path, mountPath, prepared)
-  }
-}
-
-# Immutable scan inputs captured while discovering modules. The workspace
-# identity prevents a manual call with a different workspace from reusing them.
-type GoDiscovery {
-  let workspaceID: String!
-  let scan: Directory!
-  let lines: [String!]!
-
-  let matches(ws: Workspace!): Boolean! { workspaceID == `${ws.id}` }
+  module(path: String!): GoModule! @get { tool.goModuleAt(path, mountPath) }
 }
 
 """
@@ -553,10 +506,8 @@ type GoPackages @collection {
   let tool: Go!
 
   package(path: String!): GoPackage! @get {
-    GoPackage(path: path, mountPath: mountPath, tool: tool, preparedModule: preparedModule)
+    GoPackage(path: path, mountPath: mountPath, tool: tool)
   }
-
-  let preparedModule: GoModule
 
   let operations: GoPackageSet! {
     GoPackageSet(
@@ -587,7 +538,7 @@ type GoPackageSet {
   The package in this directory.
   """
   package(path: String!): GoPackage! {
-    GoPackage(path: path, mountPath: mountPath, tool: tool, preparedModule: null)
+    GoPackage(path: path, mountPath: mountPath, tool: tool)
   }
 
   keys: [String!]! { paths }
@@ -694,14 +645,8 @@ type GoPackage {
 
   let tool: Go!
 
-  let preparedModule: GoModule
-
   let module(ws: Workspace!): GoModule! {
-    if (preparedModule != null and preparedModule!.prepared != null and preparedModule!.prepared!.matches(ws)) {
-      preparedModule!
-    } else {
-      tool.packageModule(ws, path, mountPath)
-    }
+    tool.packageModule(ws, path, mountPath)
   }
 
   """
@@ -843,7 +788,6 @@ A Go module rooted at a workspace-relative path.
 """
 type GoModule {
   let tool: Go!
-  let prepared: GoDiscovery
 
   """
   Packages owned by this module. Nested Go modules have their own collection.
@@ -851,11 +795,10 @@ type GoModule {
   packages(ws: Workspace!): GoPackages! {
     GoPackages(
       paths: tool.sorted(
-        tool.packageKeys(ws, path, discoveryLines(ws)),
+        tool.packageKeys(ws, path),
       ),
       mountPath: mountPath,
       tool: tool,
-      preparedModule: self,
     )
   }
 
@@ -1056,19 +999,9 @@ type GoModule {
     if (declared == "") { null } else { declared }
   }
 
-  let scanOutput(ws: Workspace!): Directory! {
-    if (prepared != null and prepared!.matches(ws)) { prepared!.scan } else {
-      lib.scan(ws)
-    }
-  }
-
-  # The bare scan was already read during module discovery.
+  # The scan's package discovery: see Go.discoveryLines.
   let discoveryLines(ws: Workspace!): [String!]! {
-    if (prepared != null and prepared!.matches(ws)) {
-      prepared!.lines
-    } else {
-      lib.scan(ws).file("_discovery_").contents.split("\n").filter { line => line != "" }
-    }
+    lib.scan(ws).file("_discovery_").contents.split("\n").filter { line => line != "" }
   }
 
   # Field n of this module's discovery line: 2 for its module path, 3 for its
@@ -1408,7 +1341,7 @@ type GoModule {
       base: base(ws),
       image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
       source: source(ws, test: true),
-      headers: scanOutput(ws).sync.file("_headers_.gohdr"),
+      headers: lib.scan(ws).sync.file("_headers_.gohdr"),
       mountPath: mountPath,
       workdir: path,
       modulePath: importPath(ws),
