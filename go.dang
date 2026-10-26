@@ -208,7 +208,7 @@ type Go {
   Prototype: prepare one module's immutable test inputs for an engine snapshot.
   Collection values and individual test receivers keep their original shape.
   """
-  snapshotModuleInputs(ws: Workspace!, modulePath: String!): GoSnapshotInputs! {
+  snapshotModuleInputs(ws: Workspace!, modulePath: String!): GoSnapshotInputs! @cache(policy: FunctionCachePolicy.PerSession) {
     goModule(ws, modulePath).snapshotInputs(ws)
   }
 
@@ -508,7 +508,7 @@ type GoSnapshotInputs {
   let testData: Directory!
   let runner: File!
 
-  testOutcomes(ws: Workspace!, selection: String!): String! {
+  testOutcomes(ws: Workspace!, selection: String!): String! @cache(policy: FunctionCachePolicy.PerSession) {
     if (ws.id != workspace.id) {
       raise "snapshot inputs belong to a different workspace"
     }
