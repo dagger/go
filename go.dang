@@ -492,12 +492,28 @@ Go packages in one module, keyed by workspace-relative directory.
 """
 type GoPackages @collection {
   paths: [String!]! @keys
+  # Plain discovery data, never a Workspace or the scan's object handles.
+  let catalog: String
+  let catalogModule: String
+  let catalogScanDigest: String
   delta: CollectionDelta @delta
   let mountPath: String!
   let tool: Go!
 
   package(path: String!): GoPackage! @get {
-    GoPackage(path: path, mountPath: mountPath, tool: tool)
+    let names: [String!]! = if (catalog == null) { [] } else {
+      let empty: [String!]! = []
+      let packages = JSON.decode(catalog!) :: [{{packagePath: String!, names: [String!]!}}!]!
+      packages.filter { pkg => pkg.packagePath == path }.reduce(empty) { names, pkg => names + pkg.names }
+    }
+    GoPackage(
+      path: path,
+      mountPath: mountPath,
+      tool: tool,
+      catalogNames: if (catalog == null) { null } else { names },
+      catalogModule: catalogModule,
+      catalogScanDigest: catalogScanDigest,
+    )
   }
 
   let operations: GoPackageSet! {
@@ -529,7 +545,14 @@ type GoPackageSet {
   The package in this directory.
   """
   package(path: String!): GoPackage! {
-    GoPackage(path: path, mountPath: mountPath, tool: tool)
+    GoPackage(
+      path: path,
+      mountPath: mountPath,
+      tool: tool,
+      catalogNames: null,
+      catalogModule: null,
+      catalogScanDigest: null,
+    )
   }
 
   keys: [String!]! { paths }
@@ -627,6 +650,11 @@ type GoPackageSet {
 A Go package.
 """
 type GoPackage {
+  let catalogNames: [String!]
+  let catalogModule: String
+  # The scan digest validates discovery reuse without a Workspace identity or reference.
+  let catalogScanDigest: String
+
   """
   Package directory, relative to the workspace.
   """
@@ -644,7 +672,12 @@ type GoPackage {
   Tests in this package, keyed by name.
   """
   tests(ws: Workspace!): GoTests! {
-    module(ws).testsInPackage(ws, path)
+    if (catalogNames != null and catalogModule != null and `${tool.lib.scan(ws).digest}` == catalogScanDigest) {
+      let mod = tool.goModuleAt(catalogModule!, mountPath)
+      GoTests(names: catalogNames!, directory: mod.relativeDir(path), module: mod)
+    } else {
+      module(ws).testsInPackage(ws, path)
+    }
   }
 
   """
@@ -784,7 +817,11 @@ type GoModule {
   Packages owned by this module. Nested Go modules have their own collection.
   """
   packages(ws: Workspace!): GoPackages! {
+    let catalog = lib.testCatalog(scan: lib.scan(ws), modulePath: path)
     GoPackages(
+      catalog: if (skipTest) { "[]" } else { catalog },
+      catalogModule: path,
+      catalogScanDigest: `${lib.scan(ws).digest}`,
       paths: tool.sorted(
         tool.packageKeys(ws, path),
       ),

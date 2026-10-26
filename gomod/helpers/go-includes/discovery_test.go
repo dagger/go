@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"go/build"
 	"go/parser"
@@ -178,5 +179,59 @@ func TestHeaderPackHoldsEmbeddable(t *testing.T) {
 	}
 	if want := fmt.Sprintf("link_test.go\n%o\n9\nx_test.go\n", uint32(fs.ModeSymlink|0o777)); !strings.Contains(pack, want) {
 		t.Errorf("the test file symlink is not in the pack as one:\n%s", pack)
+	}
+}
+
+// Keep source-search semantics: file/line order, Unicode, ignored filenames
+// in a valid package, build-tagged declarations, deduplication and module roots.
+func TestCachedTestCatalog(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"go.mod":                   "module example.com/root\n\ngo 1.26.1\n",
+		"_extra_test.go":           "package root\nfunc TestUnder(t *testing.T) {}\n",
+		"a_test.go":                "package root\nfunc Test中文(t *testing.T) {}\nfunc Fuzzé(f *testing.F) {}\nfunc Example() {}\nfunc Testify(t *testing.T) {}\nfunc TestMain(m *testing.M) {}\n",
+		"b_test.go":                "//go:build never\npackage root\nfunc TestTagged(t *testing.T) {}\nfunc Test中文(t *testing.T) {}\n",
+		"empty/x.go":               "package empty\n",
+		"testdata/ignored_test.go": "package ignored\nfunc TestIgnored(t *testing.T) {}\n",
+		"nested/go.mod":            "module example.com/nested\n\ngo 1.26.1\n",
+		"nested/x_test.go":         "package nested\nfunc TestNested(t *testing.T) {}\n",
+	})
+	if err := os.Symlink("a_test.go", filepath.Join(root, "0_link_test.go")); err != nil {
+		t.Fatal(err)
+	}
+	output := t.TempDir()
+	if err := runAll([]string{"--all", "--root", root, "--output-dir", output}); err != nil {
+		t.Fatal(err)
+	}
+	for module, want := range map[string][]testCatalogPackage{
+		".":      {{PackagePath: ".", Names: []string{"TestUnder", "Test中文", "Fuzzé", "Example", "TestTagged"}}},
+		"nested": {{PackagePath: "nested", Names: []string{"TestNested"}}},
+	} {
+		data, err := os.ReadFile(filepath.Join(output, moduleOutputFile(module, ".tests.json")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []testCatalogPackage
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		gotJSON, _ := json.Marshal(got)
+		wantJSON, _ := json.Marshal(want)
+		if string(gotJSON) != string(wantJSON) {
+			t.Errorf("%s catalog %s; want %s", module, gotJSON, wantJSON)
+		}
+	}
+	// An edit must change the cached scan output.
+	if err := os.WriteFile(filepath.Join(root, "a_test.go"), []byte("package root\nfunc TestChanged(t *testing.T) {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := runAll([]string{"--all", "--root", root, "--output-dir", output}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(output, "_root_.tests.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "TestChanged") {
+		t.Fatalf("catalog did not change: %s", data)
 	}
 }
