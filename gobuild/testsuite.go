@@ -44,6 +44,9 @@ func (m *Gobuild) TestSuite(
 	// A test selection, expressed as go test's -run regular expression.
 	// +optional
 	runPattern string,
+	// The custom container base was made from, as for TestBinary.
+	// +optional
+	from *dagger.Container,
 ) (*dagger.Directory, error) {
 	goflags, err := base.EnvVariable(ctx, "GOFLAGS")
 	if err != nil {
@@ -83,7 +86,7 @@ func (m *Gobuild) TestSuite(
 		}
 		binary := "bin/" + stableName(name) + ".test"
 		entry := testPackage{Package: name, Binary: binary, Dir: path.Join(mountPath, workdir, rel)}
-		file, buildErr := m.TestBinary(ctx, base, image, source, headers, mountPath, workdir, pkg, nil)
+		file, buildErr := m.TestBinary(ctx, base, image, from, source, headers, mountPath, workdir, pkg, nil)
 		if buildErr == nil {
 			file, buildErr = file.Sync(ctx)
 		}

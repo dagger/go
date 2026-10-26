@@ -1380,6 +1380,7 @@ type GoModule {
     let binaries = gobuild.testSuite(
       base: base(ws),
       image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
+      from: if (baseImage == null) { null } else { baseImage.withoutEntrypoint },
       source: source(ws, test: true),
       headers: lib.scan(ws).sync.file("_headers_.gohdr"),
       mountPath: mountPath,

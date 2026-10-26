@@ -471,7 +471,14 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg runPattern", err))
 				}
 			}
-			return (*Gobuild).TestSuite(&parent, ctx, base, source, headers, mountPath, workdir, modulePath, packages, image, runPattern)
+			var from *dagger.Container
+			if inputArgs["from"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["from"]), &from)
+				if err != nil {
+					panic(fmt.Errorf("failed to unmarshal input arg from: %w", err))
+				}
+			}
+			return (*Gobuild).TestSuite(&parent, ctx, base, source, headers, mountPath, workdir, modulePath, packages, image, runPattern, from)
 		default:
 			return nil, fmt.Errorf("unknown function %s", fnName)
 		}
@@ -525,6 +532,7 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 					WithFunction(
 						dag.Function("TestSuite",
 							dag.TypeDef().WithObject("Directory")).
+							WithArg("from", dag.TypeDef().WithObject("Container").WithOptional(true), dagger.FunctionWithArgOpts{Description: "The custom container base was made from, as for TestBinary."}).
 							WithDescription("TestSuite builds selected packages with the same cached compile steps as\nTestBinary. Its directory holds binaries and an otelgotest manifest. Run it\nwith the source and testdata mounted at mountPath. Build\nfailures remain per-package results, so unrelated tests can still run.\nAs with TestBinary, vet is left to lint checks.").
 							WithSourceMap(dag.SourceMap("testsuite.go", 33, 1)).
 							WithArg("base", dag.TypeDef().WithObject("Container"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("testsuite.go", 35, 2)}).

@@ -257,6 +257,8 @@ func (r *Gobuild) TestBinary(base *Container, source *Directory, headers *File, 
 
 // GobuildTestSuiteOpts contains options for Gobuild.TestSuite
 type GobuildTestSuiteOpts struct {
+	// The custom container base was made from, as for TestBinary.
+	From  *Container
 	Image string
 	// A test selection, expressed as go test's -run regular expression.
 	RunPattern string
@@ -273,6 +275,9 @@ func (r *Gobuild) TestSuite(base *Container, source *Directory, headers *File, m
 	assertNotNil("headers", headers)
 	q := r.query.Select("testSuite")
 	for i := len(opts) - 1; i >= 0; i-- {
+		if !querybuilder.IsZeroValue(opts[i].From) {
+			q = q.Arg("from", opts[i].From)
+		}
 		// `image` optional argument
 		if !querybuilder.IsZeroValue(opts[i].Image) {
 			q = q.Arg("image", opts[i].Image)
