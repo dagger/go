@@ -75,28 +75,26 @@ type GoDev {
   }
 
   """
-  Prepared snapshot inputs cannot be applied to another workspace.
+  Prepared outcomes stay bound to their captured source and testdata.
   """
-  snapshotInputsWorkspaceCheck: Void @check {
-    let first = directory
+  snapshotInputsIsolationCheck: Void @check {
+    let fixture = directory
       .withNewFile("go.mod", "module example.com/snapshot\n\ngo 1.26.6\n")
-      .withNewFile("x_test.go", "package snapshot\nimport \"testing\"\nfunc TestOne(t *testing.T) {}\n")
-      .asWorkspace
-    let second = directory
-      .withNewFile("go.mod", "module example.com/other\n\ngo 1.26.6\n")
-      .withNewFile("x_test.go", "package snapshot\nimport \"testing\"\nfunc TestOne(t *testing.T) {}\n")
-      .asWorkspace
-    let prepared = go.snapshotModuleInputs(first, ".")
-    let message = prepared.testOutcomes(
-      second,
-      "[{\"packagePath\":\".\",\"names\":[\"TestOne\"]}]",
-    ) rescue {
-      err: Error => err.message
-    }
-    assert(
-      message.contains("snapshot inputs belong to a different workspace"),
-      "prepared inputs accepted a different workspace",
-    )
+      .withNewFile("x_test.go", ```go
+        package snapshot
+        import ("os"; "testing")
+        func TestOne(t *testing.T) {
+          value, err := os.ReadFile("testdata/value")
+          if err != nil || string(value) != "first" { t.Fatalf("input: %s (%v)", value, err) }
+        }
+      ``` + "\n")
+    let first = fixture.withNewFile("testdata/value", "first").asWorkspace
+    let second = fixture.withNewFile("testdata/value", "second").asWorkspace
+    let selection = "[{\"packagePath\":\".\",\"names\":[\"TestOne\"]}]"
+    let good = go.snapshotModuleInputs(first, ".").testOutcomes(selection)
+    let bad = go.snapshotModuleInputs(second, ".").testOutcomes(selection)
+    assert(good == "[[\".\\nTestOne\",\"\"]]", "first snapshot failed: " + good)
+    assert(bad.contains("second"), "changed testdata reused the first snapshot's outcome: " + bad)
   }
 
   # A main package that prints message.
