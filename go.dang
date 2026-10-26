@@ -214,9 +214,13 @@ type Go {
     selection: String!,
     scan: Directory!,
     lines: [String!]!,
-    workspaceID: String!,
+    preparedWorkspace: Workspace!,
   ): String! {
-    let prepared = GoDiscovery(workspaceID: workspaceID, scan: scan, lines: lines)
+    let prepared = GoDiscovery(
+      workspaceID: `${preparedWorkspace.id}`,
+      scan: scan,
+      lines: lines,
+    )
     goModuleAt(modulePath, workspaceMountPath(ws), prepared).prepareSnapshotTestOutcomes(
       ws,
       selection,
