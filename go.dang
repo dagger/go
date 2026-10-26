@@ -204,6 +204,14 @@ type Go {
     goModule(ws, modulePath).prepareSnapshotTestOutcomes(ws, selection)
   }
 
+  """
+  Prototype: prepare one module's immutable test inputs for an engine snapshot.
+  Collection values and individual test receivers keep their original shape.
+  """
+  snapshotModuleInputs(ws: Workspace!, modulePath: String!): GoSnapshotInputs! {
+    goModule(ws, modulePath).snapshotInputs(ws)
+  }
+
   let cachedTestResults(ws: Workspace!, modulePath: String!): GoTestResults! {
     let result = api.testResults(ws: ws, modulePath: modulePath)
     GoTestResults(report: result.report, exitCode: result.exitCode, stderr: result.stderr)
@@ -484,6 +492,29 @@ type Go {
 # Keep all Dang types in one source file until Dagger v0.21.x can
 # convert Workspace arguments for installed multi-file Dang toolchains.
 # See dagger/dagger#13476.
+
+"""
+Prepared test inputs owned once per module by the engine discovery snapshot.
+These references are never stored in GoModules, GoPackages, GoTests or GoTest.
+"""
+type GoSnapshotInputs {
+  let workspace: Workspace!
+  let module: GoModule!
+  let base: Container!
+  let image: String!
+  let source: Directory!
+  let headers: File!
+  let modulePath: String!
+  let testData: Directory!
+  let runner: File!
+
+  testOutcomes(ws: Workspace!, selection: String!): String! {
+    if (ws.id != workspace.id) {
+      raise "snapshot inputs belong to a different workspace"
+    }
+    module.prepareSnapshotTestOutcomes(ws, selection, self)
+  }
+}
 
 """
 Go modules in a workspace, keyed by root directory.
@@ -1261,11 +1292,15 @@ type GoModule {
   Test container with this module's sources, testdata, and otelgotest in
   place, before any test command runs.
   """
-  let testEnv(ws: Workspace!): Container! {
+  let testEnv(ws: Workspace!, inputs: GoSnapshotInputs = null): Container! {
     gomod
-      .withTool(base(ws), "otelgotest", testRunner)
-      .withDirectory(".", source(ws, test: true))
-      .withDirectory(".", testData(ws))
+      .withTool(
+        if (inputs == null) { base(ws) } else { inputs!.base },
+        "otelgotest",
+        if (inputs == null) { testRunner } else { inputs!.runner },
+      )
+      .withDirectory(".", if (inputs == null) { source(ws, test: true) } else { inputs!.source })
+      .withDirectory(".", if (inputs == null) { testData(ws) } else { inputs!.testData })
       # Nested Dagger clients find the workspace boundary by walking up to .git.
       .withNewFile(".git/HEAD", "ref: refs/heads/main\n")
   }
@@ -1320,16 +1355,39 @@ type GoModule {
     JSON.encode(result.outcomes(discovered, importPath(ws)))
   }
 
-  let prepareSnapshotTestOutcomes(ws: Workspace!, selection: String!): String! {
+  let snapshotInputs(ws: Workspace!): GoSnapshotInputs! {
+    GoSnapshotInputs(
+      workspace: ws,
+      module: self,
+      base: base(ws),
+      image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
+      source: source(ws, test: true),
+      headers: lib.scan(ws).sync.file("_headers_.gohdr"),
+      modulePath: importPath(ws),
+      testData: testData(ws),
+      runner: testRunner,
+    )
+  }
+
+  let prepareSnapshotTestOutcomes(
+    ws: Workspace!,
+    selection: String!,
+    inputs: GoSnapshotInputs = null,
+  ): String! {
     let packages = JSON.decode(selection) :: [{{packagePath: String!, names: [String!]!}}!]!
     let discovered = packages.map { pkg =>
       GoTests(names: pkg.names, directory: relativeDir(pkg.packagePath), module: self)
     }
-    let result = prepareSelectedTests(ws, discovered)
-    JSON.encode(result.outcomes(discovered, importPath(ws)))
+    let result = prepareSelectedTests(ws, discovered, inputs)
+    let modPath = if (inputs == null) { importPath(ws) } else { inputs!.modulePath }
+    JSON.encode(result.outcomes(discovered, modPath))
   }
 
-  let prepareSelectedTests(ws: Workspace!, discovered: [GoTests!]!): GoTestResults! {
+  let prepareSelectedTests(
+    ws: Workspace!,
+    discovered: [GoTests!]!,
+    inputs: GoSnapshotInputs = null,
+  ): GoTestResults! {
     let selected = discovered.filter { tests => tests.names.length > 0 }
     if (selected.length == 0) { raise "no tests selected in module " + path }
     let empty: [String!]! = []
@@ -1338,19 +1396,23 @@ type GoModule {
     let dirs = tool.sorted(selected.map { tests => packageArg(tests.directory) })
     let run = if (narrowed) { "^(" + names.join("|") + ")$" } else { "" }
     let binaries = gobuild.testSuite(
-      base: base(ws),
-      image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
-      source: source(ws, test: true),
-      headers: lib.scan(ws).sync.file("_headers_.gohdr"),
+      base: if (inputs == null) { base(ws) } else { inputs!.base },
+      image: if (inputs == null) {
+        if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" }
+      } else { inputs!.image },
+      source: if (inputs == null) { source(ws, test: true) } else { inputs!.source },
+      headers: if (inputs == null) {
+        lib.scan(ws).sync.file("_headers_.gohdr")
+      } else { inputs!.headers },
       mountPath: mountPath,
       workdir: path,
-      modulePath: importPath(ws),
+      modulePath: if (inputs == null) { importPath(ws) } else { inputs!.modulePath },
       packages: dirs,
       runPattern: run,
     )
-    let executed = testEnv(ws)
+    let executed = testEnv(ws, inputs)
       # This mode needs the pinned runner, even when a custom base has an older one.
-      .withFile("/usr/local/bin/otelgotest", testRunner)
+      .withFile("/usr/local/bin/otelgotest", if (inputs == null) { testRunner } else { inputs!.runner })
       .withDirectory("/go-test-binaries", binaries)
       .withWorkdir(path)
       .withExec(

@@ -74,6 +74,31 @@ type GoDev {
     null
   }
 
+  """
+  Prepared snapshot inputs cannot be applied to another workspace.
+  """
+  snapshotInputsWorkspaceCheck: Void @check {
+    let first = directory
+      .withNewFile("go.mod", "module example.com/snapshot\n\ngo 1.26.6\n")
+      .withNewFile("x_test.go", "package snapshot\nimport \"testing\"\nfunc TestOne(t *testing.T) {}\n")
+      .asWorkspace
+    let second = directory
+      .withNewFile("go.mod", "module example.com/other\n\ngo 1.26.6\n")
+      .withNewFile("x_test.go", "package snapshot\nimport \"testing\"\nfunc TestOne(t *testing.T) {}\n")
+      .asWorkspace
+    let prepared = go.snapshotModuleInputs(first, ".")
+    let message = prepared.testOutcomes(
+      second,
+      "[{\"packagePath\":\".\",\"names\":[\"TestOne\"]}]",
+    ) rescue {
+      err: Error => err.message
+    }
+    assert(
+      message.contains("snapshot inputs belong to a different workspace"),
+      "prepared inputs accepted a different workspace",
+    )
+  }
+
   # A main package that prints message.
   let goMain(message: String!): String! {
     "package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(\"" + message + "\") }\n"
@@ -692,10 +717,12 @@ type GoDev {
       let pkg = variant.split(";").takeFirst(1).join("")
       let flags = variant.split(";").dropFirst(1)
       let race = flags.contains("-race")
-      let tool = if (race) { go(base: cgo, buildFlags: flags) } else { go(
-        version: "1.26.1",
-        buildFlags: flags,
-      ) }
+      let tool = if (race) { go(base: cgo, buildFlags: flags) } else {
+        go(
+          version: "1.26.1",
+          buildFlags: flags,
+        )
+      }
       let built = tool.packages(ws).get(key: pkg).testBinary(ws)
       let compared = cgo
         .withEnvVariable("CGO_ENABLED", if (race) { "1" } else { "0" })
