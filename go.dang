@@ -1128,6 +1128,14 @@ type GoModule {
       .withTool(base(ws), "otelgotest", testRunner)
       .withDirectory(".", source(ws, test: true))
       .withDirectory(".", testData(ws))
+      # A test that serves a Dagger module needs that module's config, which is
+      # not a Go file and so is not in the source mount. Without it the serve
+      # fails with "does not contain a dagger config file" even though the
+      # module's Go code is right there.
+      .withDirectory(
+        ".",
+        ws.directory("/", include: ["**/dagger-module.toml", "**/dagger.json"]),
+      )
       # Nested Dagger clients find the workspace boundary by walking up to .git.
       .withNewFile(".git/HEAD", "ref: refs/heads/main\n")
   }
@@ -1138,7 +1146,13 @@ type GoModule {
   let testExec(ws: Workspace!): Container! {
     testEnv(ws)
       .withWorkdir(path)
-      .withExec(["otelgotest", "./..."], experimentalPrivilegedNesting: true)
+      # With its own session rather than the one running the tests, a module
+      # address resolves against the user's workspace instead of against this
+      # module. A client provisions through a CLI there; the engine mounts a
+      # version-matched one on PATH, which newer SDKs find by themselves, while
+      # older ones only read _EXPERIMENTAL_DAGGER_CLI_BIN.
+      .withEnvVariable("_EXPERIMENTAL_DAGGER_CLI_BIN", "/dev/.dagger/dagger")
+      .withExec(["otelgotest", "./..."], daggerInDaggerNewSession: true)
   }
 
   """
@@ -1149,7 +1163,13 @@ type GoModule {
     let run = if (names.length == 0) { [] } else { ["-run", "^(" + names.join("|") + ")$"] }
     testEnv(ws)
       .withWorkdir(path)
-      .withExec(["otelgotest"] + run + [packageArg(dir)], experimentalPrivilegedNesting: true)
+      # With its own session rather than the one running the tests, a module
+      # address resolves against the user's workspace instead of against this
+      # module. A client provisions through a CLI there; the engine mounts a
+      # version-matched one on PATH, which newer SDKs find by themselves, while
+      # older ones only read _EXPERIMENTAL_DAGGER_CLI_BIN.
+      .withEnvVariable("_EXPERIMENTAL_DAGGER_CLI_BIN", "/dev/.dagger/dagger")
+      .withExec(["otelgotest"] + run + [packageArg(dir)], daggerInDaggerNewSession: true)
       .sync rescue {
       err: Error => raise "Go tests in " + packagePath(dir) + ": " + err.message
     }
