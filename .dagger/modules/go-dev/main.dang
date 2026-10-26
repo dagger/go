@@ -97,6 +97,39 @@ type GoDev {
     assert(bad.contains("second"), "changed testdata reused the first snapshot's outcome: " + bad)
   }
 
+  """
+  Catalog discovery matches source search and remains correct with another workspace.
+  """
+  testCatalogCheck: Void @check {
+    let tree = directory
+      .withNewFile("go.mod", "module example.com/catalog\n\ngo 1.26.6\n")
+      .withNewFile("_extra_test.go", "package catalog\nimport \"testing\"\nfunc TestUnder(t *testing.T) {}\n")
+      .withNewFile("a_test.go", "package catalog\nimport \"testing\"\nfunc Test中文(t *testing.T) {}\nfunc Fuzzé(f *testing.F) {}\nfunc Example() {}\n")
+      .withNewFile("b_test.go", "//go:build never\n\npackage catalog\nimport \"testing\"\nfunc TestTagged(t *testing.T) {}\n")
+      .withNewFile("nested/go.mod", "module example.com/nested\n\ngo 1.26.6\n")
+      .withNewFile("nested/x_test.go", "package nested\nimport \"testing\"\nfunc TestNested(t *testing.T) {}\n")
+    let first = tree.asWorkspace
+    let tool = go(version: "1.26.6")
+    let fast = tool.module(first, ".", findUp: false).packages(first).get(key: ".")
+    let old = tool.packages(first).get(key: ".")
+    let names = fast.tests(first).keys
+    assert(names == old.tests(first).keys, "catalog differs from source search: " + names.join(","))
+    assert(
+      names == ["TestUnder", "Test中文", "Fuzzé", "Example", "TestTagged"],
+      "catalog lost source ordering or declarations",
+    )
+    let second = tree.withNewFile("a_test.go", "package catalog\nimport \"testing\"\nfunc TestChanged(t *testing.T) {}\n").asWorkspace
+    let changed = fast.tests(second).keys
+    assert(
+      changed.contains("TestChanged") and changed.contains("Test中文") == false,
+      "package reused a different workspace's catalog",
+    )
+    let refreshed = tool.module(second, ".", findUp: false).packages(second).get(key: ".").tests(second).keys
+    assert(refreshed == changed, "new source reused the old cached catalog")
+    let nested = tool.module(first, "nested", findUp: false).packages(first).get(key: "nested").tests(first).keys
+    assert(nested == ["TestNested"], "catalog crossed module boundaries")
+  }
+
   # A main package that prints message.
   let goMain(message: String!): String! {
     "package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(\"" + message + "\") }\n"

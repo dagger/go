@@ -64,6 +64,15 @@ type Gomod {
       .filter { mod => mod.goFiles!.length > 0 }
   }
 
+  """
+  Immutable test discovery records for one module. Only the scan and module
+  path enter this cache key; the result cannot own a Workspace producer.
+  """
+  testCatalog(scan: Directory!, modulePath: String!): String! {
+    let name = if (modulePath == ".") { "_root_" } else { modulePath }
+    scan.file(name + ".tests.json").contents
+  }
+
   # Each module's own Go files, keyed by module path, as GoMod.unsortedOwnFiles
   # lists them. Globbing once per module was a workspace call per module, and
   # each module's glob covered the modules nested in it again; this globs once
