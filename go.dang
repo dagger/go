@@ -817,14 +817,15 @@ type GoModule {
   Packages owned by this module. Nested Go modules have their own collection.
   """
   packages(ws: Workspace!): GoPackages! {
-    let catalog = lib.testCatalog(scan: lib.scan(ws), modulePath: path)
+    let paths = tool.sorted(tool.packageKeys(ws, path))
+    let catalog = if (paths.length == 0 or skipTest) { "[]" } else {
+      lib.testCatalog(scan: lib.scan(ws), modulePath: path)
+    }
     GoPackages(
-      catalog: if (skipTest) { "[]" } else { catalog },
+      catalog: catalog,
       catalogModule: path,
       catalogScanDigest: `${lib.scan(ws).digest}`,
-      paths: tool.sorted(
-        tool.packageKeys(ws, path),
-      ),
+      paths: paths,
       mountPath: mountPath,
       tool: tool,
     )
