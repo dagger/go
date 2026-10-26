@@ -212,6 +212,38 @@ type Go {
     goModule(ws, modulePath).snapshotInputs(ws)
   }
 
+  """
+  Cache outcomes from immutable inputs without retaining their producer call.
+  Passing the prepared receiver itself would also retain that call's Workspace.
+  """
+  preparedTestOutcomes(
+    modulePath: String!,
+    mountPath: String!,
+    base: Container!,
+    image: String!,
+    source: Directory!,
+    headers: File!,
+    importPath: String!,
+    testData: Directory!,
+    runner: File!,
+    selection: String!,
+  ): String! {
+    let mod = goModuleAt(modulePath, mountPath)
+    mod.prepareSnapshotOutcomes(
+      selection,
+      GoSnapshotInputs(
+        module: mod,
+        base: base,
+        image: image,
+        source: source,
+        headers: headers,
+        modulePath: importPath,
+        testData: testData,
+        runner: runner,
+      ),
+    )
+  }
+
   let cachedTestResults(ws: Workspace!, modulePath: String!): GoTestResults! {
     let result = api.testResults(ws: ws, modulePath: modulePath)
     GoTestResults(report: result.report, exitCode: result.exitCode, stderr: result.stderr)
@@ -507,9 +539,9 @@ type GoSnapshotInputs {
   let testData: Directory!
   let runner: File!
 
-  # Only immutable inputs and explicit selection enter the reusable cache key.
-  # Workspace ownership and selection membership are checked by the engine.
-  testOutcomes(selection: String!): String! {
+  # This convenience call keeps the producer session-local. The engine uses
+  # Go.preparedTestOutcomes with individual immutable inputs for durable reuse.
+  testOutcomes(selection: String!): String! @cache(policy: FunctionCachePolicy.PerSession) {
     module.prepareSnapshotOutcomes(selection, self)
   }
 }
