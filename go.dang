@@ -1282,7 +1282,7 @@ type GoModule {
     gomod
       .toolBuilder
       .withEnvVariable("GOBIN", "/usr/local/bin")
-      .withExec(["go", "install", "github.com/dagger/otel-go/cmd/otelgotest@5a012910da9955235f189d4ea03b1b49835df3fb"])
+      .withExec(["go", "install", "github.com/dagger/otel-go/cmd/otelgotest@ce22e295ea61ec9e185ac73d1b1006729563830a"])
       .file("/usr/local/bin/otelgotest")
   }
 
@@ -1394,11 +1394,12 @@ type GoModule {
       .withFile("/usr/local/bin/otelgotest", testRunner)
       .withDirectory("/go-test-binaries", binaries)
       .withWorkdir(path)
+      .withEnvVariable("_EXPERIMENTAL_DAGGER_CLI_BIN", "/dev/.dagger/dagger")
       .withExec(
         ["otelgotest", "--test-binaries", "/go-test-binaries/manifest.json", "-json"],
         expect: ANY,
         redirectStdout: "/go-test-report.json",
-        experimentalPrivilegedNesting: true,
+        daggerInDaggerNewSession: true,
       )
     GoTestResults(
       report: executed.file("/go-test-report.json"),
