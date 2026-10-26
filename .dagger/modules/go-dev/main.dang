@@ -110,6 +110,10 @@ type GoDev {
       .withNewFile("nested/x_test.go", "package nested\nimport \"testing\"\nfunc TestNested(t *testing.T) {}\n")
     let first = tree.asWorkspace
     let tool = go(version: "1.26.6")
+    assert(
+      tool.module(first, "absent", findUp: false).packages(first).keys == [],
+      "an absent module must have no package keys",
+    )
     let fast = tool.module(first, ".", findUp: false).packages(first).get(key: ".")
     let old = tool.packages(first).get(key: ".")
     let names = fast.tests(first).keys
