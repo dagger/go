@@ -860,6 +860,25 @@ func TestByHeight(t *testing.T) {
 	}
 }
 
+// The first slots go to the highest packages that import nothing the walk
+// builds; a package importing one waits, however high.
+func TestFirstSlots(t *testing.T) {
+	nodes := map[string]*node{
+		"low":    {},
+		"high":   {Deps: []string{"outside"}},
+		"mid":    {},
+		"higher": {Deps: []string{"low"}},
+	}
+	heights := map[string]int64{"low": 1, "high": 50, "mid": 20, "higher": 90}
+	got := firstSlots(nodes, heights, 2)
+	if len(got) != 2 || !got["high"] || !got["mid"] {
+		t.Errorf("firstSlots = %v, want high and mid", got)
+	}
+	if got := firstSlots(nodes, heights, 16); len(got) != 3 || got["higher"] {
+		t.Errorf("firstSlots with room for all = %v, want the three leaves", got)
+	}
+}
+
 // A source package weighs its Go files' real sizes, not the headers the plan
 // saw; a dependency keeps the plan's weight.
 func TestWeighSource(t *testing.T) {

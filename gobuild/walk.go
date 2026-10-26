@@ -96,7 +96,8 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 	for id := range nodes {
 		results[id] = &result{done: make(chan struct{})}
 	}
-	slots := newGate(packageConcurrency)
+	first := firstSlots(nodes, w.heights, packageConcurrency)
+	slots := newGate(packageConcurrency - len(first))
 	var wg sync.WaitGroup
 	for id, n := range nodes {
 		wg.Add(1)
@@ -153,7 +154,9 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 			} else {
 				ran = ctr.WithExec([]string{"sh", "-c", n.Script}, bare)
 			}
-			slots.acquire(w.heights[id])
+			if !first[id] {
+				slots.acquire(w.heights[id])
+			}
 			defer slots.release()
 			// Evaluate the output directory first, then read the file from
 			// it: only a file read from an evaluated directory is keyed by its
@@ -293,6 +296,34 @@ func heightsOf(blocks map[string]*block, weights map[string]int64) map[string]in
 		heightOf(id)
 	}
 	return heights
+}
+
+// firstSlots are the packages that start with a slot: the n highest of
+// those that import nothing the walk builds. The gate ranks only the
+// packages waiting for a slot, and at the start only these can ask, so
+// without this the first n to ask would get them, whatever their height.
+func firstSlots(nodes map[string]*node, heights map[string]int64, n int) map[string]bool {
+	leaves := map[string]int64{}
+	for id, nd := range nodes {
+		leaf := true
+		for _, d := range nd.Deps {
+			if _, ok := nodes[d]; ok {
+				leaf = false
+				break
+			}
+		}
+		if leaf {
+			leaves[id] = heights[id]
+		}
+	}
+	first := map[string]bool{}
+	for _, id := range byHeight(leaves) {
+		if len(first) == n {
+			break
+		}
+		first[id] = true
+	}
+	return first
 }
 
 // gate hands out n slots, each freed slot to the highest waiter.
