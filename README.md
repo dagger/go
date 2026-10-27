@@ -1,5 +1,5 @@
-> This experimental branch requires dagger/dagger PR 14802 with the local Dang
-> collection-view fix. It shares test execution across packages in each Go module.
+> This branch requires dagger/dagger PR 14802. It reads selected collections
+> through the engine API and shares test execution across packages in each Go module.
 
 # go
 
