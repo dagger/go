@@ -27,6 +27,11 @@ import (
 // search would.
 const discoveryFile = "_discovery_"
 
+// Test names in file and source order, keyed by workspace-relative package
+// directory. Keeping these alongside discovery avoids searching the entire
+// module and reading every match again for each package's test collection.
+const testNamesFile = "_testnames_"
+
 var (
 	// The go module's test search pattern, with ripgrep's Unicode \w spelled
 	// out: Go's \w is ASCII alone, and a test may be named in any script.
@@ -38,6 +43,7 @@ var (
 
 func (index *localIndex) writeDiscovery(outPath string) error {
 	var out strings.Builder
+	var testNames strings.Builder
 	for _, root := range index.goModules() {
 		modPath := ""
 		goModPath := path.Join(root, "go.mod")
@@ -50,9 +56,10 @@ func (index *localIndex) writeDiscovery(outPath string) error {
 		kinds := map[string]string{}
 		files := index.packageFiles(root)
 		fileKindsOf := make([]string, len(files))
+		fileTests := make([][]string, len(files))
 		errs := make([]error, len(files))
 		forEach(len(files), func(i int) {
-			fileKindsOf[i], errs[i] = fileKinds(filepath.Join(index.root, filepath.FromSlash(files[i])), strings.HasSuffix(files[i], "_test.go"))
+			fileKindsOf[i], fileTests[i], errs[i] = fileKinds(filepath.Join(index.root, filepath.FromSlash(files[i])), strings.HasSuffix(files[i], "_test.go"))
 		})
 		for i, file := range files {
 			// A file that can't be read marks nothing here: the module's own
@@ -61,6 +68,9 @@ func (index *localIndex) writeDiscovery(outPath string) error {
 				continue
 			}
 			dir := path.Dir(moduleRelative(root, file))
+			for _, name := range fileTests[i] {
+				testNames.WriteString(path.Dir(file) + "\t" + name + "\n")
+			}
 			for _, c := range fileKindsOf[i] {
 				if !strings.ContainsRune(kinds[dir], c) {
 					kinds[dir] += string(c)
@@ -80,24 +90,28 @@ func (index *localIndex) writeDiscovery(outPath string) error {
 			out.WriteString("package\t" + root + "\t" + dir + "\t" + string(k) + "\n")
 		}
 	}
-	return os.WriteFile(outPath, []byte(out.String()), 0o644)
+	if err := os.WriteFile(outPath, []byte(out.String()), 0o644); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(filepath.Dir(outPath), testNamesFile), []byte(testNames.String()), 0o644)
 }
 
 // fileKinds is what one Go file marks its directory as: "t", "m" and "g", as
-// discoveryFile describes them.
-func fileKinds(file string, test bool) (string, error) {
+// discoveryFile describes them, and the test names encountered in source order.
+func fileKinds(file string, test bool) (string, []string, error) {
 	f, err := os.Open(file)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	defer f.Close()
 	r := bufio.NewReader(f)
-	tests, main, ignore, generate := false, false, false, false
+	var tests []string
+	main, ignore, generate := false, false, false
 	for {
 		// Lines of any length: generated files can hold very long ones.
 		line, err := r.ReadString('\n')
 		if err != nil && err != io.EOF {
-			return "", err
+			return "", nil, err
 		}
 		if line == "" && err == io.EOF {
 			break
@@ -105,7 +119,8 @@ func fileKinds(file string, test bool) (string, error) {
 		line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
 		switch {
 		case test && testFuncLine.MatchString(line):
-			tests = true
+			name, _, _ := strings.Cut(strings.TrimPrefix(line, "func "), "(")
+			tests = append(tests, name)
 		case !test && mainLine.MatchString(line):
 			main = true
 		case !test && ignoreLine.MatchString(line):
@@ -116,7 +131,7 @@ func fileKinds(file string, test bool) (string, error) {
 		}
 	}
 	k := ""
-	if tests {
+	if len(tests) > 0 {
 		k += "t"
 	}
 	if main && !ignore {
@@ -125,5 +140,5 @@ func fileKinds(file string, test bool) (string, error) {
 	if generate {
 		k += "g"
 	}
-	return k, nil
+	return k, tests, nil
 }
