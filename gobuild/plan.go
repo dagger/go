@@ -1185,6 +1185,35 @@ func (b *block) output() string {
 	return b.name + ".a"
 }
 
+// compileDeps are the dependencies a block reads outside its link's import
+// config: for the main package that links, those its own compile imports.
+func (b *block) compileDeps() []string {
+	seen := map[string]bool{}
+	var deps []string
+	linkCfg := false
+	for i, l := range b.lines {
+		if m := reHeredoc.FindStringSubmatch(l); m != nil {
+			linkCfg = strings.HasSuffix(m[1], "/importcfg.link")
+			continue
+		}
+		if l == "EOF" {
+			linkCfg = false
+			continue
+		}
+		if linkCfg || i == b.linkAt-1 {
+			continue
+		}
+		for _, m := range reDepArchive.FindAllStringSubmatch(l, -1) {
+			if m[1] != b.id && !seen[m[1]] {
+				seen[m[1]] = true
+				deps = append(deps, m[1])
+			}
+		}
+	}
+	sort.Strings(deps)
+	return deps
+}
+
 // splits reports whether a package's compile writes its export data and its
 // object code to two archives, output and linkOutput, as gc's -linkobj does:
 // an edit that changes only object code, such as a line number, then leaves

@@ -445,7 +445,16 @@ func TestScriptSplitsExportData(t *testing.T) {
 		"packagefile example.com/m/lib=$WORK/b002/_pkg_.a",
 		"EOF",
 		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main -importcfg $WORK/b001/importcfg -pack ./main.go",
-	), "packagefile example.com/m=$WORK/b001/_pkg_.a", "packagefile example.com/m=$WORK/b001/_pkg_.a\npackagefile example.com/m/lib=$WORK/b002/_pkg_.a", 1)
+	), "packagefile example.com/m=$WORK/b001/_pkg_.a", "packagefile example.com/m=$WORK/b001/_pkg_.a\npackagefile example.com/m/lib=$WORK/b002/_pkg_.a\npackagefile example.com/m/dep=$WORK/b003/_pkg_.a", 1) +
+		"\n" + strings.Join([]string{
+		"mkdir -p $WORK/b003/",
+		"",
+		"#",
+		"# example.com/m/dep",
+		"#",
+		"",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b003/_pkg_.a -p example.com/m/dep -pack ./dep/dep.go",
+	}, "\n")
 	blocks, err := parsePlan(plan, testRoots)
 	if err != nil {
 		t.Fatal(err)
@@ -469,6 +478,14 @@ func TestScriptSplitsExportData(t *testing.T) {
 	}
 	if strings.Contains(script, "-linkobj") {
 		t.Errorf("the main package that links splits:\n%s", script)
+	}
+	// The link reads the main package's own archive, which its exec wrote.
+	if own := "/work/" + main.name + "/" + main.name + ".a"; !strings.Contains(script, "-buildmode=exe "+own+"\n") || !strings.Contains(script, "-o "+own+" ") {
+		t.Errorf("main's script doesn't compile to and link %s:\n%s", own, script)
+	}
+	// The link reads every dependency, its own compile only its imports.
+	if !slices.Equal(main.deps, []string{"b002", "b003"}) || !slices.Equal(main.compileDeps(), []string{"b002"}) {
+		t.Errorf("main's deps %v, compile deps %v", main.deps, main.compileDeps())
 	}
 }
 

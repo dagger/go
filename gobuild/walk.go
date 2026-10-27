@@ -22,6 +22,10 @@ type node struct {
 	Name       string   `json:"name"`
 	ImportPath string   `json:"importPath"`
 	Deps       []string `json:"deps"`
+	// CompileDeps, for the main package that links, are the dependencies
+	// its own compile imports, whose export data it mounts; the link mounts
+	// every dependency's object code.
+	CompileDeps []string `json:"compileDeps,omitempty"`
 	SrcFiles   []string `json:"srcFiles,omitempty"`
 	ModFiles   []string `json:"modFiles,omitempty"`
 	Tools      bool     `json:"tools,omitempty"`
@@ -53,6 +57,9 @@ func toNode(b *block, blocks map[string]*block, conc string) *node {
 	n := &node{ID: b.id, Name: b.name, ImportPath: b.importPath, Deps: deps,
 		SrcFiles: b.srcFiles, SrcNonGo: b.srcNonGo, ModFiles: b.modFiles, Output: b.output(), LinkOutput: b.linkOutput(),
 		Script: b.script(blocks, conc), Profile: b.profile != "", Link: b.isLink}
+	if b.isLink {
+		n.CompileDeps = b.compileDeps()
+	}
 	n.Tools = strings.Contains(n.Script, toolsDir+"/")
 	n.Gohdr = strings.Contains(n.Script, "/gobuild/gohdr ")
 	return n
@@ -126,9 +133,13 @@ func packageConcurrency() int {
 
 type result struct {
 	// file is the package's archive its importers' compiles read, and link
-	// the one a link reads: the same file unless the package splits.
-	file *dagger.File
-	link *dagger.File
+	// the one a link reads: the same file unless the package splits, when
+	// it is read after done closes, by the time linkDone closes, and only
+	// in a walk that links, so that importers don't wait for it.
+	file     *dagger.File
+	link     *dagger.File
+	linkErr  error
+	linkDone chan struct{}
 	// dir is the package's work directory, which holds file: evaluated, but
 	// for the link's.
 	dir  *dagger.Directory
@@ -138,8 +149,10 @@ type result struct {
 
 func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*result, error) {
 	results := map[string]*result{}
-	for id := range nodes {
-		results[id] = &result{done: make(chan struct{})}
+	links := false
+	for id, n := range nodes {
+		results[id] = &result{done: make(chan struct{}), linkDone: make(chan struct{})}
+		links = links || n.Link
 	}
 	limit := packageConcurrency()
 	first := firstSlots(nodes, w.heights, limit)
@@ -164,6 +177,12 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 				}
 				srcDir.ID(ctx)
 			}
+			asyncLink := false
+			defer func() {
+				if !asyncLink {
+					close(r.linkDone)
+				}
+			}()
 			ctr := w.base
 			var depFiles, linkFiles []*dagger.File
 			for _, d := range n.Deps {
@@ -176,8 +195,22 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 					r.err = fmt.Errorf("%s: %w", nodes[d].ImportPath, dr.err)
 					return
 				}
-				depFiles = append(depFiles, dr.file)
+				if !n.Link {
+					depFiles = append(depFiles, dr.file)
+					continue
+				}
+				<-dr.linkDone
+				if dr.linkErr != nil {
+					r.err = fmt.Errorf("%s: %w", nodes[d].ImportPath, dr.linkErr)
+					return
+				}
 				linkFiles = append(linkFiles, dr.link)
+			}
+			// The link's own compile reads only its imports' export data.
+			for _, d := range n.CompileDeps {
+				if dr, ok := results[d]; ok {
+					depFiles = append(depFiles, dr.file)
+				}
 			}
 			// A package's exec writes only its own directory. Its inputs are
 			// mounted read-only: a writable mount is one of the exec's
@@ -234,11 +267,18 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 				return
 			}
 			r.dir = out
-			if r.file, r.err = out.File(n.Output).Sync(ctx); r.err != nil || n.LinkOutput == n.Output {
+			r.file, r.err = out.File(n.Output).Sync(ctx)
+			switch {
+			case r.err != nil || !links:
+			case n.LinkOutput == n.Output:
 				r.link = r.file
-				return
+			default:
+				asyncLink = true
+				go func() {
+					defer close(r.linkDone)
+					r.link, r.linkErr = out.File(n.LinkOutput).Sync(ctx)
+				}()
 			}
-			r.link, r.err = out.File(n.LinkOutput).Sync(ctx)
 		}()
 	}
 	wg.Wait()
