@@ -474,7 +474,7 @@ func manifest(listPath, envPath, entriesPath, tags string) error {
 	if err != nil {
 		return err
 	}
-	var env struct{ GOVERSION, GOOS, GOARCH, CGO_ENABLED string }
+	var env map[string]string
 	if err := json.Unmarshal(data, &env); err != nil {
 		return fmt.Errorf("%s: %w", envPath, err)
 	}
@@ -528,15 +528,34 @@ func manifest(listPath, envPath, entriesPath, tags string) error {
 	if buildTags == nil {
 		buildTags = []string{}
 	}
-	out, err := json.MarshalIndent(map[string]any{
+	m := map[string]any{
 		"version":    2,
-		"goVersion":  env.GOVERSION,
-		"goos":       env.GOOS,
-		"goarch":     env.GOARCH,
-		"cgoEnabled": env.CGO_ENABLED == "1",
+		"goVersion":  env["GOVERSION"],
+		"goos":       env["GOOS"],
+		"goarch":     env["GOARCH"],
+		"cgoEnabled": env["CGO_ENABLED"] == "1",
 		"buildTags":  buildTags,
 		"packages":   packages,
-	}, "", "  ")
+	}
+	// What cgo's output depends on besides the sources: the go command's C
+	// settings, every one but the go command's own in env, and the first
+	// line the C compiler prints for --version, so that the driver uses
+	// the archives' cgo output only with the same.
+	if env["CGO_ENABLED"] == "1" {
+		cgo := map[string]string{}
+		for k, v := range env {
+			if k != "GOVERSION" && k != "GOOS" && k != "GOARCH" && k != "CGO_ENABLED" {
+				cgo[k] = v
+			}
+		}
+		if cc := strings.Fields(env["CC"]); len(cc) > 0 {
+			out, _ := exec.Command(cc[0], append(cc[1:], "--version")...).Output()
+			first, _, _ := strings.Cut(string(out), "\n")
+			cgo["ccVersion"] = strings.TrimSpace(first)
+		}
+		m["cgo"] = cgo
+	}
+	out, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return err
 	}

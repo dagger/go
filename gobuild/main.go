@@ -195,7 +195,7 @@ func (m *Gobuild) Archives(
 	}
 	// go list -export prints the plan of what it compiles, as go build -n
 	// does, and its listing of the packages.
-	pre := "go env -json GOVERSION GOOS GOARCH CGO_ENABLED > /gobuild/env.json && "
+	pre := "go env -json GOVERSION GOOS GOARCH CGO_ENABLED " + strings.Join(cgoVars, " ") + " > /gobuild/env.json && "
 	goCmd := shJoin(append(append([]string{"go", "list", "-export", "-deps", "-test", "-n", "-json=" + listFields}, flags...), "./...")) + " > /gobuild/list.json"
 	p, err := b.planWith(ctx, headers, pre, goCmd)
 	if err != nil {
@@ -265,6 +265,11 @@ func (m *Gobuild) Archives(
 // listFields are the fields of go list's output Archives reads: the
 // packages, and the files their digests cover.
 const listFields = "ImportPath,Dir,ForTest,GoFiles,CgoFiles,CFiles,CXXFiles,MFiles,HFiles,FFiles,SFiles,SwigFiles,SwigCXXFiles,SysoFiles,EmbedFiles"
+
+// cgoVars are the go command's settings cgo's output depends on, which the
+// manifest records, with the C compiler's version, for the export driver to
+// compare with its own.
+var cgoVars = []string{"CC", "CXX", "CGO_CFLAGS", "CGO_CPPFLAGS", "CGO_CXXFLAGS", "CGO_FFLAGS", "CGO_LDFLAGS"}
 
 // listedIDs is the set of package IDs in a "go list -json" listing.
 func listedIDs(list string) (map[string]bool, error) {

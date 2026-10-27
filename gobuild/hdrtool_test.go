@@ -148,7 +148,7 @@ func TestHdrToolManifest(t *testing.T) {
 		}
 	}
 	listPath := write("list.json", list.String())
-	envPath := write("env.json", `{"GOVERSION": "go1.26.1", "GOOS": "linux", "GOARCH": "amd64", "CGO_ENABLED": "1"}`)
+	envPath := write("env.json", `{"GOVERSION": "go1.26.1", "GOOS": "linux", "GOARCH": "amd64", "CGO_ENABLED": "1", "CGO_CFLAGS": "-O2"}`)
 	entriesPath := write("entries.txt", "example.com/p\tarchives/p.a\t"+filepath.Join(dir, "gen/_cgo_gotypes.go")+"\t"+filepath.Join(dir, "gen/c.cgo1.go")+"\n"+
 		"example.com/p [example.com/p.test]\tarchives/pt.a\nexample.com/q\tarchives/q.a\n")
 	gohdr := filepath.Join(dir, "tool/gohdr")
@@ -168,6 +168,7 @@ func TestHdrToolManifest(t *testing.T) {
 	want := map[string]any{
 		"version": 2.0, "goVersion": "go1.26.1", "goos": "linux", "goarch": "amd64", "cgoEnabled": true,
 		"buildTags": []any{"a", "b"},
+		"cgo":       map[string]any{"CGO_CFLAGS": "-O2"},
 		"packages": map[string]any{
 			"example.com/p": map[string]any{"archive": "archives/p.a", "sources": digest(
 				"cgo\n",
