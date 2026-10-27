@@ -991,7 +991,9 @@ type GoDev {
   what only tests import, test variants and external test packages included,
   with the settings go env reports and the digest the driver computes from
   go list's files, cgo's output for a cgo package, which the archives carry;
-  and the module's packages type-check against the archives' export data. archivescheck, a copy of the driver's digest, checks
+  and the module's packages type-check against the archives' export data.
+  The dependencies' archives alone leave out the module's packages, and stay
+  the same across an edit of them. archivescheck, a copy of the driver's digest, checks
   them against the go command in a container that mounts the source
   elsewhere.
   """
@@ -1029,6 +1031,17 @@ type GoDev {
     assert(missing.length == 0, "the manifest lacks " + missing.join(", ") + ": " + manifest)
     assert(manifest.contains(".test\"") == false, "the manifest lists a test main: " + manifest)
     assert(archives.entries.any { e => e == "cgo/" }, "the archives carry no cgo output: " + archives.entries.join(", "))
+
+    # The dependencies' archives are those of other modules and the standard
+    # library, and an edit of the module's own packages leaves them as they
+    # are: the same directory, by content.
+    let deps = go(base: cgoCxxBase).module(ws, ".").archives(ws, dependencies: true)
+    let depsManifest = deps.file("manifest.json").contents
+    assert(depsManifest.contains("\"net/http/httptest\": {") and depsManifest.contains("\"runtime/cgo\": {"), "the dependencies' manifest lacks the standard library: " + depsManifest)
+    assert(depsManifest.contains("example.com/archives") == false, "the dependencies' manifest lists the module's own packages: " + depsManifest)
+    let edited = source.withNewFile("testonly/testonly.go", "package testonly\n\n// Want is for tests, edited.\nfunc Want() int { return 2 + 2 }\n").asWorkspace
+    let editedDeps = go(base: cgoCxxBase).module(edited, ".").archives(edited, dependencies: true)
+    assert(editedDeps.digest == deps.digest, "an edit of the module's own package changed the dependencies' archives")
 
     # A module with no package to compile has archives of nothing.
     let none = directory

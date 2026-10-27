@@ -153,7 +153,9 @@ func (m *Gobuild) TestBinary(
 // tags they were compiled for, and for each package, by its ID in go list's
 // listing, its archive, its cgo files and their output, and a digest of what
 // it was compiled from. With all of them, the driver compiles nothing and
-// runs no cgo.
+// runs no cgo. With dependencies, only the packages of other modules and the
+// standard library: a directory keyed by their content alone, which an edit
+// of the module's own packages leaves as it is.
 func (m *Gobuild) Archives(
 	ctx context.Context,
 	// The Go container to build in, as for Binary.
@@ -179,6 +181,9 @@ func (m *Gobuild) Archives(
 	// manifest's.
 	// +optional
 	flags []string,
+	// Only the packages outside the module.
+	// +optional
+	dependencies bool,
 ) (*dagger.Directory, error) {
 	cwd := path.Join(mountPath, workdir)
 	b, err := newBuild(ctx, base, image, from, source, mountPath, cwd, flags)
@@ -209,7 +214,7 @@ func (m *Gobuild) Archives(
 	if err != nil {
 		return nil, err
 	}
-	ids, mains, err := listedIDs(list)
+	ids, mains, own, err := listedIDs(list)
 	if err != nil {
 		return nil, err
 	}
@@ -222,7 +227,7 @@ func (m *Gobuild) Archives(
 	}
 	var order []*block
 	for _, bl := range blocks {
-		if !bl.isProfile {
+		if !bl.isProfile && !(dependencies && own[bl.importPath]) {
 			order = append(order, bl)
 		}
 	}
@@ -252,13 +257,23 @@ func (m *Gobuild) Archives(
 		}
 		entries.WriteString("\n")
 	}
-	manifest := ctr.
+	// The manifest is read from its exec's evaluated output, so it is keyed
+	// by its content: the exec reads the whole listing, which any edit
+	// changes.
+	manifestDir, err := ctr.
 		WithMountedFile("/gobuild/list.json", p.ran.File("/gobuild/list.json")).
 		WithMountedFile("/gobuild/env.json", p.ran.File("/gobuild/env.json")).
 		WithNewFile("/gobuild/entries.txt", entries.String()).
-		WithExec([]string{"sh", "-c", "/gobuild/gohdr manifest /gobuild/list.json /gobuild/env.json /gobuild/entries.txt " +
-			shQuote(strings.Join(buildTags(append(envFlags, flags...)), ",")) + " > /gobuild/manifest.json"}, bare).
-		File("/gobuild/manifest.json")
+		WithExec([]string{"sh", "-c", "mkdir -p /gobuild/manifest && /gobuild/gohdr manifest /gobuild/list.json /gobuild/env.json /gobuild/entries.txt " +
+			shQuote(strings.Join(buildTags(append(envFlags, flags...)), ",")) + " > /gobuild/manifest/manifest.json"}, bare).
+		Directory("/gobuild/manifest").Sync(ctx)
+	if err != nil {
+		return nil, err
+	}
+	manifest, err := manifestDir.File("manifest.json").Sync(ctx)
+	if err != nil {
+		return nil, err
+	}
 	return out.WithFiles("archives", archives).WithFile("manifest.json", manifest), nil
 }
 
@@ -272,21 +287,26 @@ const listFields = "ImportPath,Name,Dir,ForTest,Module,GoFiles,CgoFiles,CFiles,C
 var cgoVars = []string{"CC", "CXX", "CGO_CFLAGS", "CGO_CPPFLAGS", "CGO_CXXFLAGS", "CGO_FFLAGS", "CGO_LDFLAGS"}
 
 // listedIDs is the set of package IDs in a "go list -json" listing, and the
-// set of its main packages, by import path.
-func listedIDs(list string) (ids, mains map[string]bool, err error) {
-	ids, mains = map[string]bool{}, map[string]bool{}
+// set of its main packages, by import path, and of the packages of the main
+// module, own.
+func listedIDs(list string) (ids, mains, own map[string]bool, err error) {
+	ids, mains, own = map[string]bool{}, map[string]bool{}, map[string]bool{}
 	dec := json.NewDecoder(strings.NewReader(list))
 	for {
-		var p struct{ ImportPath, Name string }
+		var p struct {
+			ImportPath, Name string
+			Module           *struct{ Main bool }
+		}
 		if err := dec.Decode(&p); err == io.EOF {
-			return ids, mains, nil
+			return ids, mains, own, nil
 		} else if err != nil {
-			return nil, nil, fmt.Errorf("go list: %w", err)
+			return nil, nil, nil, fmt.Errorf("go list: %w", err)
 		}
 		ids[p.ImportPath] = true
 		if p.Name == "main" && !strings.Contains(p.ImportPath, " [") {
 			mains[p.ImportPath] = true
 		}
+		own[p.ImportPath] = p.Module != nil && p.Module.Main
 	}
 }
 

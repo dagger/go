@@ -1536,7 +1536,15 @@ type GoModule {
   exec of its own, as a binary's packages do, so a package compiled the same
   way for a build or a test binary is shared.
   """
-  archives(ws: Workspace!): Directory! {
+  archives(
+    ws: Workspace!,
+    """
+    Only the packages from other modules and the standard library, keyed by
+    their content alone: an edit of this module's own packages leaves them
+    as they are.
+    """
+    dependencies: Boolean! = false,
+  ): Directory! {
     let ctr = platformBase(ws, gomod.hostPlatform)
     let flags = buildFlags + (ctr.envVariable("GOFLAGS") ?? "").split(" ").filter { f => f != "" }
     if (gccgo(flags)) {
@@ -1551,6 +1559,7 @@ type GoModule {
       mountPath: mountPath,
       workdir: path,
       flags: buildFlags,
+      dependencies: dependencies,
     )
     out.sync rescue {
       err: Error => raise "Go archives of module " + path + ": " + err.message
