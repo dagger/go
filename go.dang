@@ -1140,19 +1140,23 @@ type GoModule {
       .withNewFile(".git/HEAD", "ref: refs/heads/main\n")
   }
 
+  # Tests run with a session of their own rather than the one running them, so
+  # that a module address resolves against the user's workspace instead of
+  # against this module. The version-matched CLI the engine mounts for such an
+  # exec opens it and hands it to the tests as DAGGER_SESSION_PORT and
+  # DAGGER_SESSION_TOKEN, which every SDK's client connects through. A Dagger
+  # Go module's own package panics on load without them.
+  let withSession(args: [String!]!): [String!]! {
+    ["/dev/.dagger/dagger", "api", "with-session", "--silent"] + args
+  }
+
   """
   Container that has run this module's tests.
   """
   let testExec(ws: Workspace!): Container! {
     testEnv(ws)
       .withWorkdir(path)
-      # With its own session rather than the one running the tests, a module
-      # address resolves against the user's workspace instead of against this
-      # module. A client provisions through a CLI there; the engine mounts a
-      # version-matched one on PATH, which newer SDKs find by themselves, while
-      # older ones only read _EXPERIMENTAL_DAGGER_CLI_BIN.
-      .withEnvVariable("_EXPERIMENTAL_DAGGER_CLI_BIN", "/dev/.dagger/dagger")
-      .withExec(["otelgotest", "./..."], daggerInDaggerNewSession: true)
+      .withExec(withSession(["otelgotest", "./..."]), daggerInDaggerNewSession: true)
   }
 
   """
@@ -1163,13 +1167,7 @@ type GoModule {
     let run = if (names.length == 0) { [] } else { ["-run", "^(" + names.join("|") + ")$"] }
     testEnv(ws)
       .withWorkdir(path)
-      # With its own session rather than the one running the tests, a module
-      # address resolves against the user's workspace instead of against this
-      # module. A client provisions through a CLI there; the engine mounts a
-      # version-matched one on PATH, which newer SDKs find by themselves, while
-      # older ones only read _EXPERIMENTAL_DAGGER_CLI_BIN.
-      .withEnvVariable("_EXPERIMENTAL_DAGGER_CLI_BIN", "/dev/.dagger/dagger")
-      .withExec(["otelgotest"] + run + [packageArg(dir)], daggerInDaggerNewSession: true)
+      .withExec(withSession(["otelgotest"] + run + [packageArg(dir)]), daggerInDaggerNewSession: true)
       .sync rescue {
       err: Error => raise "Go tests in " + packagePath(dir) + ": " + err.message
     }
