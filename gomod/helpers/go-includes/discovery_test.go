@@ -83,10 +83,44 @@ func TestFileKindsFindsUnicodeTestNames(t *testing.T) {
 		"y_test.go": "package x\n\nimport \"testing\"\n\nfunc Fuzzé(ф *testing.F) {}\n",
 	})
 	for _, name := range []string{"x_test.go", "y_test.go"} {
-		k, err := fileKinds(filepath.Join(root, name), true)
+		k, _, err := fileKinds(filepath.Join(root, name), true)
 		if err != nil || k != "t" {
 			t.Errorf("%s: kinds %q, err %v; want a test", name, k, err)
 		}
+	}
+}
+
+func TestScanIndexesTestNames(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"go.mod": "module example.com/root\n\ngo 1.26.1\n",
+		"a_test.go": `package root
+import "testing"
+func TestZ(t *testing.T) {}
+func Fuzzé(ф *testing.F) {}
+func Example() {}
+func TestMain(m *testing.M) {}
+func Testify(t *testing.T) {}
+func TestWrong(n int) {}
+`,
+		"z_test.go":          "//go:build never\n\npackage root\nimport \"testing\"\nfunc Test中文(t *testing.T) {}\nfunc TestZ(t *testing.T) {}\n",
+		"sub/a_test.go":      "package sub\nimport \"testing\"\nfunc TestZ(t *testing.T) {}\n",
+		"sub/main.go":        "package main\nfunc main() {}\n",
+		"testdata/a_test.go": "package ignored\nimport \"testing\"\nfunc TestIgnored(t *testing.T) {}\n",
+		"_ignored/a_test.go": "package ignored\nimport \"testing\"\nfunc TestIgnored(t *testing.T) {}\n",
+		"nested/go.mod":      "module example.com/nested\n\ngo 1.26.1\n",
+		"nested/a_test.go":   "package nested\nimport \"testing\"\nfunc TestNested(t *testing.T) {}\n",
+	})
+	output := t.TempDir()
+	if err := runAll([]string{"--all", "--root", root, "--output-dir", output}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(output, testNamesFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ".\tTestZ\n.\tFuzzé\n.\tExample\nsub\tTestZ\n.\tTest中文\n.\tTestZ\nnested\tTestNested\n"
+	if string(data) != want {
+		t.Fatalf("test index lost file/source order or module boundaries:\n got: %q\nwant: %q", data, want)
 	}
 }
 
@@ -95,7 +129,7 @@ func TestFileKindsReadsLongLines(t *testing.T) {
 	root := writeTree(t, map[string]string{
 		"gen.go": "package main\n\nvar x = \"" + strings.Repeat("a", 17<<20) + "\"\n\nfunc main() {}\n",
 	})
-	k, err := fileKinds(filepath.Join(root, "gen.go"), false)
+	k, _, err := fileKinds(filepath.Join(root, "gen.go"), false)
 	if err != nil || k != "m" {
 		t.Errorf("kinds %q, err %v; want a main package", k, err)
 	}

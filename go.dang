@@ -899,59 +899,24 @@ type GoModule {
     }
   }
 
-  # Test, fuzz and example names in one package directory, found by searching
-  # the source rather than asking go test, and without the scanner, so listing
-  # them runs no container. Build constraints are not evaluated: a test
-  # excluded by one is still listed, and selecting it runs nothing. Files are
-  # taken in byte order, so the keys, and the -run pattern built from them, are
-  # stable.
+  # The shared scan already reads every Go file to discover packages. Read
+  # its test-name index instead of searching every module again per package.
+  # Names retain file and source order; build constraints are not evaluated.
   let testNames(ws: Workspace!, dir: String!): [String!]! {
     let empty: [String!]! = []
-    # Only the package's own directory is listed: a package is never a nested
-    # module's root or under testdata, so its files are all this module's.
-    let pkgPath = packagePath(dir)
-    let files = if (skipTest) {
+    if (skipTest) {
       empty
     } else {
-      sorted(
-        ws
-          .glob(if (pkgPath == ".") { "*_test.go" } else { pkgPath + "/*_test.go" })
-          .filter { file => file.hasSuffix("/") == false }
-          .map { file => file.trimPrefix("/").trimPrefix("./") },
-      )
-    }
-    if (files.length == 0) {
-      empty
-    } else {
-      # One search over the module tree, matched back to the package's files
-      # below. The search is the same for every package, so it runs once.
-      # Searching a subdirectory or the files by name would be narrower, but
-      # fails on a workspace built with withDirectory.
-      let matches = testMatches(ws)
-      files
-        .reduce(empty) { names, file =>
-          names + matches
-            .filter { match => match.filePath.trimPrefix("/").trimPrefix("./") == file }
-            .map { match =>
-              match.matchedLines.trimPrefix("func ").split("(").takeFirst(1).join("")
-            }
-        }
+      let prefix = packagePath(dir) + "\t"
+      lib
+        .scan(ws)
+        .file("_testnames_")
+        .contents
+        .split("\n")
+        .filter { line => line.hasPrefix(prefix) }
+        .map { line => line.trimPrefix(prefix) }
         .uniq
     }
-  }
-
-  # Test, fuzz and example function lines in this module's tree.
-  let testMatches(ws: Workspace!): [{{filePath: String!, matchedLines: String!}}!]! {
-    ws.search(
-      paths: [if (path == ".") { "/" } else { "/" + path }],
-      globs: ["*_test.go"],
-      pattern: testFunctionPattern,
-    ).{{filePath, matchedLines}}
-  }
-
-  # A test, fuzz or example function declaration.
-  let testFunctionPattern: String! {
-    `^func (Test([^a-z(]\w*)?\(\s*\w+\s+\*testing\.T\s*\)|Fuzz([^a-z(]\w*)?\(\s*\w+\s+\*testing\.F\s*\)|Example([^a-z(]\w*)?\(\s*\))`
   }
 
   # Byte-order sort, as Go's sort.Strings: a merge sort, n log n comparisons.
