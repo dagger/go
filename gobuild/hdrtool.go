@@ -411,11 +411,31 @@ func linkID(cfg, salt string) error {
 // listPackage is a package as "go list -json" prints it.
 type listPackage struct {
 	ImportPath, Dir, ForTest string
+	Module                  *listModule
 	GoFiles, CgoFiles       []string
 	// What go/packages calls OtherFiles.
 	CFiles, CXXFiles, MFiles, HFiles, FFiles, SFiles []string
 	SwigFiles, SwigCXXFiles, SysoFiles              []string
 	EmbedFiles                                      []string
+}
+
+// listModule is a package's module as "go list -json" prints it.
+type listModule struct {
+	Path, Version string
+	Replace       *listModule
+}
+
+// version is the module version a package's files come from, "path@version",
+// or "" for one whose files no version fixes: the main module's, or a local
+// replacement's.
+func (m *listModule) version() string {
+	if m != nil && m.Replace != nil {
+		m = m.Replace
+	}
+	if m == nil || m.Version == "" {
+		return ""
+	}
+	return m.Path + "@" + m.Version
 }
 
 func readList(listPath string) ([]listPackage, error) {
@@ -457,8 +477,10 @@ const cgoRoot = "/gobuild/"
 // directory and what it was compiled from, from the "go list" listing. A cgo
 // package's entry names the Go files cgo wrote for its compile, in the
 // compile's order, under cgoRoot; the manifest gives their paths in the
-// directory, where the archives' exec copies them, and the package's cgo
-// files, which the driver leaves out of what it compiles.
+// directory, where the archives' exec copies them, the package's cgo files,
+// which the driver leaves out of what it compiles, and the module version
+// its files come from, which decides whether the driver can use that
+// output.
 func manifest(listPath, envPath, entriesPath, tags string) error {
 	pkgs, err := readList(listPath)
 	if err != nil {
@@ -520,6 +542,9 @@ func manifest(listPath, envPath, entriesPath, tags string) error {
 				output = append(output, strings.TrimPrefix(g, cgoRoot))
 			}
 			e["cgoFiles"], e["cgoOutput"] = p.CgoFiles, output
+			if v := p.Module.version(); v != "" {
+				e["module"] = v
+			}
 		}
 		packages[f[0]] = e
 	}

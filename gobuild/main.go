@@ -263,8 +263,8 @@ func (m *Gobuild) Archives(
 }
 
 // listFields are the fields of go list's output Archives reads: the
-// packages, their names, and the files their digests cover.
-const listFields = "ImportPath,Name,Dir,ForTest,GoFiles,CgoFiles,CFiles,CXXFiles,MFiles,HFiles,FFiles,SFiles,SwigFiles,SwigCXXFiles,SysoFiles,EmbedFiles"
+// packages, their names and modules, and the files their digests cover.
+const listFields = "ImportPath,Name,Dir,ForTest,Module,GoFiles,CgoFiles,CFiles,CXXFiles,MFiles,HFiles,FFiles,SFiles,SwigFiles,SwigCXXFiles,SysoFiles,EmbedFiles"
 
 // cgoVars are the go command's settings cgo's output depends on, which the
 // manifest records, with the C compiler's version, for the export driver to

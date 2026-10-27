@@ -135,7 +135,7 @@ func TestHdrToolManifest(t *testing.T) {
 	var list bytes.Buffer
 	enc := json.NewEncoder(&list)
 	for _, p := range []map[string]any{
-		{"ImportPath": "example.com/p", "Dir": src + "/p", "GoFiles": []string{"a.go"}, "CgoFiles": []string{"c.go"}, "CFiles": []string{"x.c"}, "EmbedFiles": []string{"data/e.txt"}},
+		{"ImportPath": "example.com/p", "Module": map[string]any{"Path": "example.com/p", "Version": "v1.0.0", "Replace": map[string]any{"Path": "example.com/fork", "Version": "v1.0.1"}}, "Dir": src + "/p", "GoFiles": []string{"a.go"}, "CgoFiles": []string{"c.go"}, "CFiles": []string{"x.c"}, "EmbedFiles": []string{"data/e.txt"}},
 		{"ImportPath": "example.com/p [example.com/p.test]", "ForTest": "example.com/p", "Dir": src + "/p", "GoFiles": []string{"a.go", "a_test.go"}},
 		{"ImportPath": "example.com/p_test [example.com/p.test]", "ForTest": "example.com/p", "Dir": src + "/p", "GoFiles": []string{"x_test.go"}},
 		{"ImportPath": "example.com/p.test", "Dir": src + "/p", "GoFiles": []string{"_testmain.go"}},
@@ -180,6 +180,7 @@ func TestHdrToolManifest(t *testing.T) {
 				line("data/e.txt", files["p/data/e.txt"]),
 			),
 				"cgoFiles":  []any{"c.go"},
+				"module":    "example.com/fork@v1.0.1",
 				"cgoOutput": []any{filepath.Join(dir, "gen/_cgo_gotypes.go"), filepath.Join(dir, "gen/c.cgo1.go")},
 			},
 			"example.com/p [example.com/p.test]": map[string]any{"archive": "archives/pt.a", "sources": digest(

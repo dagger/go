@@ -137,8 +137,10 @@ func parseArchivePlan(plan string, r roots) (map[string]*block, error) {
 // against p's test variant. The plan's headers name only the import path, so
 // a block compiled with test files is a test package, and a block whose
 // imports were compiled for a test is that test's too. A main package with
-// tests is compiled for them as a library, named by its import path rather
-// than main, even when only its external tests need it (mains). The test
+// tests (mains) is compiled for them a second time, as a library, even when
+// only its external tests need it: of its two steps, the one that compiles
+// it as main, or with -buildmode=plugin, which compiles both alike, the
+// first by step, is the plain package. The test
 // mains, which compile a _testmain.go no plan holds, are left out: nothing
 // imports them. Each block's name follows its ID, so variants of a package
 // don't share one.
@@ -150,6 +152,25 @@ func identifyVariants(blocks map[string]*block, ids, mains map[string]bool) erro
 	}
 	for _, b := range blocks {
 		b.deps = slices.DeleteFunc(b.deps, func(d string) bool { return blocks[d] == nil })
+	}
+	// The second step of each main package, its test variant.
+	second := map[string]bool{}
+	byMain := map[string][]*block{}
+	for _, b := range blocks {
+		if mains[b.importPath] {
+			byMain[b.importPath] = append(byMain[b.importPath], b)
+		}
+	}
+	for _, bs := range byMain {
+		sort.Slice(bs, func(i, j int) bool {
+			if mi, mj := bs[i].compiledAs() == "main", bs[j].compiledAs() == "main"; mi != mj {
+				return mi
+			}
+			return bs[i].id < bs[j].id
+		})
+		if len(bs) > 1 {
+			second[bs[1].id] = true
+		}
 	}
 	resolved := map[string]string{}
 	var resolve func(id string) (string, error)
@@ -176,7 +197,7 @@ func identifyVariants(blocks map[string]*block, ids, mains map[string]bool) erro
 		}
 		v := b.importPath
 		switch {
-		case mains[v] && b.compiledAs() != "main":
+		case second[id]:
 			v += " [" + v + ".test]"
 		case b.compilesTests() && ids[v+" ["+v+".test]"]:
 			v += " [" + v + ".test]"

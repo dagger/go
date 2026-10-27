@@ -1083,6 +1083,21 @@ func TestIdentifyVariants(t *testing.T) {
 	if len(names) != len(want) {
 		t.Errorf("variants share names: %v", names)
 	}
+	// With -buildmode=plugin, a main package compiles as a library, alike in
+	// both steps: the first is the plain package. Without tests, it has one.
+	plugin := strings.ReplaceAll(strings.Join(lines, "\n"), "-p main ", "-p example.com/m/cmd ")
+	blocks, _ = parseArchivePlan(plugin, testRoots)
+	if err := identifyVariants(blocks, ids, mains); err != nil {
+		t.Fatal(err)
+	}
+	if blocks["b008"].importPath != "example.com/m/cmd" || blocks["b009"].importPath != "example.com/m/cmd [example.com/m/cmd.test]" {
+		t.Errorf("plugin build mode: %s, %s", blocks["b008"].importPath, blocks["b009"].importPath)
+	}
+	blocks, _ = parseArchivePlan(strings.Join(lines[:len(lines)-len(compile("b009", "example.com/m/cmd", []string{"./cmd/main.go"}))], "\n"), testRoots)
+	if err := identifyVariants(blocks, map[string]bool{"example.com/m/cmd": true, "example.com/m/p": true, "example.com/m/q": true,
+		"example.com/m/p [example.com/m/p.test]": true, "example.com/m/q [example.com/m/p.test]": true, "example.com/m/p_test [example.com/m/p.test]": true}, mains); err != nil || blocks["b008"].importPath != "example.com/m/cmd" {
+		t.Errorf("a main package without tests: %v, %s", err, blocks["b008"].importPath)
+	}
 	delete(ids, "example.com/m/q [example.com/m/p.test]")
 	blocks, _ = parseArchivePlan(strings.Join(lines, "\n"), testRoots)
 	if err := identifyVariants(blocks, ids, mains); err == nil {
