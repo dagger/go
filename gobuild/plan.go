@@ -166,7 +166,7 @@ func identifyVariants(blocks map[string]*block, ids, mains map[string]bool) erro
 			if mi, mj := bs[i].compiledAs() == "main", bs[j].compiledAs() == "main"; mi != mj {
 				return mi
 			}
-			return bs[i].id < bs[j].id
+			return stepNumber(bs[i].id) < stepNumber(bs[j].id)
 		})
 		if len(bs) > 1 {
 			second[bs[1].id] = true
@@ -222,6 +222,13 @@ func identifyVariants(blocks map[string]*block, ids, mains map[string]bool) erro
 		}
 	}
 	return nil
+}
+
+// stepNumber is a plan step's number, from its id "bNNN": at least three
+// digits, so "b1000" comes after "b999".
+func stepNumber(id string) int {
+	n, _ := strconv.Atoi(strings.TrimPrefix(id, "b"))
+	return n
 }
 
 // compiledAs is the package name a block's compile gives its package with

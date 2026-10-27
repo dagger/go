@@ -1093,6 +1093,14 @@ func TestIdentifyVariants(t *testing.T) {
 	if blocks["b008"].importPath != "example.com/m/cmd" || blocks["b009"].importPath != "example.com/m/cmd [example.com/m/cmd.test]" {
 		t.Errorf("plugin build mode: %s, %s", blocks["b008"].importPath, blocks["b009"].importPath)
 	}
+	// Step numbers have at least three digits: b1000 comes after b900.
+	blocks, _ = parseArchivePlan(strings.NewReplacer("$WORK/b008/", "$WORK/b900/", "$WORK/b009/", "$WORK/b1000/").Replace(plugin), testRoots)
+	if err := identifyVariants(blocks, ids, mains); err != nil {
+		t.Fatal(err)
+	}
+	if blocks["b900"].importPath != "example.com/m/cmd" || blocks["b1000"].importPath != "example.com/m/cmd [example.com/m/cmd.test]" {
+		t.Errorf("past step 999: %s, %s", blocks["b900"].importPath, blocks["b1000"].importPath)
+	}
 	blocks, _ = parseArchivePlan(strings.Join(lines[:len(lines)-len(compile("b009", "example.com/m/cmd", []string{"./cmd/main.go"}))], "\n"), testRoots)
 	if err := identifyVariants(blocks, map[string]bool{"example.com/m/cmd": true, "example.com/m/p": true, "example.com/m/q": true,
 		"example.com/m/p [example.com/m/p.test]": true, "example.com/m/q [example.com/m/p.test]": true, "example.com/m/p_test [example.com/m/p.test]": true}, mains); err != nil || blocks["b008"].importPath != "example.com/m/cmd" {

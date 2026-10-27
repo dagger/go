@@ -438,6 +438,13 @@ func (m *listModule) version() string {
 	return m.Path + "@" + m.Version
 }
 
+// within reports whether path is dir or below it: a package's files from the
+// module cache, not a copy, such as a vendor directory's.
+func within(dir, path string) bool {
+	rel, err := filepath.Rel(dir, path)
+	return dir != "" && err == nil && rel != ".." && !strings.HasPrefix(rel, "../")
+}
+
 func readList(listPath string) ([]listPackage, error) {
 	f, err := os.Open(listPath)
 	if err != nil {
@@ -542,7 +549,7 @@ func manifest(listPath, envPath, entriesPath, tags string) error {
 				output = append(output, strings.TrimPrefix(g, cgoRoot))
 			}
 			e["cgoFiles"], e["cgoOutput"] = p.CgoFiles, output
-			if v := p.Module.version(); v != "" {
+			if v := p.Module.version(); v != "" && within(env["GOMODCACHE"], p.Dir) {
 				e["module"] = v
 			}
 		}
@@ -569,7 +576,7 @@ func manifest(listPath, envPath, entriesPath, tags string) error {
 	if env["CGO_ENABLED"] == "1" {
 		cgo := map[string]string{}
 		for k, v := range env {
-			if k != "GOVERSION" && k != "GOOS" && k != "GOARCH" && k != "CGO_ENABLED" {
+			if k != "GOVERSION" && k != "GOOS" && k != "GOARCH" && k != "CGO_ENABLED" && k != "GOMODCACHE" {
 				cgo[k] = v
 			}
 		}

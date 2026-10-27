@@ -195,7 +195,7 @@ func (m *Gobuild) Archives(
 	}
 	// go list -export prints the plan of what it compiles, as go build -n
 	// does, and its listing of the packages.
-	pre := "go env -json GOVERSION GOOS GOARCH CGO_ENABLED " + strings.Join(cgoVars, " ") + " > /gobuild/env.json && "
+	pre := "go env -json GOVERSION GOOS GOARCH CGO_ENABLED GOMODCACHE " + strings.Join(cgoVars, " ") + " > /gobuild/env.json && "
 	goCmd := shJoin(append(append([]string{"go", "list", "-export", "-deps", "-test", "-n", "-json=" + listFields}, flags...), "./...")) + " > /gobuild/list.json"
 	p, err := b.planWith(ctx, headers, pre, goCmd)
 	if err != nil {
