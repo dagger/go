@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -80,8 +81,19 @@ type profileOutput struct {
 	path string
 }
 
-// packageConcurrency is how many package execs a walk runs at once.
-const packageConcurrency = 16
+// packageConcurrency is how many package execs a walk runs at once: 12, or
+// one and a half times GOMAXPROCS, if that's fewer. GOMAXPROCS counts the
+// machine's CPUs and a CPU limit on gobuild's own container, but not one set
+// on the engine's container: Go reads only the cgroup it runs in, and that's
+// a child of the engine's. Under such a limit the walk can run up to 12.
+// In cold builds of dagger's CLI, running more at once made each compile and
+// the engine's work per exec slower, by more than the extra concurrency
+// gained: the build was fastest at 12 on 16 and 32 cores, as fast at 12 as at
+// any count on 8, and on 4 cores as fast at 3 to 8 as at any count but about
+// 4 s slower at 12.
+func packageConcurrency() int {
+	return min(12, max(1, runtime.GOMAXPROCS(0)*3/2))
+}
 
 type result struct {
 	file *dagger.File
@@ -96,8 +108,9 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 	for id := range nodes {
 		results[id] = &result{done: make(chan struct{})}
 	}
-	first := firstSlots(nodes, w.heights, packageConcurrency)
-	slots := newGate(packageConcurrency - len(first))
+	limit := packageConcurrency()
+	first := firstSlots(nodes, w.heights, limit)
+	slots := newGate(limit - len(first))
 	var wg sync.WaitGroup
 	for id, n := range nodes {
 		wg.Add(1)
