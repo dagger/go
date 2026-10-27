@@ -1520,8 +1520,9 @@ type GoModule {
 
   """
   The compiled packages a lint of this module reads, for golangci-lint's
-  export driver: a directory of their archives, the full output of go tool
-  compile -pack, under archives/, the Go files cgo wrote for each cgo
+  export driver: a directory of their export data, the archives go tool
+  compile -pack -linkobj writes without the object code, under archives/,
+  the Go files cgo wrote for each cgo
   package under cgo/, and manifest.json, which describes them: the Go
   version, target and build tags they were compiled for, and for each
   package, by its ID as go list -test names it, its archive, its cgo files

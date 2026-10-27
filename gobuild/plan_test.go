@@ -425,6 +425,53 @@ func TestScriptKeepsLinkDirectory(t *testing.T) {
 	}
 }
 
+// A dependency compiles its export data and its object code to two
+// archives, and packs its assembly into the object code's; its importer's
+// compile reads the export data, and the link reads the object code from
+// /work/linklib. The main package that links writes one archive.
+func TestScriptSplitsExportData(t *testing.T) {
+	plan := strings.Join([]string{
+		"mkdir -p $WORK/b002/",
+		"",
+		"#",
+		"# example.com/m/lib",
+		"#",
+		"",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b002/_pkg_.a -p example.com/m/lib -pack -asmhdr $WORK/b002/go_asm.h ./lib/lib.go",
+		"/usr/local/go/pkg/tool/linux_amd64/asm -p example.com/m/lib -o $WORK/b002/x.o ./lib/x.s",
+		"go tool pack r $WORK/b002/_pkg_.a $WORK/b002/x.o # internal",
+	}, "\n") + "\n" + strings.Replace(mainLink(
+		"cat >$WORK/b001/importcfg << 'EOF' # internal",
+		"packagefile example.com/m/lib=$WORK/b002/_pkg_.a",
+		"EOF",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main -importcfg $WORK/b001/importcfg -pack ./main.go",
+	), "packagefile example.com/m=$WORK/b001/_pkg_.a", "packagefile example.com/m=$WORK/b001/_pkg_.a\npackagefile example.com/m/lib=$WORK/b002/_pkg_.a", 1)
+	blocks, err := parsePlan(plan, testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lib, main := blocks["b002"], blocks["b001"]
+	if !lib.splits() || main.splits() {
+		t.Fatalf("splits: lib %v, main %v", lib.splits(), main.splits())
+	}
+	export, object := "/work/"+lib.name+"/"+lib.name+".a", "/work/"+lib.name+"/"+lib.name+".link.a"
+	script := lib.script(blocks, soloCompileC)
+	for _, want := range []string{"-linkobj " + object + " -o " + export + " ", "/pack r " + object + " "} {
+		if !strings.Contains(script, want) {
+			t.Errorf("lib's script lacks %q:\n%s", want, script)
+		}
+	}
+	script = main.script(blocks, soloCompileC)
+	for _, want := range []string{"packagefile example.com/m/lib=/work/lib/" + lib.name + ".a'", "packagefile example.com/m/lib=/work/linklib/" + lib.name + ".link.a'"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("main's script lacks %q:\n%s", want, script)
+		}
+	}
+	if strings.Contains(script, "-linkobj") {
+		t.Errorf("the main package that links splits:\n%s", script)
+	}
+}
+
 // Go leaves -c out when it would be 1, as on a one-CPU engine: the script is
 // the same either way.
 func TestScriptCompileConcurrency(t *testing.T) {

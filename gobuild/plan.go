@@ -728,13 +728,26 @@ func compileC(outside bool, weight int64) string {
 // archive is read from /work/lib. Archives get no Go build ID: the plan's are
 // temporary, and leaving them out lets early cutoff compare archives by
 // their bytes. The link gets one made from what it reads (gohdr linkid).
+//
+// A package that splits (splits) compiles its export data, all its
+// importers' compiles read, to its output and its object code, which only a
+// link reads, to linkOutput, where its pack steps add assembly and C
+// objects too. The link reads its dependencies' object code from
+// /work/linklib.
 func (b *block) script(blocks map[string]*block, conc string) string {
 	dirs := []string{"/work/" + b.name}
 	var body strings.Builder
 	var heredoc []string
 	heredocTarget := ""
+	linkCfg := false
 	needed := cdNeeded(b.lines)
 	for i, l := range b.lines {
+		// The link's import config names the archives it reads.
+		if m := reHeredoc.FindStringSubmatch(l); m != nil {
+			linkCfg = strings.HasSuffix(m[1], "/importcfg.link")
+		} else if l == "EOF" {
+			linkCfg = false
+		}
 		// A cgo package's C compiles name its files by bare names in its
 		// directory, so it keeps every change the plan prints to it; any
 		// other change stays only when needed, as elsewhere, such as the
@@ -751,18 +764,30 @@ func (b *block) script(blocks map[string]*block, conc string) string {
 		// put in one place on every compile rather than replaced.
 		if reCompile.MatchString(l) {
 			l = reConc.ReplaceAllString(l, "")
-			l = reCompile.ReplaceAllString(l, "${1} -c="+conc+gcStart(l)+" ")
+			flags := " -c=" + conc + gcStart(l) + " "
+			if b.splits() {
+				flags += "-linkobj /work/" + b.name + "/" + b.linkOutput() + " "
+			}
+			l = reCompile.ReplaceAllString(l, "${1}"+flags)
 		}
 		// The go command packs archives in-process; "go tool pack" would
 		// build the pack tool from source in every fresh container.
 		l = strings.Replace(l, "go tool pack ", toolsDir+"/pack ", 1)
+		pack := strings.Contains(l, "/pack r ")
 		l = reDepArchive.ReplaceAllStringFunc(l, func(s string) string {
 			id := reDepArchive.FindStringSubmatch(s)[1]
-			name := blocks[id].name
-			if id == b.id {
-				return "/work/" + name + "/" + name + ".a"
+			dep := blocks[id]
+			// A package's own archive, even in the exec that links it, where
+			// output is the binary.
+			switch {
+			case id == b.id && pack && b.splits():
+				return "/work/" + dep.name + "/" + dep.linkOutput()
+			case id == b.id:
+				return "/work/" + dep.name + "/" + dep.name + ".a"
+			case linkCfg:
+				return "/work/linklib/" + dep.linkOutput()
 			}
-			return "/work/lib/" + name + ".a"
+			return "/work/lib/" + dep.output()
 		})
 		l = reWorkRef.ReplaceAllStringFunc(l, func(s string) string {
 			return "/work/" + blocks[strings.TrimPrefix(s, "$WORK/")].name
@@ -1099,7 +1124,8 @@ func (b *block) exportsHeader() bool {
 	return false
 }
 
-// output is the file a block's exec produces, under /work/<name>.
+// output is the file a block's exec produces, under /work/<name>: for a
+// package, the archive its importers' compiles read.
 func (b *block) output() string {
 	switch {
 	case b.isLink:
@@ -1108,6 +1134,32 @@ func (b *block) output() string {
 		return "pgo.preprofile"
 	}
 	return b.name + ".a"
+}
+
+// splits reports whether a package's compile writes its export data and its
+// object code to two archives, output and linkOutput, as gc's -linkobj does:
+// an edit that changes only object code, such as a line number, then leaves
+// its importers' compiles cached. A main package that links in its own exec,
+// and a gccgo compile, which has no such flag, write one archive.
+func (b *block) splits() bool {
+	if b.isLink || b.isProfile {
+		return false
+	}
+	for _, l := range b.lines {
+		if reCompile.MatchString(l) {
+			return true
+		}
+	}
+	return false
+}
+
+// linkOutput is the archive of a package's object code under /work/<name>,
+// which the link reads: output, unless the package splits.
+func (b *block) linkOutput() string {
+	if b.splits() {
+		return b.name + ".link.a"
+	}
+	return b.output()
 }
 
 func shQuote(s string) string {

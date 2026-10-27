@@ -147,8 +147,8 @@ func (m *Gobuild) TestBinary(
 // its packages, main packages included, their test variants and external test
 // packages, the packages recompiled against those, and every package they
 // import. It returns a directory for golangci-lint's export driver: under
-// archives/, each package's archive, the full output of "go tool compile
-// -pack"; under cgo/, the Go files cgo wrote for each cgo package's compile;
+// archives/, each package's export data, the archive "go tool compile -pack
+// -linkobj" writes without the package's object code; under cgo/, the Go files cgo wrote for each cgo package's compile;
 // and manifest.json, which describes them: the Go version, target and build
 // tags they were compiled for, and for each package, by its ID in go list's
 // listing, its archive, its cgo files and their output, and a digest of what

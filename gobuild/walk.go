@@ -32,7 +32,10 @@ type node struct {
 	// does for its build ID.
 	Gohdr  bool   `json:"gohdr,omitempty"`
 	Output string `json:"output"`
-	Script string `json:"script"`
+	// LinkOutput is the archive of the package's object code, which a link
+	// reads: Output, unless the package splits (block.splits).
+	LinkOutput string `json:"linkOutput"`
+	Script     string `json:"script"`
 	// Profile is set when the package's compile reads the PGO profile.
 	Profile bool `json:"profile,omitempty"`
 	// Link is set for the main package, which links.
@@ -40,14 +43,15 @@ type node struct {
 }
 
 // toNode renders a block for a walk. A package reads its dependencies'
-// archives from /work/lib, which holds those and nothing else.
+// archives from /work/lib, which holds those and nothing else, and a link
+// reads their object code from /work/linklib.
 func toNode(b *block, blocks map[string]*block, conc string) *node {
 	// Dependencies in the order of their stable names, not of the plan's
 	// step numbers, which an edit elsewhere in the plan can renumber.
 	deps := append([]string(nil), b.deps...)
 	sort.Slice(deps, func(i, j int) bool { return blocks[deps[i]].name < blocks[deps[j]].name })
 	n := &node{ID: b.id, Name: b.name, ImportPath: b.importPath, Deps: deps,
-		SrcFiles: b.srcFiles, SrcNonGo: b.srcNonGo, ModFiles: b.modFiles, Output: b.output(),
+		SrcFiles: b.srcFiles, SrcNonGo: b.srcNonGo, ModFiles: b.modFiles, Output: b.output(), LinkOutput: b.linkOutput(),
 		Script: b.script(blocks, conc), Profile: b.profile != "", Link: b.isLink}
 	n.Tools = strings.Contains(n.Script, toolsDir+"/")
 	n.Gohdr = strings.Contains(n.Script, "/gobuild/gohdr ")
@@ -121,7 +125,10 @@ func packageConcurrency() int {
 }
 
 type result struct {
+	// file is the package's archive its importers' compiles read, and link
+	// the one a link reads: the same file unless the package splits.
 	file *dagger.File
+	link *dagger.File
 	// dir is the package's work directory, which holds file: evaluated, but
 	// for the link's.
 	dir  *dagger.Directory
@@ -158,7 +165,7 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 				srcDir.ID(ctx)
 			}
 			ctr := w.base
-			var depFiles []*dagger.File
+			var depFiles, linkFiles []*dagger.File
 			for _, d := range n.Deps {
 				dr, ok := results[d]
 				if !ok {
@@ -170,12 +177,16 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 					return
 				}
 				depFiles = append(depFiles, dr.file)
+				linkFiles = append(linkFiles, dr.link)
 			}
 			// A package's exec writes only its own directory. Its inputs are
 			// mounted read-only: a writable mount is one of the exec's
 			// outputs, a copy made for it to write and kept after.
 			if len(depFiles) > 0 {
 				ctr = ctr.WithMountedFiles("/work/lib", depFiles)
+			}
+			if n.Link && len(linkFiles) > 0 {
+				ctr = ctr.WithMountedFiles("/work/linklib", linkFiles)
 			}
 			if n.Tools {
 				ctr = ctr.WithMountedDirectory(toolsDir, w.tools, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
@@ -223,7 +234,11 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 				return
 			}
 			r.dir = out
-			r.file, r.err = out.File(n.Output).Sync(ctx)
+			if r.file, r.err = out.File(n.Output).Sync(ctx); r.err != nil || n.LinkOutput == n.Output {
+				r.link = r.file
+				return
+			}
+			r.link, r.err = out.File(n.LinkOutput).Sync(ctx)
 		}()
 	}
 	wg.Wait()
