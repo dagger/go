@@ -1041,16 +1041,22 @@ func TestIdentifyVariants(t *testing.T) {
 	lines = append(lines, compile("b005", "example.com/m/q", []string{"./q/q.go"}, "b004")...)
 	lines = append(lines, compile("b006", "example.com/m/p_test", []string{"./p/x_test.go"}, "b004", "b005")...)
 	lines = append(lines, compile("b007", "example.com/m/p.test", []string{"$WORK/b007/_testmain.go"}, "b004", "b006")...)
+	// A main package whose only tests are external: compiled once as main,
+	// and once for its tests as a library.
+	lines = append(lines, strings.Replace(strings.Join(compile("b008", "example.com/m/cmd", []string{"./cmd/main.go"}), "\n"), "-p example.com/m/cmd ", "-p main ", 1))
+	lines = append(lines, compile("b009", "example.com/m/cmd", []string{"./cmd/main.go"})...)
 	blocks, err := parseArchivePlan(strings.Join(lines, "\n"), testRoots)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ids := map[string]bool{
+		"example.com/m/cmd": true, "example.com/m/cmd [example.com/m/cmd.test]": true,
 		"example.com/m/p": true, "example.com/m/q": true, "example.com/m/p.test": true,
 		"example.com/m/p [example.com/m/p.test]": true, "example.com/m/q [example.com/m/p.test]": true,
 		"example.com/m/p_test [example.com/m/p.test]": true,
 	}
-	if err := identifyVariants(blocks, ids); err != nil {
+	mains := map[string]bool{"example.com/m/cmd": true}
+	if err := identifyVariants(blocks, ids, mains); err != nil {
 		t.Fatal(err)
 	}
 	want := map[string]string{
@@ -1059,6 +1065,8 @@ func TestIdentifyVariants(t *testing.T) {
 		"b004": "example.com/m/p [example.com/m/p.test]",
 		"b005": "example.com/m/q [example.com/m/p.test]",
 		"b006": "example.com/m/p_test [example.com/m/p.test]",
+		"b008": "example.com/m/cmd",
+		"b009": "example.com/m/cmd [example.com/m/cmd.test]",
 	}
 	if len(blocks) != len(want) {
 		t.Errorf("%d blocks, want %d: the test main stays", len(blocks), len(want))
@@ -1077,7 +1085,7 @@ func TestIdentifyVariants(t *testing.T) {
 	}
 	delete(ids, "example.com/m/q [example.com/m/p.test]")
 	blocks, _ = parseArchivePlan(strings.Join(lines, "\n"), testRoots)
-	if err := identifyVariants(blocks, ids); err == nil {
+	if err := identifyVariants(blocks, ids, mains); err == nil {
 		t.Error("a step that is no listed package was taken")
 	}
 }

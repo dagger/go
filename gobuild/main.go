@@ -209,11 +209,11 @@ func (m *Gobuild) Archives(
 	if err != nil {
 		return nil, err
 	}
-	ids, err := listedIDs(list)
+	ids, mains, err := listedIDs(list)
 	if err != nil {
 		return nil, err
 	}
-	if err := identifyVariants(blocks, ids); err != nil {
+	if err := identifyVariants(blocks, ids, mains); err != nil {
 		return nil, err
 	}
 	results, err := b.walk(ctx, blocks, p.weights, p.cc, p.goDirs, nil)
@@ -263,26 +263,30 @@ func (m *Gobuild) Archives(
 }
 
 // listFields are the fields of go list's output Archives reads: the
-// packages, and the files their digests cover.
-const listFields = "ImportPath,Dir,ForTest,GoFiles,CgoFiles,CFiles,CXXFiles,MFiles,HFiles,FFiles,SFiles,SwigFiles,SwigCXXFiles,SysoFiles,EmbedFiles"
+// packages, their names, and the files their digests cover.
+const listFields = "ImportPath,Name,Dir,ForTest,GoFiles,CgoFiles,CFiles,CXXFiles,MFiles,HFiles,FFiles,SFiles,SwigFiles,SwigCXXFiles,SysoFiles,EmbedFiles"
 
 // cgoVars are the go command's settings cgo's output depends on, which the
 // manifest records, with the C compiler's version, for the export driver to
 // compare with its own.
 var cgoVars = []string{"CC", "CXX", "CGO_CFLAGS", "CGO_CPPFLAGS", "CGO_CXXFLAGS", "CGO_FFLAGS", "CGO_LDFLAGS"}
 
-// listedIDs is the set of package IDs in a "go list -json" listing.
-func listedIDs(list string) (map[string]bool, error) {
-	ids := map[string]bool{}
+// listedIDs is the set of package IDs in a "go list -json" listing, and the
+// set of its main packages, by import path.
+func listedIDs(list string) (ids, mains map[string]bool, err error) {
+	ids, mains = map[string]bool{}, map[string]bool{}
 	dec := json.NewDecoder(strings.NewReader(list))
 	for {
-		var p struct{ ImportPath string }
+		var p struct{ ImportPath, Name string }
 		if err := dec.Decode(&p); err == io.EOF {
-			return ids, nil
+			return ids, mains, nil
 		} else if err != nil {
-			return nil, fmt.Errorf("go list: %w", err)
+			return nil, nil, fmt.Errorf("go list: %w", err)
 		}
 		ids[p.ImportPath] = true
+		if p.Name == "main" && !strings.Contains(p.ImportPath, " [") {
+			mains[p.ImportPath] = true
+		}
 	}
 }
 

@@ -136,11 +136,13 @@ func parseArchivePlan(plan string, r roots) (map[string]*block, error) {
 // an external test package, and "q [p.test]" for a package recompiled
 // against p's test variant. The plan's headers name only the import path, so
 // a block compiled with test files is a test package, and a block whose
-// imports were compiled for a test is that test's too. The test mains, which
-// compile a _testmain.go no plan holds, are left out: nothing imports them.
-// Each block's name follows its ID, so variants of a package don't share
-// one.
-func identifyVariants(blocks map[string]*block, ids map[string]bool) error {
+// imports were compiled for a test is that test's too. A main package with
+// tests is compiled for them as a library, named by its import path rather
+// than main, even when only its external tests need it (mains). The test
+// mains, which compile a _testmain.go no plan holds, are left out: nothing
+// imports them. Each block's name follows its ID, so variants of a package
+// don't share one.
+func identifyVariants(blocks map[string]*block, ids, mains map[string]bool) error {
 	for id, b := range blocks {
 		if strings.HasSuffix(b.importPath, ".test") {
 			delete(blocks, id)
@@ -174,6 +176,8 @@ func identifyVariants(blocks map[string]*block, ids map[string]bool) error {
 		}
 		v := b.importPath
 		switch {
+		case mains[v] && b.compiledAs() != "main":
+			v += " [" + v + ".test]"
 		case b.compilesTests() && ids[v+" ["+v+".test]"]:
 			v += " [" + v + ".test]"
 		case b.compilesTests():
@@ -197,6 +201,23 @@ func identifyVariants(blocks map[string]*block, ids map[string]bool) error {
 		}
 	}
 	return nil
+}
+
+// compiledAs is the package name a block's compile gives its package with
+// -p: "main" for a main package, its import path otherwise.
+func (b *block) compiledAs() string {
+	for _, l := range b.lines {
+		if !reCompile.MatchString(l) {
+			continue
+		}
+		w := shellWords(l)
+		for i := 0; i+1 < len(w); i++ {
+			if w[i] == "-p" {
+				return w[i+1]
+			}
+		}
+	}
+	return ""
 }
 
 // compilesTests reports whether a block's compile reads _test.go files.
