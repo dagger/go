@@ -326,10 +326,13 @@ type Go {
   Go packages at or below the working directory, keyed by directory.
   """
   packages(ws: Workspace!): GoPackages! {
+    let scan = lib.scan(ws)
     GoPackages(
       paths: sorted(packageKeys(ws)),
       mountPath: workspaceMountPath(ws),
       tool: self,
+      catalog: lib.testCatalog(scan: scan),
+      catalogScanDigest: `${scan.digest}`,
     )
   }
 
@@ -404,6 +407,10 @@ type Go {
 Go packages in a workspace, keyed by directory.
 """
 type GoPackages @collection {
+  # Plain discovery data only: do not retain the Workspace or scan handles.
+  let catalog: String
+  let catalogScanDigest: String
+
   """
   Package directories, relative to the workspace.
   """
@@ -418,7 +425,18 @@ type GoPackages @collection {
   The package in this directory.
   """
   package(path: String!): GoPackage! @get {
-    GoPackage(path: path, mountPath: mountPath, tool: tool)
+    let names: [String!]! = if (catalog == null) { [] } else {
+      let empty: [String!]! = []
+      let packages = JSON.decode(catalog!) :: [{{packagePath: String!, names: [String!]!}}!]!
+      packages.filter { pkg => pkg.packagePath == path }.reduce(empty) { names, pkg => names + pkg.names }
+    }
+    GoPackage(
+      path: path,
+      mountPath: mountPath,
+      tool: tool,
+      catalogNames: if (catalog == null) { null } else { names },
+      catalogScanDigest: catalogScanDigest,
+    )
   }
 
   # The modules holding the selected packages, each once.
@@ -497,6 +515,9 @@ type GoPackages @collection {
 A Go package.
 """
 type GoPackage {
+  let catalogNames: [String!]
+  let catalogScanDigest: String
+
   """
   Package directory, relative to the workspace.
   """
@@ -516,7 +537,12 @@ type GoPackage {
   tests(ws: Workspace!): GoTests! {
     let mod = module(ws)
     let dir = mod.relativeDir(path)
-    GoTests(names: mod.testNames(ws, dir), directory: dir, module: mod)
+    let names = if (catalogNames != null and `${tool.lib.scan(ws).digest}` == catalogScanDigest) {
+      if (mod.skipTest) { [] } else { catalogNames! }
+    } else {
+      mod.testNames(ws, dir)
+    }
+    GoTests(names: names, directory: dir, module: mod)
   }
 
   """
