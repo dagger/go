@@ -11,9 +11,8 @@ import (
 // imports, for the plan, and lists the pack's Go files in directories named
 // like Go files. "gohdr weigh" weighs the plan's steps by the Go
 // source they compile. "gohdr cc" answers the plan's C compiler probes.
-// "gohdr linkid" makes a link's build ID. "gohdr scope" lists the
-// packages a lint target's archives are compiled for, and "gohdr manifest"
-// describes those archives for golangci-lint's export driver.
+// "gohdr linkid" makes a link's build ID. "gohdr manifest" describes a lint
+// target's archives for golangci-lint's export driver.
 //
 // It is one object for the whole module, so the SDK asks the engine for its
 // ID once, not once for every exec that mounts it.
@@ -439,37 +438,27 @@ func readList(listPath string) ([]listPackage, error) {
 }
 
 // archived reports whether a package "go list -deps -test" lists gets an
-// archive: a plain package with Go files to compile, not a test variant, an
-// external test package or a test main. unsafe has none: the compiler knows
-// it.
+// archive: a package with Go files to compile, test variants and external
+// test packages included, but not a test main, whose _testmain.go no plan
+// holds. unsafe has none: the compiler knows it.
 func archived(p listPackage) bool {
-	return p.ForTest == "" && !strings.Contains(p.ImportPath, " [") && !strings.HasSuffix(p.ImportPath, ".test") &&
-		p.ImportPath != "unsafe" && len(p.GoFiles)+len(p.CgoFiles) > 0
+	return !strings.HasSuffix(p.ImportPath, ".test") && p.ImportPath != "unsafe" && len(p.GoFiles)+len(p.CgoFiles) > 0
 }
 
-// scope prints the import path of each package of a "go list -deps -test
-// -json" listing that gets an archive, one per line.
-func scope(listPath string) error {
-	pkgs, err := readList(listPath)
-	if err != nil {
-		return err
-	}
-	w := bufio.NewWriter(os.Stdout)
-	for _, p := range pkgs {
-		if archived(p) {
-			fmt.Fprintln(w, p.ImportPath)
-		}
-	}
-	return w.Flush()
-}
+// cgoRoot is where the archives' exec mounts each cgo package's work
+// directory; a generated file's path under it, less the root, is its path
+// in the archives directory too.
+const cgoRoot = "/gobuild/"
 
 // manifest prints the manifest golangci-lint's export driver reads for a
 // directory of archives: the settings they were compiled with, from "go env
 // -json" (env) and the build's tags, and for each package a line of entries
-// names, "<import path> <archive> [<cgo output>...]", the archive's path in
-// the directory and what it was compiled from, from the "go list" listing.
-// A cgo package's entry names the Go files cgo wrote for its compile, in
-// the compile's order.
+// names, "<id>\t<archive>[\t<cgo output>...]", the archive's path in the
+// directory and what it was compiled from, from the "go list" listing. A cgo
+// package's entry names the Go files cgo wrote for its compile, in the
+// compile's order, under cgoRoot; the manifest gives their paths in the
+// directory, where the archives' exec copies them, and the package's cgo
+// files, which the driver leaves out of what it compiles.
 func manifest(listPath, envPath, entriesPath, tags string) error {
 	pkgs, err := readList(listPath)
 	if err != nil {
@@ -495,7 +484,7 @@ func manifest(listPath, envPath, entriesPath, tags string) error {
 	}
 	var lines [][]string
 	for _, l := range strings.Split(string(data), "\n") {
-		if f := strings.Fields(l); len(f) >= 2 {
+		if f := strings.Split(l, "\t"); len(f) >= 2 {
 			lines = append(lines, f)
 		}
 	}
@@ -524,7 +513,15 @@ func manifest(listPath, envPath, entriesPath, tags string) error {
 		if errs[i] != nil {
 			return fmt.Errorf("%s: %w", f[0], errs[i])
 		}
-		packages[f[0]] = map[string]string{"archive": entries[i].archive, "sources": entries[i].sources}
+		e := map[string]any{"archive": entries[i].archive, "sources": entries[i].sources}
+		if p := byPath[f[0]]; len(p.CgoFiles) > 0 {
+			var output []string
+			for _, g := range f[2:] {
+				output = append(output, strings.TrimPrefix(g, cgoRoot))
+			}
+			e["cgoFiles"], e["cgoOutput"] = p.CgoFiles, output
+		}
+		packages[f[0]] = e
 	}
 	buildTags := strings.FieldsFunc(tags, func(r rune) bool { return r == ',' })
 	sort.Strings(buildTags)
@@ -532,7 +529,7 @@ func manifest(listPath, envPath, entriesPath, tags string) error {
 		buildTags = []string{}
 	}
 	out, err := json.MarshalIndent(map[string]any{
-		"version":    1,
+		"version":    2,
 		"goVersion":  env.GOVERSION,
 		"goos":       env.GOOS,
 		"goarch":     env.GOARCH,
@@ -552,7 +549,7 @@ func manifest(listPath, envPath, entriesPath, tags string) error {
 // of its Go files, its other source files and its embedded files, each named
 // by its path relative to the package directory. For a cgo package, whose
 // compile reads cgo's output (generated) rather than its cgo files, a line
-// "cgo\n", its plain Go files, and cgo's output, each named
+// "cgo\n", its plain Go files, its cgo files, and cgo's output, each named
 // "cgo-output-<i>" by its place in the compile and hashed without its
 // //line directives, which name the directory cgo ran in.
 func sourcesDigest(p listPackage, generated []string) (string, error) {
@@ -576,7 +573,7 @@ func sourcesDigest(p listPackage, generated []string) (string, error) {
 			}
 		}
 	}
-	for _, group := range [][]string{p.GoFiles, p.CFiles, p.CXXFiles, p.MFiles, p.HFiles, p.FFiles, p.SFiles,
+	for _, group := range [][]string{p.GoFiles, p.CgoFiles, p.CFiles, p.CXXFiles, p.MFiles, p.HFiles, p.FFiles, p.SFiles,
 		p.SwigFiles, p.SwigCXXFiles, p.SysoFiles, p.EmbedFiles} {
 		for _, f := range group {
 			if err := add(f, filepath.Join(p.Dir, f), false); err != nil {
@@ -638,12 +635,10 @@ func main() {
 		err = cc(args[1])
 	case len(args) == 3 && args[0] == "linkid":
 		err = linkID(args[1], args[2])
-	case len(args) == 2 && args[0] == "scope":
-		err = scope(args[1])
 	case len(args) == 5 && args[0] == "manifest":
 		err = manifest(args[1], args[2], args[3], args[4])
 	default:
-		err = fmt.Errorf("usage: gohdr unpack <pack> <dir> <list>, gohdr weigh <plan>, gohdr sizes <dir>, gohdr cc <plan>, gohdr linkid <importcfg> <salt>, gohdr scope <list>, or gohdr manifest <list> <env> <entries> <tags>")
+		err = fmt.Errorf("usage: gohdr unpack <pack> <dir> <list>, gohdr weigh <plan>, gohdr sizes <dir>, gohdr cc <plan>, gohdr linkid <importcfg> <salt>, or gohdr manifest <list> <env> <entries> <tags>")
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gohdr:", err)

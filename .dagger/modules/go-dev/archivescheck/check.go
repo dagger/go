@@ -1,10 +1,12 @@
 // Command archivescheck checks a directory of archives for golangci-lint's
 // export driver against the go command, in the module in the current
-// directory: the manifest lists the plain packages "go list -deps -test
-// ./..." lists, each with the digest the driver computes from go list's own
-// files, cgo's output included, and the settings go env reports; and each
-// archive's export data type-checks the module's packages. It prints what
-// differs, or nothing.
+// directory: the manifest lists the packages "go list -deps -test ./..."
+// lists, test variants and external test packages included but not test
+// mains, each by its ID with the digest the driver computes from go list's
+// own files, cgo's output included, and the settings go env reports; a cgo
+// package's entry names its cgo files and copies of cgo's output, which match
+// go list's; and each archive's export data type-checks the module's plain
+// packages. It prints what differs, or nothing.
 //
 // The digest is a copy of the driver's (dagger/golangci-lint,
 // helpers/export-driver/manifest.go), run on what go list -compiled reports,
@@ -49,8 +51,10 @@ type manifest struct {
 	CgoEnabled bool     `json:"cgoEnabled"`
 	BuildTags  []string `json:"buildTags"`
 	Packages   map[string]struct {
-		Archive string `json:"archive"`
-		Sources string `json:"sources"`
+		Archive   string   `json:"archive"`
+		Sources   string   `json:"sources"`
+		CgoFiles  []string `json:"cgoFiles"`
+		CgoOutput []string `json:"cgoOutput"`
 	} `json:"packages"`
 }
 
@@ -66,7 +70,7 @@ func main() {
 	must(err)
 	var env map[string]string
 	must(json.Unmarshal(out, &env))
-	want := manifest{Version: 1, GoVersion: env["GOVERSION"], GOOS: env["GOOS"], GOARCH: env["GOARCH"], CgoEnabled: env["CGO_ENABLED"] == "1", BuildTags: []string{}}
+	want := manifest{Version: 2, GoVersion: env["GOVERSION"], GOOS: env["GOOS"], GOARCH: env["GOARCH"], CgoEnabled: env["CGO_ENABLED"] == "1", BuildTags: []string{}}
 	if got := (manifest{m.Version, m.GoVersion, m.GOOS, m.GOARCH, m.CgoEnabled, m.BuildTags, nil}); !reflect.DeepEqual(got, want) {
 		fail("settings: %+v, want %+v", got, want)
 	}
@@ -75,7 +79,7 @@ func main() {
 	cmd.Stderr = os.Stderr
 	out, err = cmd.Output()
 	must(err)
-	var plain []listed
+	var listedPkgs []listed
 	dec := json.NewDecoder(bytes.NewReader(out))
 	for {
 		var p listed
@@ -84,13 +88,13 @@ func main() {
 		} else {
 			must(err)
 		}
-		if p.ForTest != "" || strings.Contains(p.ImportPath, " [") || strings.HasSuffix(p.ImportPath, ".test") || p.ImportPath == "unsafe" {
+		if strings.HasSuffix(p.ImportPath, ".test") || p.ImportPath == "unsafe" || len(p.GoFiles)+len(p.CgoFiles) == 0 {
 			continue
 		}
-		plain = append(plain, p)
+		listedPkgs = append(listedPkgs, p)
 	}
 	var names []string
-	for _, p := range plain {
+	for _, p := range listedPkgs {
 		names = append(names, p.ImportPath)
 		e, ok := m.Packages[p.ImportPath]
 		if !ok {
@@ -118,6 +122,25 @@ func main() {
 		if fi, err := os.Stat(filepath.Join(dir, e.Archive)); err != nil || !fi.Mode().IsRegular() || fi.Size() == 0 {
 			fail("%s: archive %s: %v", p.ImportPath, e.Archive, err)
 		}
+		// cgo's output in the archives is go list's, less its //line
+		// directives, in the compile's order.
+		var generated []string
+		for _, c := range abs(p.CompiledGoFiles) {
+			if !slices.Contains(abs(p.GoFiles), c) {
+				generated = append(generated, c)
+			}
+		}
+		if !slices.Equal(e.CgoFiles, p.CgoFiles) || len(e.CgoOutput) != len(generated) {
+			fail("%s: cgo files %v and output %v, want %v and %d files", p.ImportPath, e.CgoFiles, e.CgoOutput, p.CgoFiles, len(generated))
+			continue
+		}
+		for i, g := range generated {
+			got, err1 := fileSHA256(filepath.Join(dir, e.CgoOutput[i]), true)
+			want, err2 := fileSHA256(g, true)
+			if err1 != nil || err2 != nil || got != want {
+				fail("%s: cgo output %s differs from go list's %s: %v %v", p.ImportPath, e.CgoOutput[i], g, err1, err2)
+			}
+		}
 	}
 	for name := range m.Packages {
 		if !slices.Contains(names, name) {
@@ -133,8 +156,8 @@ func main() {
 		}
 		return os.Open(filepath.Join(dir, e.Archive))
 	})
-	for _, p := range plain {
-		if p.Module == nil || !p.Module.Main {
+	for _, p := range listedPkgs {
+		if p.Module == nil || !p.Module.Main || strings.Contains(p.ImportPath, " [") {
 			continue
 		}
 		fset := token.NewFileSet()
@@ -156,7 +179,7 @@ func main() {
 	for _, p := range problems {
 		fmt.Println(p)
 	}
-	fmt.Printf("checked %d packages\n", len(plain))
+	fmt.Printf("checked %d packages\n", len(listedPkgs))
 }
 
 func must(err error) {
@@ -188,6 +211,14 @@ func sourcesDigest(dir string, goFiles, compiled, other, embed []string) (string
 	}
 	if usesCgo {
 		lines = append(lines, "cgo\n")
+		// The cgo files, which the compile reads through cgo's output.
+		for _, g := range goFiles {
+			if !slices.Contains(compiled, g) {
+				if err := add(rel(g), g, false); err != nil {
+					return "", err
+				}
+			}
+		}
 		generated := 0
 		for _, c := range compiled {
 			var err error

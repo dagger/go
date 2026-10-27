@@ -974,6 +974,67 @@ func TestParseArchivePlan(t *testing.T) {
 	}
 }
 
+// A "go list -export -deps -test -n" plan names each step by import path
+// only: identifyVariants gives each its package's ID, a test variant by its
+// test files, a package recompiled for a test by its imports, and leaves
+// the test mains out.
+func TestIdentifyVariants(t *testing.T) {
+	compile := func(id, pkg string, files []string, deps ...string) []string {
+		lines := []string{"mkdir -p $WORK/" + id + "/", "", "#", "# " + pkg, "#", "", "cat >$WORK/" + id + "/importcfg << 'EOF' # internal"}
+		for _, d := range deps {
+			lines = append(lines, "packagefile x=$WORK/"+d+"/_pkg_.a")
+		}
+		return append(lines, "EOF",
+			"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/"+id+"/_pkg_.a -p "+pkg+" -importcfg $WORK/"+id+"/importcfg -pack "+strings.Join(files, " "))
+	}
+	var lines []string
+	lines = append(lines, compile("b002", "example.com/m/p", []string{"./p/p.go"})...)
+	lines = append(lines, compile("b003", "example.com/m/q", []string{"./q/q.go"}, "b002")...)
+	lines = append(lines, compile("b004", "example.com/m/p", []string{"./p/p.go", "./p/p_test.go"})...)
+	lines = append(lines, compile("b005", "example.com/m/q", []string{"./q/q.go"}, "b004")...)
+	lines = append(lines, compile("b006", "example.com/m/p_test", []string{"./p/x_test.go"}, "b004", "b005")...)
+	lines = append(lines, compile("b007", "example.com/m/p.test", []string{"$WORK/b007/_testmain.go"}, "b004", "b006")...)
+	blocks, err := parseArchivePlan(strings.Join(lines, "\n"), testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]bool{
+		"example.com/m/p": true, "example.com/m/q": true, "example.com/m/p.test": true,
+		"example.com/m/p [example.com/m/p.test]": true, "example.com/m/q [example.com/m/p.test]": true,
+		"example.com/m/p_test [example.com/m/p.test]": true,
+	}
+	if err := identifyVariants(blocks, ids); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"b002": "example.com/m/p",
+		"b003": "example.com/m/q",
+		"b004": "example.com/m/p [example.com/m/p.test]",
+		"b005": "example.com/m/q [example.com/m/p.test]",
+		"b006": "example.com/m/p_test [example.com/m/p.test]",
+	}
+	if len(blocks) != len(want) {
+		t.Errorf("%d blocks, want %d: the test main stays", len(blocks), len(want))
+	}
+	names := map[string]bool{}
+	for id, v := range want {
+		b := blocks[id]
+		if b == nil || b.importPath != v || b.name != stableName(v) {
+			t.Errorf("%s: %+v, want %s", id, b, v)
+			continue
+		}
+		names[b.name] = true
+	}
+	if len(names) != len(want) {
+		t.Errorf("variants share names: %v", names)
+	}
+	delete(ids, "example.com/m/q [example.com/m/p.test]")
+	blocks, _ = parseArchivePlan(strings.Join(lines, "\n"), testRoots)
+	if err := identifyVariants(blocks, ids); err == nil {
+		t.Error("a step that is no listed package was taken")
+	}
+}
+
 // A cgo package's compile reads cgo's Go output from its work directory,
 // which cgoOutputs names in the compile's order.
 func TestCgoOutputs(t *testing.T) {

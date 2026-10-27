@@ -12,10 +12,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"path"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -139,15 +142,18 @@ func (m *Gobuild) TestBinary(
 	return linked.file, nil
 }
 
-// Archives compiles, one exec per package as Binary builds, every package of
-// the module in workdir and every package it and its tests import, and
-// returns a directory of their archives, the full output of "go tool compile
-// -pack", under archives/, with manifest.json, which describes them for
-// golangci-lint's export driver: the Go version, target and build tags they
-// were compiled for, and for each package, by import path, its archive and a
-// digest of what it was compiled from. The packages are those "go list -deps
-// -test ./..." lists but test variants, external test packages and test
-// mains: main packages too, which the driver loads plainly as well.
+// Archives compiles, one exec per package as Binary builds, every package
+// that "go list -export -deps -test ./..." compiles in the module in workdir:
+// its packages, main packages included, their test variants and external test
+// packages, the packages recompiled against those, and every package they
+// import. It returns a directory for golangci-lint's export driver: under
+// archives/, each package's archive, the full output of "go tool compile
+// -pack"; under cgo/, the Go files cgo wrote for each cgo package's compile;
+// and manifest.json, which describes them: the Go version, target and build
+// tags they were compiled for, and for each package, by its ID in go list's
+// listing, its archive, its cgo files and their output, and a digest of what
+// it was compiled from. With all of them, the driver compiles nothing and
+// runs no cgo.
 func (m *Gobuild) Archives(
 	ctx context.Context,
 	// The Go container to build in, as for Binary.
@@ -187,15 +193,10 @@ func (m *Gobuild) Archives(
 	if err != nil {
 		return nil, fmt.Errorf("GOFLAGS: %w", err)
 	}
-	// go list names the packages, from the plan's view of the source, which
-	// has every import; go build -n compiles them, a main package without
-	// its link. With none, go build would build ".", so it doesn't run, and
-	// the plan is empty.
-	list := append(append([]string{"go", "list", "-deps", "-test", "-json=" + listFields}, flags...), "./...")
-	pre := shJoin(list) + " > /gobuild/list.json" +
-		" && /gobuild/gohdr scope /gobuild/list.json > /gobuild/pkgs.txt" +
-		" && go env -json GOVERSION GOOS GOARCH CGO_ENABLED > /gobuild/env.json && "
-	goCmd := "{ [ ! -s /gobuild/pkgs.txt ] || " + shJoin(append([]string{"go", "build", "-n"}, flags...)) + " $(cat /gobuild/pkgs.txt); }"
+	// go list -export prints the plan of what it compiles, as go build -n
+	// does, and its listing of the packages.
+	pre := "go env -json GOVERSION GOOS GOARCH CGO_ENABLED > /gobuild/env.json && "
+	goCmd := shJoin(append(append([]string{"go", "list", "-export", "-deps", "-test", "-n", "-json=" + listFields}, flags...), "./...")) + " > /gobuild/list.json"
 	p, err := b.planWith(ctx, headers, pre, goCmd)
 	if err != nil {
 		return nil, err
@@ -204,42 +205,50 @@ func (m *Gobuild) Archives(
 	if err != nil {
 		return nil, err
 	}
+	list, err := p.ran.File("/gobuild/list.json").Contents(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ids, err := listedIDs(list)
+	if err != nil {
+		return nil, err
+	}
+	if err := identifyVariants(blocks, ids); err != nil {
+		return nil, err
+	}
 	results, err := b.walk(ctx, blocks, p.weights, p.cc, p.goDirs, nil)
 	if err != nil {
 		return nil, err
 	}
-	pkgs, err := p.ran.File("/gobuild/pkgs.txt").Contents(ctx)
-	if err != nil {
-		return nil, err
-	}
-	byPath := map[string]*block{}
+	var order []*block
 	for _, bl := range blocks {
 		if !bl.isProfile {
-			byPath[bl.importPath] = bl
+			order = append(order, bl)
 		}
 	}
+	sort.Slice(order, func(i, j int) bool { return order[i].importPath < order[j].importPath })
 	// The digests are of the source whole, and of what cgo wrote for a cgo
 	// package's compile, read from the package's exec.
 	ctr := b.base.
 		WithMountedFile("/gobuild/gohdr", hdrTool()).
 		WithMountedDirectory(b.roots.Mod, b.mods).
 		WithMountedDirectory(b.roots.Src, b.src)
+	out := dag.Directory()
 	var entries strings.Builder
 	var archives []*dagger.File
-	for _, ip := range strings.Fields(pkgs) {
-		bl, ok := byPath[ip]
-		if !ok {
-			return nil, fmt.Errorf("%s: no compile for it in the plan", ip)
-		}
+	for _, bl := range order {
 		r := results[bl.id]
 		archives = append(archives, r.file)
-		entries.WriteString(ip + " archives/" + bl.output())
+		entries.WriteString(bl.importPath + "\tarchives/" + bl.output())
 		if bl.cgo {
 			at := "/gobuild/cgo/" + bl.name
 			ctr = ctr.WithMountedDirectory(at, r.dir)
+			var generated []*dagger.File
 			for _, f := range bl.cgoOutputs() {
-				entries.WriteString(" " + at + "/" + f)
+				entries.WriteString("\t" + at + "/" + f)
+				generated = append(generated, r.dir.File(f))
 			}
+			out = out.WithFiles("cgo/"+bl.name, generated)
 		}
 		entries.WriteString("\n")
 	}
@@ -250,12 +259,27 @@ func (m *Gobuild) Archives(
 		WithExec([]string{"sh", "-c", "/gobuild/gohdr manifest /gobuild/list.json /gobuild/env.json /gobuild/entries.txt " +
 			shQuote(strings.Join(buildTags(append(envFlags, flags...)), ",")) + " > /gobuild/manifest.json"}, bare).
 		File("/gobuild/manifest.json")
-	return dag.Directory().WithFiles("archives", archives).WithFile("manifest.json", manifest), nil
+	return out.WithFiles("archives", archives).WithFile("manifest.json", manifest), nil
 }
 
 // listFields are the fields of go list's output Archives reads: the
 // packages, and the files their digests cover.
 const listFields = "ImportPath,Dir,ForTest,GoFiles,CgoFiles,CFiles,CXXFiles,MFiles,HFiles,FFiles,SFiles,SwigFiles,SwigCXXFiles,SysoFiles,EmbedFiles"
+
+// listedIDs is the set of package IDs in a "go list -json" listing.
+func listedIDs(list string) (map[string]bool, error) {
+	ids := map[string]bool{}
+	dec := json.NewDecoder(strings.NewReader(list))
+	for {
+		var p struct{ ImportPath string }
+		if err := dec.Decode(&p); err == io.EOF {
+			return ids, nil
+		} else if err != nil {
+			return nil, fmt.Errorf("go list: %w", err)
+		}
+		ids[p.ImportPath] = true
+	}
+}
 
 // buildTags is the -tags value in go build flags, the last one's, as a list.
 func buildTags(flags []string) []string {

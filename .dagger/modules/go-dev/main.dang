@@ -987,11 +987,11 @@ type GoDev {
 
   """
   A module's archives are what golangci-lint's export driver reads: the
-  manifest lists every plain package go list -deps -test lists, main
-  packages and what only tests import included, with the settings go env
-  reports and the digest the driver computes from go list's files, cgo's
-  output for a cgo package; and the module's packages type-check against the
-  archives' export data. archivescheck, a copy of the driver's digest, checks
+  manifest lists every package go list -deps -test lists, main packages,
+  what only tests import, test variants and external test packages included,
+  with the settings go env reports and the digest the driver computes from
+  go list's files, cgo's output for a cgo package, which the archives carry;
+  and the module's packages type-check against the archives' export data. archivescheck, a copy of the driver's digest, checks
   them against the go command in a container that mounts the source
   elsewhere.
   """
@@ -1024,13 +1024,11 @@ type GoDev {
       checked.trimSpace.split("\n").length == 1 and checked.hasPrefix("checked "),
       "the archives: " + checked,
     )
-    let wanted = ["\"example.com/archives/cmd/tool\"", "\"example.com/archives/testonly\"", "\"net/http/httptest\"", "\"runtime/cgo\""]
+    let wanted = ["\"example.com/archives/cmd/tool\"", "\"example.com/archives/testonly\"", "\"net/http/httptest\"", "\"runtime/cgo\"", "\"example.com/archives/cg_test [example.com/archives/cg.test]\""]
     let missing = wanted.filter { p => manifest.contains(p + ": {") == false }
     assert(missing.length == 0, "the manifest lacks " + missing.join(", ") + ": " + manifest)
-    assert(
-      manifest.contains("example.com/archives/cg [") == false and manifest.contains(".test\"") == false,
-      "the manifest lists test packages: " + manifest,
-    )
+    assert(manifest.contains(".test\"") == false, "the manifest lists a test main: " + manifest)
+    assert(archives.entries.any { e => e == "cgo/" }, "the archives carry no cgo output: " + archives.entries.join(", "))
 
     # A module with no package to compile has archives of nothing.
     let none = directory

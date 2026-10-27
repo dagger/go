@@ -130,6 +130,90 @@ func parseArchivePlan(plan string, r roots) (map[string]*block, error) {
 	return parseBlocks(plan, r, true)
 }
 
+// identifyVariants names each block of a "go list -export -deps -test -n"
+// plan by its package's ID in the listing, ids: "p" for a plain package,
+// "p [p.test]" for one compiled with its test files, "p_test [p.test]" for
+// an external test package, and "q [p.test]" for a package recompiled
+// against p's test variant. The plan's headers name only the import path, so
+// a block compiled with test files is a test package, and a block whose
+// imports were compiled for a test is that test's too. The test mains, which
+// compile a _testmain.go no plan holds, are left out: nothing imports them.
+// Each block's name follows its ID, so variants of a package don't share
+// one.
+func identifyVariants(blocks map[string]*block, ids map[string]bool) error {
+	for id, b := range blocks {
+		if strings.HasSuffix(b.importPath, ".test") {
+			delete(blocks, id)
+		}
+	}
+	for _, b := range blocks {
+		b.deps = slices.DeleteFunc(b.deps, func(d string) bool { return blocks[d] == nil })
+	}
+	resolved := map[string]string{}
+	var resolve func(id string) (string, error)
+	resolve = func(id string) (string, error) {
+		if v, ok := resolved[id]; ok {
+			return v, nil
+		}
+		b := blocks[id]
+		if b.isProfile {
+			return b.importPath, nil
+		}
+		forTest := ""
+		for _, d := range b.deps {
+			dv, err := resolve(d)
+			if err != nil {
+				return "", err
+			}
+			if _, t, ok := strings.Cut(dv, " ["); ok {
+				if forTest != "" && forTest != t {
+					return "", fmt.Errorf("%s imports packages compiled for two tests, [%s and [%s", b.importPath, forTest, t)
+				}
+				forTest = t
+			}
+		}
+		v := b.importPath
+		switch {
+		case b.compilesTests() && ids[v+" ["+v+".test]"]:
+			v += " [" + v + ".test]"
+		case b.compilesTests():
+			v += " [" + strings.TrimSuffix(v, "_test") + ".test]"
+		case forTest != "":
+			v += " [" + forTest
+		}
+		if !ids[v] {
+			return "", fmt.Errorf("plan step %s, %s, is no package the listing has", id, v)
+		}
+		resolved[id] = v
+		return v, nil
+	}
+	for id, b := range blocks {
+		v, err := resolve(id)
+		if err != nil {
+			return err
+		}
+		if !b.isProfile {
+			b.importPath, b.name = v, stableName(v)
+		}
+	}
+	return nil
+}
+
+// compilesTests reports whether a block's compile reads _test.go files.
+func (b *block) compilesTests() bool {
+	for _, l := range b.lines {
+		if !reCompile.MatchString(l) {
+			continue
+		}
+		for _, w := range shellWords(l) {
+			if strings.HasSuffix(w, "_test.go") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func parseBlocks(plan string, r roots, archives bool) (map[string]*block, error) {
 	blocks := map[string]*block{}
 	var cur *block
