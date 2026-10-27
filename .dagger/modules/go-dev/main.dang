@@ -3,6 +3,32 @@ Development checks for dagger.io/go.
 """
 type GoDev {
   """
+  Cached discovery preserves module boundaries and does not hide later edits.
+  """
+  cachedTestCatalogCheck: Void @check {
+    let files = directory
+      .withNewFile("go.mod", "module example.com/catalog\n\ngo 1.26.1\n")
+      .withNewFile("a_test.go", "package fixture\nimport \"testing\"\nfunc TestOriginal(t *testing.T) {}\n")
+      .withNewFile("nested/go.mod", "module example.com/nested\n\ngo 1.26.1\n")
+      .withNewFile("nested/a_test.go", "package nested\nimport \"testing\"\nfunc TestNested(t *testing.T) {}\n")
+    let caller = files.asWorkspace
+    let tool = go(version: "1.26.1")
+    let packages = tool.packages(caller)
+    let original = packages.get(key: ".")
+    assert(original.tests(caller).keys == ["TestOriginal"], "root catalog")
+    assert(packages.get(key: "nested").tests(caller).keys == ["TestNested"], "nested catalog")
+    let edited = files.withNewFile(
+      "a_test.go", "package fixture\nimport \"testing\"\nfunc TestChanged(t *testing.T) {}\n",
+    ).asWorkspace
+    assert(original.tests(edited).keys == ["TestChanged"], "stale catalog after workspace edit")
+    let excluded = go(version: "1.26.1", test: ["!**"])
+    assert(excluded.packages(caller).keys.length == 0, "excluded tests became checks")
+    let empty = directory.withNewFile("go.mod", "module example.com/empty\n\ngo 1.26.1\n").asWorkspace
+    assert(tool.packages(empty).keys.length == 0, "empty module gained packages")
+    null
+  }
+
+  """
   Test filenames are literal paths, including characters used by glob patterns.
   """
   packageSearchFilenamesCheck: Void @check {
