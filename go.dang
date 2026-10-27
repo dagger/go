@@ -472,6 +472,12 @@ Go packages in one module, keyed by workspace-relative directory.
 type GoPackages @collection {
   paths: [String!]! @keys
   delta: CollectionDelta @delta
+
+  """
+  Whether the active selection removed tests or packages from this collection.
+  """
+  narrowed: Boolean! { delta == null or delta!.removedKeys.length > 0 }
+
   let mountPath: String!
   let tool: Go!
 
@@ -1267,22 +1273,21 @@ type GoModule {
   One command and report shared by every selected test in this Go module.
   """
   let runTests(ws: Workspace!): GoTestResults! {
-    let packages = tool.api.modules(ws: ws).module(path: path).packages(ws: ws)
-    let discovered = packages.paths.map { pkg =>
-      let tests = packages.package(path: pkg).tests(ws: ws)
-      GoTests(
-        names: tests.names,
+    let packages = tool.api.modules(ws: ws).get(key: path).packages(ws: ws)
+    let discovered = packages.keys.map { pkg =>
+      let tests = packages.get(key: pkg).tests(ws: ws)
+      GoTestSelection(
+        names: tests.keys,
         directory: relativeDir(pkg),
-        module: self,
-        delta: tests.delta,
+        narrowed: tests.narrowed,
       )
     }
     let selected = discovered.filter { tests => tests.names.length > 0 }
     if (selected.length == 0) { raise "no tests selected in module " + path }
     let empty: [String!]! = []
     let names = tool.sorted(selected.reduce(empty) { all, tests => all + tests.names }.uniq)
-    let narrowed = discovered.any { tests => tests.delta == null or tests.delta!.removedKeys.length > 0 }
-    let whole = packages.delta != null and packages.delta!.removedKeys.length == 0 and narrowed == false
+    let narrowed = discovered.any { tests => tests.narrowed }
+    let whole = packages.narrowed == false and narrowed == false
     let dirs = if (whole) { ["./..."] } else {
       tool.sorted(selected.map { tests => packageArg(tests.directory) })
     }
@@ -1567,6 +1572,12 @@ type GoTests @collection {
   """
   delta: CollectionDelta @delta
 
+  """
+  Whether the active selection removed tests or packages from this collection.
+  """
+  narrowed: Boolean! { delta == null or delta!.removedKeys.length > 0 }
+
+
   let directory: String!
 
   let module: GoModule!
@@ -1663,4 +1674,11 @@ type GoTestResults {
         + packageEvents.map { event => event.output ?? "" }.join("") + stderr
     }
   }
+}
+
+# The helper's immutable copy of the filtered collection keys.
+type GoTestSelection {
+  let names: [String!]!
+  let directory: String!
+  let narrowed: Boolean!
 }
