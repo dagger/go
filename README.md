@@ -516,3 +516,8 @@ Two differences are worth knowing before you switch:
 Run `DAGGER_BIN=/path/to/patched/dagger bash tests/ultrabatch.sh` to check two
 modules with multiple packages, excluded tests, isolated test failures, and
 package build failures. The command must use the patched PR engine.
+
+The filtered-view test helper reads its package and test collections through the
+engine API. This lets the engine apply the active selection before the helper
+builds the shared command. Local Dang collection calls do not apply that view.
+Test execution keeps the current isolated nested-session environment.
