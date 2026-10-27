@@ -1,6 +1,10 @@
 package main
 
-import "dagger/gobuild/internal/dagger"
+import (
+	"sync"
+
+	"dagger/gobuild/internal/dagger"
+)
 
 // hdrTool builds gohdr, the helper's in-container tool. "gohdr unpack" writes
 // out a header pack, the go module's scan of each Go file up to the end of its
@@ -11,7 +15,10 @@ import "dagger/gobuild/internal/dagger"
 // downloaded module, checking its checksum. "gohdr scope" lists the
 // packages a lint target's archives are compiled for, and "gohdr manifest"
 // describes those archives for golangci-lint's export driver.
-func hdrTool() *dagger.File {
+//
+// It is one object for the whole module, so the SDK asks the engine for its
+// ID once, not once for every exec that mounts it.
+var hdrTool = sync.OnceValue(func() *dagger.File {
 	// A standalone tool, so it is built with a pinned toolchain, statically,
 	// and runs in whatever image the module builds with.
 	return dag.Container().From(toolImage).
@@ -20,7 +27,7 @@ func hdrTool() *dagger.File {
 		WithNewFile("/gohdr-src/main.go", hdrToolSrc).
 		WithWorkdir("/gohdr-src").
 		WithExec([]string{"go", "build", "-o", "/gohdr", "."}, bare).File("/gohdr")
-}
+})
 
 const hdrToolSrc = `package main
 
@@ -118,11 +125,34 @@ func unpack(src, dst, list string) (err error) {
 	}
 }
 
+// sizes prints a line "<size> <path>" for each Go file under dir, the path
+// relative to dir: the real size of the source the plan sees only the
+// headers of.
+func sizes(dir string) error {
+	w := bufio.NewWriter(os.Stdout)
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".go") || !d.Type().IsRegular() {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, p)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "%d %s\n", info.Size(), filepath.ToSlash(rel))
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return w.Flush()
+}
+
 // weigh prints a line "<step> <weight>" for each step (bNNN) of a go build
-// -n plan: the bytes of Go source the step's lines name, plus a fixed cost
-// for starting a compile, a stand-in for its compile time. A relative file is
-// in the directory the plan last changed to, from the current one, as the go
-// command prints "cd" only when the directory changes.
+// -n plan, as weighPlan weighs them.
 func weigh(planPath string) error {
 	data, err := os.ReadFile(planPath)
 	if err != nil {
@@ -132,11 +162,36 @@ func weigh(planPath string) error {
 	if err != nil {
 		return err
 	}
+	steps, weights := weighPlan(string(data), start)
+	w := bufio.NewWriter(os.Stdout)
+	for _, step := range steps {
+		fmt.Fprintf(w, "%s %d\n", step, weights[step])
+	}
+	return w.Flush()
+}
+
+// valueFlags are the tool flags in a plan whose value is the next word: an
+// import path, such as -p's, or a path, which may end in ".go" without being
+// a source file of the step.
+var valueFlags = map[string]bool{
+	"-p": true, "-o": true, "-D": true, "-I": true, "-trimpath": true,
+	"-importcfg": true, "-embedcfg": true, "-buildid": true, "-lang": true,
+	"-goversion": true, "-asmhdr": true, "-symabis": true, "-pgoprofile": true,
+	"-coveragecfg": true, "-objdir": true, "-importpath": true, "-srcdir": true,
+}
+
+// weighPlan weighs each step (bNNN) of a go build -n plan: the bytes of Go
+// source files its lines name, plus a fixed cost for starting a compile, a
+// stand-in for its compile time. The weight is the step's own: neither a
+// flag's value nor a comment names a source file, even when it ends in ".go". A relative file is
+// in the directory the plan last changed to, from start, as the go command
+// prints "cd" only when the directory changes.
+func weighPlan(plan, start string) ([]string, map[string]int64) {
 	dir := start
 	weights := map[string]int64{}
 	var steps []string
 	step := ""
-	for _, line := range strings.Split(string(data), "\n") {
+	for _, line := range strings.Split(plan, "\n") {
 		if rest, ok := strings.CutPrefix(line, "mkdir -p $WORK/b"); ok {
 			if n, _, ok := strings.Cut(rest, "/"); ok && n != "" && strings.Trim(n, "0123456789") == "" {
 				step = "b" + n
@@ -153,10 +208,16 @@ func weigh(planPath string) error {
 			}
 			continue
 		}
-		if step == "" {
+		// A comment, such as the package header "# example.com/dep.go",
+		// names no file.
+		if step == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		for _, f := range strings.Fields(line) {
+		fields := strings.Fields(line)
+		for i, f := range fields {
+			if i > 0 && valueFlags[fields[i-1]] {
+				continue
+			}
 			f = strings.Trim(f, "\"'")
 			if !strings.HasSuffix(f, ".go") {
 				continue
@@ -169,11 +230,7 @@ func weigh(planPath string) error {
 			}
 		}
 	}
-	w := bufio.NewWriter(os.Stdout)
-	for _, step := range steps {
-		fmt.Fprintf(w, "%s %d\n", step, weights[step])
-	}
-	return w.Flush()
+	return steps, weights
 }
 
 // probedFlags are the C compiler flags the go command adds only when a probe
@@ -663,6 +720,8 @@ func main() {
 		err = unpack(args[1], args[2], args[3])
 	case len(args) == 2 && args[0] == "weigh":
 		err = weigh(args[1])
+	case len(args) == 2 && args[0] == "sizes":
+		err = sizes(args[1])
 	case len(args) == 2 && args[0] == "cc":
 		err = cc(args[1])
 	case len(args) == 3 && args[0] == "linkid":
@@ -674,7 +733,7 @@ func main() {
 	case len(args) == 5 && args[0] == "manifest":
 		err = manifest(args[1], args[2], args[3], args[4])
 	default:
-		err = fmt.Errorf("usage: gohdr unpack <pack> <dir> <list>, gohdr weigh <plan>, gohdr cc <plan>, gohdr linkid <importcfg> <salt>, gohdr modunzip <zip> <module>@<version> <dir> <checksum>, gohdr scope <list>, or gohdr manifest <list> <env> <entries> <tags>")
+		err = fmt.Errorf("usage: gohdr unpack <pack> <dir> <list>, gohdr weigh <plan>, gohdr sizes <dir>, gohdr cc <plan>, gohdr linkid <importcfg> <salt>, gohdr modunzip <zip> <module>@<version> <dir> <checksum>, gohdr scope <list>, or gohdr manifest <list> <env> <entries> <tags>")
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gohdr:", err)

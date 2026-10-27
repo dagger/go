@@ -533,11 +533,24 @@ func appendUniq(xs []string, x string) []string {
 // own exec mostly compiles alone, as the big packages at the end of a build
 // do, so it gets what go build passes on a 16-CPU machine. The standard
 // library and dependencies build many at once, so each gets 4: in dagger's
-// build, 16 there slowed them more than it sped their packages.
+// build, 16 there slowed them more than it sped their packages. A heavy one,
+// with at least heavyWeight of Go source of its own, such as the runtime or
+// a generated API client, gets 16 too: it is long, so its own compile holds
+// up its dependents, and few compile at once.
 const (
 	soloCompileC = "16"
 	depCompileC  = "4"
+	heavyWeight  = 1 << 20
 )
+
+// compileC is the -c of a package's compiles: outside is whether it is the
+// standard library's or a dependency's, weight its weight in the plan.
+func compileC(outside bool, weight int64) string {
+	if outside && weight < heavyWeight {
+		return depCompileC
+	}
+	return soloCompileC
+}
 
 // script renders a block as one shell script for its exec. A dependency's
 // archive is read from /work/lib. Archives get no Go build ID: the plan's are

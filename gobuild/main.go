@@ -281,6 +281,17 @@ func run(ctx context.Context, base *dagger.Container, image string, from *dagger
 	if err != nil {
 		return nil, nil, err
 	}
+	// The source's real sizes are listed alongside the plan, which sees only
+	// the files' headers.
+	type sizesResult struct {
+		sizes map[string]int64
+		err   error
+	}
+	sized := make(chan sizesResult, 1)
+	go func() {
+		sizes, err := b.sourceSizes(ctx)
+		sized <- sizesResult{sizes, err}
+	}()
 	plan, weights, cc, goDirs, err := b.plan(ctx, headers, flags, pkg, test)
 	if err != nil {
 		return nil, nil, err
@@ -289,6 +300,11 @@ func run(ctx context.Context, base *dagger.Container, image string, from *dagger
 	if err != nil {
 		return nil, nil, err
 	}
+	sr := <-sized
+	if sr.err != nil {
+		return nil, nil, fmt.Errorf("source sizes: %w", sr.err)
+	}
+	weighSource(blocks, weights, sr.sizes)
 	results, err := b.walk(ctx, blocks, weights, cc, goDirs, func(w *walker) (err error) {
 		if test {
 			if w.testmain, err = b.testmain(ctx, headers, flags, pkg); err != nil {
@@ -339,7 +355,8 @@ func (b *build) walk(ctx context.Context, blocks map[string]*block, weights map[
 	if err := mods.expandLoose(ctx, blocks); err != nil {
 		return nil, err
 	}
-	mods.fetch(ctx, blocks)
+	heights := heightsOf(blocks, weights)
+	mods.fetch(ctx, blocks, heights)
 	// Go 1.25 and later run "go tool pack" for packages with assembly, the
 	// runtime among the first: build the tool now, not when the runtime
 	// waits for it. An error shows again where it's used.
@@ -370,13 +387,9 @@ func (b *build) walk(ctx context.Context, blocks map[string]*block, weights map[
 		if bl.isProfile {
 			continue
 		}
-		conc := soloCompileC
-		if outside[id] {
-			conc = depCompileC
-		}
-		nodes[id] = toNode(bl, blocks, conc)
+		nodes[id] = toNode(bl, blocks, compileC(outside[id], weights[id]))
 	}
-	w.heights = heightsOf(blocks, weights)
+	w.heights = heights
 	return w.walk(ctx, nodes)
 }
 
@@ -386,7 +399,7 @@ func (b *build) profileStep(ctx context.Context, bl *block, blocks map[string]*b
 	ctr := b.base
 	if len(bl.srcFiles) > 0 {
 		srcDir, at := selected(b.src, bl.srcFiles)
-		ctr = ctr.WithMountedDirectory(path.Join(b.roots.Src, at), srcDir)
+		ctr = ctr.WithMountedDirectory(path.Join(b.roots.Src, at), srcDir, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
 	}
 	ctr = mods.mount(ctr, bl.modFiles)
 	out := "/work/" + bl.name
@@ -552,6 +565,57 @@ fi
 		WithExec([]string{"go", "build", "-o", toolsDir + "/", "cmd/pack"}, bare).
 		Directory(toolsDir)
 	return b, nil
+}
+
+// sourceSizes is the size of every Go file in the source, by its path in
+// it. It is read in an exec of its own over the source as it is: a filtered
+// copy of a large source costs more than the listing, which reruns when the
+// source changes anyway and costs one exec then.
+func (b *build) sourceSizes(ctx context.Context) (map[string]int64, error) {
+	out, err := dag.Container().From(toolImage).
+		WithMountedFile("/gobuild/gohdr", hdrTool(), dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
+		WithMountedDirectory("/gobuild/src", b.src, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true}).
+		WithExec([]string{"/gobuild/gohdr", "sizes", "/gobuild/src"}, bare).
+		Stdout(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return parseSizes(out)
+}
+
+// parseSizes parses "gohdr sizes" output: "<size> <path>" lines.
+func parseSizes(out string) (map[string]int64, error) {
+	sizes := map[string]int64{}
+	for _, line := range strings.Split(out, "\n") {
+		if line == "" {
+			continue
+		}
+		n, file, ok := strings.Cut(line, " ")
+		size, err := strconv.ParseInt(n, 10, 64)
+		if !ok || err != nil {
+			return nil, fmt.Errorf("source sizes: %q", line)
+		}
+		sizes[file] = size
+	}
+	return sizes, nil
+}
+
+// weighSource weighs each package compiled from the source by its Go files'
+// real sizes. The plan weighs what it sees of them, their headers, which is
+// a fraction of a large package, so its chain would rank below the ones
+// that wait on it far less. The scheduler reads weights only through
+// heights; no exec's key depends on them.
+func weighSource(blocks map[string]*block, weights map[string]int64, sizes map[string]int64) {
+	for id, bl := range blocks {
+		if len(bl.srcFiles) == 0 {
+			continue
+		}
+		w := int64(8 << 10)
+		for _, f := range bl.srcFiles {
+			w += sizes[f]
+		}
+		weights[id] = max(weights[id], w)
+	}
 }
 
 // canonical is from with ctr's environment and nothing else of ctr's.

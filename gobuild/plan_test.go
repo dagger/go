@@ -832,3 +832,73 @@ func TestBuildTags(t *testing.T) {
 		}
 	}
 }
+
+func TestCompileC(t *testing.T) {
+	for _, tc := range []struct {
+		outside bool
+		weight  int64
+		want    string
+	}{
+		{false, 8 << 10, soloCompileC},
+		{false, 8 << 20, soloCompileC},
+		{true, 8 << 10, depCompileC},
+		{true, heavyWeight - 1, depCompileC},
+		{true, heavyWeight, soloCompileC},
+		{true, 8 << 20, soloCompileC},
+	} {
+		if got := compileC(tc.outside, tc.weight); got != tc.want {
+			t.Errorf("compileC(%v, %d) = %s, want %s", tc.outside, tc.weight, got, tc.want)
+		}
+	}
+}
+
+func TestByHeight(t *testing.T) {
+	got := byHeight(map[string]int64{"a@v1": 5, "b@v1": 90, "c@v1": 5, "d@v1": 40})
+	want := []string{"b@v1", "d@v1", "a@v1", "c@v1"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("byHeight = %v, want %v", got, want)
+	}
+}
+
+// The first slots go to the highest packages that import nothing the walk
+// builds; a package importing one waits, however high.
+func TestFirstSlots(t *testing.T) {
+	nodes := map[string]*node{
+		"low":    {},
+		"high":   {Deps: []string{"outside"}},
+		"mid":    {},
+		"higher": {Deps: []string{"low"}},
+	}
+	heights := map[string]int64{"low": 1, "high": 50, "mid": 20, "higher": 90}
+	got := firstSlots(nodes, heights, 2)
+	if len(got) != 2 || !got["high"] || !got["mid"] {
+		t.Errorf("firstSlots = %v, want high and mid", got)
+	}
+	if got := firstSlots(nodes, heights, 16); len(got) != 3 || got["higher"] {
+		t.Errorf("firstSlots with room for all = %v, want the three leaves", got)
+	}
+}
+
+// A source package weighs its Go files' real sizes, not the headers the plan
+// saw; a dependency keeps the plan's weight.
+func TestWeighSource(t *testing.T) {
+	blocks := map[string]*block{
+		"b001": {srcFiles: []string{"cmd/x/main.go", "cmd/x/big.go", "cmd/x/**"}},
+		"b002": {},
+	}
+	weights := map[string]int64{"b001": 9000, "b002": 50000}
+	sizes, err := parseSizes("100 cmd/x/main.go\n2000000 cmd/x/big.go\n7 other/o.go\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	weighSource(blocks, weights, sizes)
+	if want := int64(8<<10 + 100 + 2000000); weights["b001"] != want {
+		t.Errorf("source package weight %d, want %d", weights["b001"], want)
+	}
+	if weights["b002"] != 50000 {
+		t.Errorf("dependency weight %d, want 50000", weights["b002"])
+	}
+	if _, err := parseSizes("x cmd/x/main.go\n"); err == nil {
+		t.Error("a malformed line parsed")
+	}
+}
