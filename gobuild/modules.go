@@ -124,7 +124,13 @@ func (m *modules) fetch(ctx context.Context, blocks map[string]*block, heights m
 	for range min(16, len(names)) {
 		go func() {
 			for name := range queue {
-				m.dir(name).Sync(ctx)
+				// The synced directory carries its ID, so a package that
+				// mounts it doesn't ask for the ID in its slot.
+				if d, err := m.dir(name).Sync(ctx); err == nil {
+					m.mu.Lock()
+					m.dirs[name] = d
+					m.mu.Unlock()
+				}
 			}
 		}()
 	}
