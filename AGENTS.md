@@ -17,8 +17,10 @@ Each module is checked with the Go toolchain its own `go.mod` asks for, unless
 `version`/`goVersion` says otherwise — or `base`, which supplies its own and so
 makes those settings ignored, recorded in `warnings`, rather than refused. Tool
 binaries come from `gomod`'s pinned `tool-builder`, never built in the module's
-own container, and `gomod.withTool` installs one only when the container does
-not already carry it.
+own container — except Staticcheck, which can only read a standard library no
+newer than the Go it was built with, so it is built with the module's
+toolchain. `gomod.withTool` installs one only when the container does not
+already carry it.
 
 Mechanics belong in `gomod`. Each tool keeps its own `GoModule` type, holding a
 path and forwarding to the library, because Dang cannot name a dependency's

@@ -221,7 +221,7 @@ type E2e {
     )
     assert(
       own.base(ws).withExec(["staticcheck", "--version"]).stdout.contains("staticcheck"),
-      "the pinned binary was not copied in",
+      "Staticcheck was not installed",
     )
 
     let pinned = staticcheck(goVersion: "1.26").module(ws, "fixtures/go-module-with-nested-module")
@@ -231,6 +231,10 @@ type E2e {
       "goVersion did not reach the container",
     )
     run(staticcheck(goVersion: "1.26").project(ws, configuredPath).lint(ws))
+
+    # A toolchain newer than gomod's tool builder: Staticcheck built with the
+    # builder's Go could not read this one's standard library.
+    run(staticcheck(goVersion: "1.27").project(ws, configuredPath).lint(ws))
     null
   }
 

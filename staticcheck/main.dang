@@ -56,8 +56,7 @@ type Staticcheck {
   ) {
     self.warnings = if (goVersion != null and base != null) {
       [
-        "goVersion \"" + goVersion
-          + "\" is ignored because base was set: the base container supplies its own Go toolchain",
+        "goVersion \"" + goVersion + "\" is ignored because base was set: the base container supplies its own Go toolchain",
       ]
     } else {
       []
@@ -144,7 +143,6 @@ type Staticcheck {
 
 # Keep all Dang types in one source file until Dagger can convert Workspace
 # arguments for installed multi-file Dang modules. See dagger/dagger#13476.
-
 """
 Staticcheck projects in a workspace, keyed by configuration root.
 """
@@ -253,14 +251,16 @@ type GoModule {
   let baseImage: Container
 
   """
-  The Staticcheck binary this module is checked with, built once at the pinned
-  release in a pinned Go container rather than in this module's own, so a
-  module on an older toolchain still gets it.
+  The Staticcheck binary this module is checked with, built at the pinned
+  release with this module's own toolchain. Staticcheck type-checks the
+  standard library of the toolchain it runs under, and can only read one no
+  newer than the Go it was built with. GOTOOLCHAIN=auto lets a module on a Go
+  older than the release requires still build it.
   """
-  let staticcheckBinary: File! {
-    gomod
-      .toolBuilder
+  let staticcheckBinary(ws: Workspace!): File! {
+    toolchain(ws)
       .withEnvVariable("GOBIN", "/usr/local/bin")
+      .withEnvVariable("GOTOOLCHAIN", "auto")
       .withExec(["go", "install", "honnef.co/go/tools/cmd/staticcheck@" + version])
       .file("/usr/local/bin/staticcheck")
   }
@@ -288,17 +288,23 @@ type GoModule {
   }
 
   """
-  Go container for this module, with Staticcheck installed.
+  Go container for this module, before Staticcheck is installed.
   """
-  base(ws: Workspace!): Container! {
-    let toolchain = if (baseImage == null) {
+  let toolchain(ws: Workspace!): Container! {
+    if (baseImage == null) {
       gomod.goContainer(toolchainVersion(ws), cgo: true)
     } else {
       gomod.withGoCaches(baseImage.withoutEntrypoint)
     }
+  }
+
+  """
+  Go container for this module, with Staticcheck installed.
+  """
+  base(ws: Workspace!): Container! {
     gomod
       .withWarnings(
-        gomod.withTool(toolchain, "staticcheck", staticcheckBinary),
+        gomod.withTool(toolchain(ws), "staticcheck", staticcheckBinary(ws)),
         warnings,
       )
       .withWorkdir("/ws")

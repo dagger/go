@@ -298,8 +298,8 @@ Staticcheck merges a package's `staticcheck.conf` files itself, so a nested
 project still inherits from its parent's. Select it with
 `--staticcheck --lint`, and projects with `--staticcheck-project=PATH`.
 
-`version` is the Staticcheck release, built once with `go install` in a pinned
-Go container, and `goVersion` is the Go toolchain. Test files are analyzed;
+`version` is the Staticcheck release, built with `go install` once per Go
+toolchain, and `goVersion` is the Go toolchain. Test files are analyzed;
 tests are not executed.
 
 ### `gomod`
@@ -369,10 +369,14 @@ and a `go.mod` bumped to a patch with no image yet would otherwise stop the
 module being checked at all. The root reports `null` for `version`/`goVersion`,
 since the answer varies per module; ask a module what it resolved to.
 
-**A tool is never built in the module's container.** golangci-lint's binary is
-copied out of its pinned image; Staticcheck and otelgotest are built once in a
-pinned Go container. A module on an older Go would otherwise fail to build the
-tool, and the error would be about the tool rather than the module.
+**A tool is built outside the module's container, except Staticcheck.**
+golangci-lint's binary is copied out of its pinned image; otelgotest is built
+once in a pinned Go container. A module on an older Go would otherwise fail to
+build the tool, and the error would be about the tool rather than the module.
+Staticcheck type-checks the standard library of the toolchain it runs under,
+and cannot read one newer than the Go it was built with, so it is built with
+the module's toolchain, with `GOTOOLCHAIN=auto` for a module on a Go older
+than the release requires.
 
 A tool is installed only when the container does not already have it, so a
 `base` carrying its own build — an instrumented one, say — keeps it. `version`
