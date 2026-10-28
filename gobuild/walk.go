@@ -175,7 +175,7 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 			// mounted read-only: a writable mount is one of the exec's
 			// outputs, a copy made for it to write and kept after.
 			if len(depFiles) > 0 {
-				ctr = ctr.WithMountedDirectory("/work/lib", assemble(depFiles), dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
+				ctr = ctr.WithMountedFiles("/work/lib", depFiles)
 			}
 			if n.Tools {
 				ctr = ctr.WithMountedDirectory(toolsDir, w.tools, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
@@ -252,14 +252,6 @@ func shortest(errs []string) string {
 		}
 	}
 	return s
-}
-
-// assemble returns a directory holding files, one withFiles. That needs
-// Dagger v1.0.0-beta.17 or later: before it, withFiles chained one snapshot
-// per file, and past roughly 400 the overlay mount's options grew too long
-// for the kernel.
-func assemble(files []*dagger.File) *dagger.Directory {
-	return dag.Directory().WithFiles(".", files)
 }
 
 // selected is the part of dir that files name, and where under the root to
