@@ -60,8 +60,7 @@ within each module or by their workspace path.
 | Function              | Description                                                   |
 | --------------------- | ------------------------------------------------------------- |
 | `packages`            | Manual package operations across the workspace.               |
-| `modules`             | Go module collection, keyed by workspace-relative root.       |
-| `module-list`         | Module inspection with include/exclude options.               |
+| `modules`             | Filtered Go module collection; use `list` to read its items.    |
 | `module`              | The module containing a workspace path.                       |
 
 On a package: `tests`, `binary`, `platforms` and `generate`.
@@ -123,8 +122,9 @@ lists the flags in effect.
 Packages are found in the Go modules at or below the workspace cwd, plus the
 enclosing module when the cwd is inside one, so `dagger -W ./sdk/go check`
 scopes every tool to that module without a flag. Use `--go-module=sdk/go` to
-select a module explicitly. `module-list` retains the include/exclude inspection
-options; pass `findUp: false` to `module` when the path is already a module root.
+select a module explicitly. `modules` retains the include/exclude and skip
+options. Read the selected modules as an array with `modules(...).list`.
+Pass `findUp: false` to `module` when the path is already a module root.
 The root `packages` helper retains manual get/subset/build/generate operations,
 but is not a collection and creates no second artifact path.
 

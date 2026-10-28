@@ -82,7 +82,7 @@ type GoDev {
   # Run each module's own tests. Objects from a dependency can't be mapped
   # over directly, so each module is looked up again by its path.
   let testEveryModule(tool: Go!, ws: Workspace!): Void {
-    tool.moduleList(ws).{{path}}.map { mod => tool.module(ws, mod.path, findUp: false).test(ws) }
+    tool.modules(ws).list.{{path}}.map { mod => tool.module(ws, mod.path, findUp: false).test(ws) }
     null
   }
 
@@ -102,7 +102,7 @@ type GoDev {
   files that are not modules are skipsNonModulesCheck's business.
   """
   discoveryCheck(ws: Workspace!): Void @check {
-    let paths = pathsOf(go(version: "1.26.1").moduleList(ws).{{path}})
+    let paths = pathsOf(go(version: "1.26.1").modules(ws).list.{{path}})
 
     # A go.mod is discovered at any depth: top level, nested inside another
     # module, and several directories deep.
@@ -133,9 +133,9 @@ type GoDev {
     let tool = go(version: "1.26.1")
 
     let below = pathsOf(
-      tool.moduleList(
+      tool.modules(
         ws.withWorkdir("fixtures/go-module-with-nested-module"),
-      ).{{path}},
+      ).list.{{path}},
     )
     assert(
       containsPath(below, "fixtures/go-module-with-nested-module"),
@@ -152,7 +152,7 @@ type GoDev {
 
     let inside = ws.withWorkdir("testdata/go-module-with-testdata/testdata")
     assert(
-      containsPath(pathsOf(tool.moduleList(inside).{{path}}), "testdata/go-module-with-testdata"),
+      containsPath(pathsOf(tool.modules(inside).list.{{path}}), "testdata/go-module-with-testdata"),
       "discovery inside a module missed the enclosing module",
     )
 
@@ -692,10 +692,12 @@ type GoDev {
       let pkg = variant.split(";").takeFirst(1).join("")
       let flags = variant.split(";").dropFirst(1)
       let race = flags.contains("-race")
-      let tool = if (race) { go(base: cgo, buildFlags: flags) } else { go(
-        version: "1.26.1",
-        buildFlags: flags,
-      ) }
+      let tool = if (race) { go(base: cgo, buildFlags: flags) } else {
+        go(
+          version: "1.26.1",
+          buildFlags: flags,
+        )
+      }
       let built = tool.packages(ws).get(key: pkg).testBinary(ws)
       let compared = cgo
         .withEnvVariable("CGO_ENABLED", if (race) { "1" } else { "0" })
@@ -955,11 +957,17 @@ type GoDev {
       .withWorkdir("/elsewhere")
       .withExec(["archivescheck", "/archives"])
       .stdout
-    assert(checked.trimSpace.split("\n").length == 1 and checked.hasPrefix("checked "), "the archives: " + checked)
+    assert(
+      checked.trimSpace.split("\n").length == 1 and checked.hasPrefix("checked "),
+      "the archives: " + checked,
+    )
     let wanted = ["\"example.com/archives/cmd/tool\"", "\"example.com/archives/testonly\"", "\"net/http/httptest\"", "\"runtime/cgo\""]
     let missing = wanted.filter { p => manifest.contains(p + ": {") == false }
     assert(missing.length == 0, "the manifest lacks " + missing.join(", ") + ": " + manifest)
-    assert(manifest.contains("example.com/archives/cg [") == false and manifest.contains(".test\"") == false, "the manifest lists test packages: " + manifest)
+    assert(
+      manifest.contains("example.com/archives/cg [") == false and manifest.contains(".test\"") == false,
+      "the manifest lists test packages: " + manifest,
+    )
 
     # A module with no package to compile has archives of nothing.
     let none = directory
@@ -1206,7 +1214,7 @@ type GoDev {
   """
   skipsNonModulesCheck(ws: Workspace!): Void @check {
     let tool = go(version: "1.26.1", test: test, generate: generate)
-    let mods = tool.moduleList(ws)
+    let mods = tool.modules(ws).list
     let discovered = pathsOf(mods.{{path}})
     assert(
       containsPath(discovered, unreadableFixturePath) == false,
@@ -1328,7 +1336,7 @@ type GoDev {
     )
 
     let tool = go(version: "1.26.1", test: test, generate: generate)
-    let allModulePaths = pathsOf(tool.moduleList(ws).{{path}})
+    let allModulePaths = pathsOf(tool.modules(ws).list.{{path}})
     assert(
       containsPath(allModulePaths, "fixtures/go-module-cross-include-a"),
       "unfiltered modules did not include expected fixture module",
@@ -1343,7 +1351,8 @@ type GoDev {
     )
 
     let includedModulePaths = tool
-      .moduleList(ws, include: ["fixtures/go-module-cross-include-a"]).{{path}}.map { mod => mod.path }
+      .modules(ws, include: ["fixtures/go-module-cross-include-a"])
+      .list.{{path}}.map { mod => mod.path }
     assert(
       containsPath(includedModulePaths, "fixtures/go-module-cross-include-a"),
       "modules include filter did not include matching module root",
@@ -1354,18 +1363,20 @@ type GoDev {
     )
 
     let excludedModulePaths = tool
-      .moduleList(ws, exclude: ["fixtures/go-module-cross-include-a"]).{{path}}.map { mod => mod.path }
+      .modules(ws, exclude: ["fixtures/go-module-cross-include-a"])
+      .list.{{path}}.map { mod => mod.path }
     assert(
       containsPath(excludedModulePaths, "fixtures/go-module-cross-include-a") == false,
       "modules exclude filter included excluded module root",
     )
 
     let combinedModulePaths = tool
-      .moduleList(
+      .modules(
         ws,
         include: ["fixtures/go-module-cross-include-*"],
         exclude: ["fixtures/go-module-cross-include-b"],
-      ).{{path}}.map { mod => mod.path }
+      )
+      .list.{{path}}.map { mod => mod.path }
     assert(
       containsPath(combinedModulePaths, "fixtures/go-module-cross-include-a"),
       "modules combined filters did not include matching module root",
@@ -1376,7 +1387,8 @@ type GoDev {
     )
 
     let contentMatchedModulePaths = tool
-      .moduleList(ws, include: ["**/module-a-only.data"]).{{path}}.map { mod => mod.path }
+      .modules(ws, include: ["**/module-a-only.data"])
+      .list.{{path}}.map { mod => mod.path }
     assert(
       containsPath(contentMatchedModulePaths, "fixtures/go-module-cross-include-a"),
       "modules include filter did not match module directory contents",
@@ -1387,7 +1399,8 @@ type GoDev {
     )
 
     let testSkippedModulePaths = tool
-      .moduleList(ws, includeSkipTest: false).{{path}}.map { mod => mod.path }
+      .modules(ws, includeSkipTest: false)
+      .list.{{path}}.map { mod => mod.path }
     assert(
       containsPath(testSkippedModulePaths, "testdata/go-module-excluded") == false,
       "modules includeSkipTest false included test-skipped module",
@@ -1406,7 +1419,8 @@ type GoDev {
     )
 
     let generateSkippedModulePaths = tool
-      .moduleList(ws, includeSkipGenerate: false).{{path}}.map { mod => mod.path }
+      .modules(ws, includeSkipGenerate: false)
+      .list.{{path}}.map { mod => mod.path }
     assert(
       containsPath(generateSkippedModulePaths, "testdata/go-module-excluded") == false,
       "modules includeSkipGenerate false included generate-skipped module",

@@ -326,34 +326,32 @@ type Go {
   }
 
   """
-  Go modules at or below the working directory.
+  Go modules at or below the working directory, keyed by root directory.
+  Use list to read the selected modules as an array.
   """
-  moduleList(
+  modules(
     ws: Workspace!,
     include: [String!]! = [],
     exclude: [String!]! = [],
     includeSkipTest: Boolean! = true,
     includeSkipGenerate: Boolean! = true,
-  ): [GoModule!]! {
+  ): GoModules! {
     let roots = if (include.length == 0 and exclude.length == 0) {
       moduleRootsHere(ws)
     } else {
       moduleRootsHere(ws).filter { root => lib.pathIncluded(ws, root, include, exclude) }
     }
-    roots
-      .map { root => goModule(ws, root) }
-      .filter { mod =>
+    let selected = if (includeSkipTest and includeSkipGenerate) {
+      roots
+    } else {
+      roots.filter { root =>
+        let mod = goModule(ws, root)
         (includeSkipTest or mod.skipTest == false)
           and (includeSkipGenerate or mod.skipGenerate(ws) == false)
       }
-  }
-
-  """
-  Go modules, keyed by their workspace-relative root.
-  """
-  modules(ws: Workspace!): GoModules! {
+    }
     GoModules(
-      paths: sorted(moduleRootsHere(ws)),
+      paths: sorted(selected),
       mountPath: workspaceMountPath(ws),
       tool: self,
     )
