@@ -34,7 +34,7 @@ type Staticcheck {
 
   new(
     """
-    Staticcheck release, e.g. "v0.8.1".
+    Staticcheck release, e.g. "v0.8.2".
     """
     version: String = null,
     """
@@ -73,7 +73,7 @@ type Staticcheck {
   """
   Staticcheck release used when the caller names none.
   """
-  let defaultVersion: String! = "v0.8.1"
+  let defaultVersion: String! = "v0.8.2"
 
   """
   The Staticcheck binary at the configured release.
@@ -253,16 +253,37 @@ type GoModule {
   let baseImage: Container
 
   """
-  The Staticcheck binary this module is checked with, built once at the pinned
-  release in a pinned Go container rather than in this module's own, so a
-  module on an older toolchain still gets it.
+  The Staticcheck binary this module is checked with, built at the pinned
+  release.
   """
-  let staticcheckBinary: File! {
-    gomod
-      .toolBuilder
+  let staticcheckBinary(ws: Workspace!): File! {
+    builder(ws)
       .withEnvVariable("GOBIN", "/usr/local/bin")
       .withExec(["go", "install", "honnef.co/go/tools/cmd/staticcheck@" + version])
       .file("/usr/local/bin/staticcheck")
+  }
+
+  """
+  The Go container Staticcheck is built in: gomod's pinned tool builder, so a
+  module on an older toolchain still gets it, or this module's own toolchain
+  when that is newer. Staticcheck type-checks the standard library of the
+  toolchain it runs under, and cannot read one newer than the Go it was built
+  with. A custom base's toolchain is unknown, so it gets the tool builder.
+  """
+  let builder(ws: Workspace!): Container! {
+    let wanted = toolchainVersion(ws)
+    if (baseImage == null and minor(wanted) > minor(gomod.scannerVersion)) {
+      gomod.goContainer(wanted)
+    } else {
+      gomod.toolBuilder
+    }
+  }
+
+  """
+  A Go version's minor number, padded so that it compares as a number.
+  """
+  let minor(goVersion: String!): String! {
+    (goVersion.split(".")[1] ?? "").padLeft(4)
   }
 
   """
@@ -298,7 +319,7 @@ type GoModule {
     }
     gomod
       .withWarnings(
-        gomod.withTool(toolchain, "staticcheck", staticcheckBinary),
+        gomod.withTool(toolchain, "staticcheck", staticcheckBinary(ws)),
         warnings,
       )
       .withWorkdir("/ws")

@@ -231,6 +231,10 @@ type E2e {
       "goVersion did not reach the container",
     )
     run(staticcheck(goVersion: "1.26").project(ws, configuredPath).lint(ws))
+
+    # A toolchain newer than gomod's tool builder: Staticcheck built with the
+    # builder's Go could not read this one's standard library.
+    run(staticcheck(goVersion: "1.27").project(ws, configuredPath).lint(ws))
     null
   }
 
@@ -246,7 +250,7 @@ type E2e {
       .withEntrypoint(["false"])
     let tool = staticcheck(base: plain)
     assert(tool.goVersion == null, "custom base incorrectly exposed a Go version")
-    assert(tool.version == "v0.8.1", "custom base hid the release it would install")
+    assert(tool.version == "v0.8.2", "custom base hid the release it would install")
 
     let mod = tool.module(ws, "staticcheck/testdata/clean")
     assert(mod.goVersion(ws) == null, "custom base incorrectly resolved a Go version")
