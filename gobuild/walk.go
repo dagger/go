@@ -118,6 +118,19 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 			defer wg.Done()
 			r := results[id]
 			defer close(r.done)
+			// The source a package reads doesn't depend on its imports, so its
+			// ID is fetched while they build rather than in the package's
+			// slot. An error shows again where it's mounted.
+			var srcDir *dagger.Directory
+			var at string
+			if len(n.SrcFiles) > 0 {
+				srcDir, at = selected(w.src, n.SrcFiles)
+				if n.SrcNonGo {
+					srcDir = w.nonGo.WithDirectory(path.Join(".", at), srcDir)
+					at = ""
+				}
+				srcDir.ID(ctx)
+			}
 			ctr := w.base
 			var depFiles []*dagger.File
 			for _, d := range n.Deps {
@@ -150,12 +163,7 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 			if n.Link && w.testmain != nil {
 				ctr = ctr.WithFile("/work/"+n.Name+"/_testmain.go", w.testmain)
 			}
-			if len(n.SrcFiles) > 0 {
-				srcDir, at := selected(w.src, n.SrcFiles)
-				if n.SrcNonGo {
-					srcDir = w.nonGo.WithDirectory(path.Join(".", at), srcDir)
-					at = ""
-				}
+			if srcDir != nil {
 				ctr = ctr.WithMountedDirectory(path.Join(w.roots.Src, at), srcDir, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
 			}
 			ctr = w.mods.mount(ctr, n.ModFiles)
