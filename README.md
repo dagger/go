@@ -1,5 +1,6 @@
-> This branch requires dagger/dagger PR 14802. It reads selected collections
-> through the engine API and shares test execution across packages in each Go module.
+> This branch requires PR 14802 with selected collection arguments for checks.
+> Each test receives the filtered package collection and passes it directly to
+> the shared module runner. No self API call or Dang import aliases are needed.
 
 # go
 

@@ -163,22 +163,6 @@ type Go {
   """
   let lib: Gomod! { gomod(includeExtraFiles: includeExtraFiles) }
 
-  # Read selections through the engine, which applies the artifact view.
-  # Local Dang method calls do not pass through that boundary.
-  let api: Dagger.Go! {
-    go(
-      version: version,
-      base: base,
-      includeExtraFiles: includeExtraFiles,
-      test: test,
-      generate: generate,
-      build: build,
-      buildFlags: buildFlags,
-      goflags: goflags,
-      mountPath: mountPath,
-    )
-  }
-
   # The scan's package discovery, which gomod's scanner writes in its one pass
   # over every Go file (go-includes, discovery.go): a "module" line per Go
   # module, then a "package" line per package directory with something to do.
@@ -481,8 +465,20 @@ type GoPackages @collection {
   let mountPath: String!
   let tool: Go!
 
+  """
+  Stored test collections for the packages. Lists are data, not artifact paths.
+  The engine filters these collections when passing a selected package set.
+  """
+  entries: [GoPackageSelection!]!
+
   package(path: String!): GoPackage! @get {
-    GoPackage(path: path, mountPath: mountPath, tool: tool)
+    let selected = entries.filter { entry => entry.directory == path }
+    GoPackage(
+      path: path,
+      mountPath: mountPath,
+      tool: tool,
+      selectedTests: if (selected.length == 0) { null } else { selected[0]!.tests },
+    )
   }
 
   let operations: GoPackageSet! {
@@ -611,6 +607,11 @@ type GoPackageSet {
 """
 A Go package.
 """
+type GoPackageSelection {
+  directory: String!
+  tests: GoTests!
+}
+
 type GoPackage {
   """
   Package directory, relative to the workspace.
@@ -621,6 +622,8 @@ type GoPackage {
 
   let tool: Go!
 
+  let selectedTests: GoTests
+
   let module(ws: Workspace!): GoModule! {
     tool.packageModule(ws, path, mountPath)
   }
@@ -629,9 +632,13 @@ type GoPackage {
   Tests in this package, keyed by name.
   """
   tests(ws: Workspace!): GoTests! {
-    let mod = module(ws)
-    let dir = mod.relativeDir(path)
-    GoTests(names: mod.testNames(ws, dir), directory: dir, module: mod)
+    if (selectedTests != null) {
+      selectedTests!
+    } else {
+      let mod = module(ws)
+      let dir = mod.relativeDir(path)
+      GoTests(names: mod.testNames(ws, dir), directory: dir, module: mod)
+    }
   }
 
   """
@@ -771,12 +778,18 @@ type GoModule {
   Packages owned by this module. Nested Go modules have their own collection.
   """
   packages(ws: Workspace!): GoPackages! {
+    let paths = tool.sorted(tool.packageKeys(ws, path))
     GoPackages(
-      paths: tool.sorted(
-        tool.packageKeys(ws, path),
-      ),
+      paths: paths,
       mountPath: mountPath,
       tool: tool,
+      entries: paths.map { pkg =>
+        let dir = relativeDir(pkg)
+        GoPackageSelection(
+          directory: pkg,
+          tests: GoTests(names: testNames(ws, dir), directory: dir, module: self),
+        )
+      },
     )
   }
 
@@ -1272,16 +1285,17 @@ type GoModule {
   """
   One command and report shared by every selected test in this Go module.
   """
-  let runTests(ws: Workspace!): GoTestResults! {
-    let packages = tool.api.modules(ws: ws).get(key: path).packages(ws: ws)
-    let discovered = packages.keys.map { pkg =>
-      let tests = packages.get(key: pkg).tests(ws: ws)
-      GoTestSelection(
-        names: tests.keys,
-        directory: relativeDir(pkg),
-        narrowed: tests.narrowed,
-      )
-    }
+  let runTests(ws: Workspace!, packages: GoPackages!): GoTestResults! {
+    let discovered = packages
+      .entries
+      .filter { entry => packages.paths.contains(entry.directory) }
+      .map { entry =>
+        GoTestSelection(
+          names: entry.tests.names,
+          directory: relativeDir(entry.directory),
+          narrowed: entry.tests.narrowed,
+        )
+      }
     let selected = discovered.filter { tests => tests.names.length > 0 }
     if (selected.length == 0) { raise "no tests selected in module " + path }
     let empty: [String!]! = []
@@ -1577,7 +1591,6 @@ type GoTests @collection {
   """
   narrowed: Boolean! { delta == null or delta!.removedKeys.length > 0 }
 
-
   let directory: String!
 
   let module: GoModule!
@@ -1626,9 +1639,13 @@ type GoTest {
   """
   Run this test.
   """
-  test(ws: Workspace!): Void @check {
+  test(ws: Workspace!, selection: GoPackages!): Void @check {
     let pkg = module.importPath(ws) + (if (directory == ".") { "" } else { "/" + directory })
-    module.runTests(ws).assertPassed(module.packagePath(directory), pkg, name)
+    module.runTests(ws, selection).assertPassed(
+      module.packagePath(directory),
+      pkg,
+      name,
+    )
   }
 }
 

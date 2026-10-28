@@ -25,6 +25,37 @@ selection=(--go-package=m1/p1 --go-package=m1/p2 --go-package=m2/p1 --go-package
 "$dagger_bin" check "${selection[@]}" >pass.stdout 2>pass.stderr
 grep -q '8 passed' pass.stderr
 
+# Install under a different name to catch accidental calls to the original API.
+python3 - <<'ALIAS'
+from pathlib import Path
+p=Path('dagger.toml')
+p.write_text(p.read_text().replace('[modules.go]', '[modules.renamed]'))
+ALIAS
+alias_selection=(--renamed-package=m1/p1 --renamed-package=m1/p2 --renamed-package=m2/p1 --renamed-package=m2/p2 --renamed-test=TestFoo --renamed-test=TestBar)
+"$dagger_bin" check "${alias_selection[@]}" >alias.stdout 2>alias.stderr
+grep -q '8 passed' alias.stderr
+python3 - <<'RESTORE'
+from pathlib import Path
+p=Path('dagger.toml')
+p.write_text(p.read_text().replace('[modules.renamed]', '[modules.go]'))
+RESTORE
+
+# A package with no selected test must not be built by the module runner.
+python3 - <<'EMPTY'
+from pathlib import Path
+p=Path('m1/p2/tests_test.go')
+p.write_text(p.read_text().replace('func TestFoo(', 'func TestUnselected('))
+Path('m1/p2/broken.go').write_text('package p2\nvar broken = undefinedSymbol\n')
+EMPTY
+"$dagger_bin" check --go-package=m1/p1 --go-package=m1/p2 --go-package=m2/p1 --go-package=m2/p2 --go-test=TestFoo >empty.stdout 2>empty.stderr
+grep -q '3 passed' empty.stderr
+python3 - <<'EMPTYRESTORE'
+from pathlib import Path
+p=Path('m1/p2/tests_test.go')
+p.write_text(p.read_text().replace('func TestUnselected(', 'func TestFoo('))
+Path('m1/p2/broken.go').unlink()
+EMPTYRESTORE
+
 python3 - <<'PY'
 from pathlib import Path
 p=Path('m1/p1/tests_test.go')
