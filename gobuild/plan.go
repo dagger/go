@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -62,6 +63,9 @@ var (
 	reBuildID     = regexp.MustCompile(`\s-buildid[ =]\S+`)
 	reBuildIDStep = regexp.MustCompile(`^(go tool buildid|\S+/buildid) -w `)
 	reConc        = regexp.MustCompile(`\s-c=\d+`)
+	// A compile's toolchain, from its -goversion: go1.N or go1.N.P, quoted
+	// when the version carries experiments ("go1.26.1-x X:boringcrypto").
+	reGoMinor = regexp.MustCompile(`\s-goversion ["']?go1\.(\d+)`)
 	// The Go compiler, run directly or through a -toolexec program.
 	reCompile = regexp.MustCompile(`(/pkg/tool/[^/\s]+/compile) `)
 	// The Go linker, run directly or through a -toolexec program. Only a
@@ -543,6 +547,28 @@ const (
 	heavyWeight  = 1 << 20
 )
 
+// startHeapMiB is the heap a compile grows to before it collects garbage at
+// the normal rate (-d=gcstart, Go 1.26 and later; the compiler's own default
+// is 128). In a cold build of dagger's CLI, 512 cut the compiles' CPU by
+// about 7% while the largest compiles' peak memory barely moved: their live
+// heaps are past 512 anyway. It's fixed, not scaled to the machine's memory,
+// since it is part of every compile's script and so of its cache key.
+const startHeapMiB = "512"
+
+// gcStart is the -d=gcstart flag for a compile line whose toolchain has it,
+// or nothing. It goes before the line's own flags, so a -d=gcstart in the
+// call's -gcflags comes later and still wins.
+func gcStart(l string) string {
+	m := reGoMinor.FindStringSubmatch(l)
+	if m == nil {
+		return ""
+	}
+	if n, err := strconv.Atoi(m[1]); err != nil || n < 26 {
+		return ""
+	}
+	return " -d=gcstart=" + startHeapMiB
+}
+
 // compileC is the -c of a package's compiles: outside is whether it is the
 // standard library's or a dependency's, weight its weight in the plan.
 func compileC(outside bool, weight int64) string {
@@ -579,7 +605,7 @@ func (b *block) script(blocks map[string]*block, conc string) string {
 		// put in one place on every compile rather than replaced.
 		if reCompile.MatchString(l) {
 			l = reConc.ReplaceAllString(l, "")
-			l = reCompile.ReplaceAllString(l, "${1} -c="+conc+" ")
+			l = reCompile.ReplaceAllString(l, "${1} -c="+conc+gcStart(l)+" ")
 		}
 		// The go command packs archives in-process; "go tool pack" would
 		// build the pack tool from source in every fresh container.

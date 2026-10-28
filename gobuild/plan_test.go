@@ -391,6 +391,75 @@ func TestScriptCompileConcurrency(t *testing.T) {
 	}
 }
 
+// A compile whose toolchain has -d=gcstart (Go 1.26 and later, by the line's
+// own -goversion) gets it once, right after the compiler and its -c; others
+// get nothing.
+func TestScriptStartHeap(t *testing.T) {
+	script := func(compile string) string {
+		blocks, err := parsePlan(mainLink(compile), testRoots)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return blocks["b001"].script(blocks, soloCompileC)
+	}
+	flag := " -d=gcstart=" + startHeapMiB
+	for _, v := range []string{"go1.26.10", "go1.26rc1", "go1.27", `"go1.26.10-custom X:boringcrypto"`} {
+		s := script("/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main -lang=go1.26 -goversion " + v + " -pack ./main.go")
+		if strings.Count(s, "-d=gcstart") != 1 || !strings.Contains(s, "compile -c="+soloCompileC+flag+" -o ") {
+			t.Errorf("%s:\n%s", v, s)
+		}
+	}
+	wrapped := script(`/opt/wrap /usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main -goversion "go1.26.10 X:nocoverageredesign" -pack ./main.go`)
+	if !strings.Contains(wrapped, "/opt/wrap /usr/local/go/pkg/tool/linux_amd64/compile -c="+soloCompileC+flag+" -o ") {
+		t.Errorf("a -toolexec compile:\n%s", wrapped)
+	}
+	for _, v := range []string{" -goversion go1.25.3", " -goversion go1.9", ` -goversion "go1.25.3 X:boringcrypto"`, ` -goversion "devel go1.27-0123456789 Mon Oct 26 2026"`, ""} {
+		s := script("/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main" + v + " -pack ./main.go")
+		if strings.Contains(s, "gcstart") {
+			t.Errorf("%q got the flag:\n%s", v, s)
+		}
+	}
+}
+
+// A -d=gcstart in the call's own -gcflags comes later on the line, so it wins.
+func TestScriptStartHeapUserFlag(t *testing.T) {
+	blocks, err := parsePlan(mainLink("/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main -goversion go1.26.10 -d=gcstart=64 -pack ./main.go"), testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := blocks["b001"].script(blocks, soloCompileC)
+	ours, theirs := strings.Index(s, " -d=gcstart="+startHeapMiB+" "), strings.Index(s, " -d=gcstart=64 ")
+	if ours < 0 || theirs < 0 || ours > theirs {
+		t.Errorf("the call's -d=gcstart should come after gobuild's:\n%s", s)
+	}
+}
+
+// Only the Go compile gets -d=gcstart: not the assembler, cgo, the C
+// compiler or the link, even with a Go 1.26 -goversion in the plan.
+func TestScriptStartHeapOnlyCompile(t *testing.T) {
+	plan := mainLink(
+		"cd /src/cgoapp",
+		"TERM='dumb' CGO_LDFLAGS='' /usr/local/go/pkg/tool/linux_amd64/cgo -objdir $WORK/b001/ -importpath example.com/m -- -I $WORK/b001/ -O2 -g ./main.go",
+		"TERM='dumb' gcc -I . -fPIC -m64 -pthread -I $WORK/b001/ -O2 -g -o $WORK/b001/_x001.o -c add.c",
+		"/usr/local/go/pkg/tool/linux_amd64/asm -p main -trimpath \"$WORK/b001=>\" -I $WORK/b001/ -I /usr/local/go/pkg/include -D GOOS_linux -D GOARCH_amd64 -gensymabis -o $WORK/b001/symabis ./a.s",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -trimpath \"$WORK/b001=>\" -p main -goversion go1.26.10 -symabis $WORK/b001/symabis -pack $WORK/b001/_cgo_gotypes.go $WORK/b001/main.cgo1.go",
+		"go tool pack r $WORK/b001/_pkg_.a $WORK/b001/_x001.o # internal",
+	)
+	blocks, err := parsePlan(plan, testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := blocks["b001"].script(blocks, soloCompileC)
+	for _, l := range strings.Split(s, "\n") {
+		if strings.Contains(l, "gcstart") != strings.Contains(l, "/compile ") {
+			t.Errorf("line %q:\n%s", l, s)
+		}
+	}
+	if strings.Count(s, "-d=gcstart") != 1 {
+		t.Errorf("want one -d=gcstart:\n%s", s)
+	}
+}
+
 // The link's build ID is made in its exec from what it reads; a -buildid
 // in the call's -ldflags still comes last.
 func TestScriptLinkBuildID(t *testing.T) {
