@@ -221,7 +221,7 @@ type E2e {
     )
     assert(
       own.base(ws).withExec(["staticcheck", "--version"]).stdout.contains("staticcheck"),
-      "Staticcheck was not installed",
+      "the pinned binary was not copied in",
     )
 
     let pinned = staticcheck(goVersion: "1.26").module(ws, "fixtures/go-module-with-nested-module")
@@ -250,7 +250,7 @@ type E2e {
       .withEntrypoint(["false"])
     let tool = staticcheck(base: plain)
     assert(tool.goVersion == null, "custom base incorrectly exposed a Go version")
-    assert(tool.version == "v0.8.1", "custom base hid the release it would install")
+    assert(tool.version == "v0.8.2", "custom base hid the release it would install")
 
     let mod = tool.module(ws, "staticcheck/testdata/clean")
     assert(mod.goVersion(ws) == null, "custom base incorrectly resolved a Go version")

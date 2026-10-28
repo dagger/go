@@ -34,7 +34,7 @@ type Staticcheck {
 
   new(
     """
-    Staticcheck release, e.g. "v0.8.1".
+    Staticcheck release, e.g. "v0.8.2".
     """
     version: String = null,
     """
@@ -56,7 +56,8 @@ type Staticcheck {
   ) {
     self.warnings = if (goVersion != null and base != null) {
       [
-        "goVersion \"" + goVersion + "\" is ignored because base was set: the base container supplies its own Go toolchain",
+        "goVersion \"" + goVersion
+          + "\" is ignored because base was set: the base container supplies its own Go toolchain",
       ]
     } else {
       []
@@ -72,7 +73,7 @@ type Staticcheck {
   """
   Staticcheck release used when the caller names none.
   """
-  let defaultVersion: String! = "v0.8.1"
+  let defaultVersion: String! = "v0.8.2"
 
   """
   The Staticcheck binary at the configured release.
@@ -143,6 +144,7 @@ type Staticcheck {
 
 # Keep all Dang types in one source file until Dagger can convert Workspace
 # arguments for installed multi-file Dang modules. See dagger/dagger#13476.
+
 """
 Staticcheck projects in a workspace, keyed by configuration root.
 """
@@ -252,17 +254,36 @@ type GoModule {
 
   """
   The Staticcheck binary this module is checked with, built at the pinned
-  release with this module's own toolchain. Staticcheck type-checks the
-  standard library of the toolchain it runs under, and can only read one no
-  newer than the Go it was built with. GOTOOLCHAIN=auto lets a module on a Go
-  older than the release requires still build it.
+  release.
   """
   let staticcheckBinary(ws: Workspace!): File! {
-    toolchain(ws)
+    builder(ws)
       .withEnvVariable("GOBIN", "/usr/local/bin")
-      .withEnvVariable("GOTOOLCHAIN", "auto")
       .withExec(["go", "install", "honnef.co/go/tools/cmd/staticcheck@" + version])
       .file("/usr/local/bin/staticcheck")
+  }
+
+  """
+  The Go container Staticcheck is built in: gomod's pinned tool builder, so a
+  module on an older toolchain still gets it, or this module's own toolchain
+  when that is newer. Staticcheck type-checks the standard library of the
+  toolchain it runs under, and cannot read one newer than the Go it was built
+  with. A custom base's toolchain is unknown, so it gets the tool builder.
+  """
+  let builder(ws: Workspace!): Container! {
+    let wanted = toolchainVersion(ws)
+    if (baseImage == null and minor(wanted) > minor(gomod.scannerVersion)) {
+      gomod.goContainer(wanted)
+    } else {
+      gomod.toolBuilder
+    }
+  }
+
+  """
+  A Go version's minor number, padded so that it compares as a number.
+  """
+  let minor(goVersion: String!): String! {
+    (goVersion.split(".")[1] ?? "").padLeft(4)
   }
 
   """
@@ -288,23 +309,17 @@ type GoModule {
   }
 
   """
-  Go container for this module, before Staticcheck is installed.
+  Go container for this module, with Staticcheck installed.
   """
-  let toolchain(ws: Workspace!): Container! {
-    if (baseImage == null) {
+  base(ws: Workspace!): Container! {
+    let toolchain = if (baseImage == null) {
       gomod.goContainer(toolchainVersion(ws), cgo: true)
     } else {
       gomod.withGoCaches(baseImage.withoutEntrypoint)
     }
-  }
-
-  """
-  Go container for this module, with Staticcheck installed.
-  """
-  base(ws: Workspace!): Container! {
     gomod
       .withWarnings(
-        gomod.withTool(toolchain(ws), "staticcheck", staticcheckBinary(ws)),
+        gomod.withTool(toolchain, "staticcheck", staticcheckBinary(ws)),
         warnings,
       )
       .withWorkdir("/ws")
