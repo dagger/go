@@ -1919,4 +1919,41 @@ type GoDev {
     }
     null
   }
+
+  """
+  Indexed discovery keeps explicit operations on omitted modules and package
+  directories working, and agrees with manual package test discovery.
+  """
+  catalogueIndexCheck(ws: Workspace!): Void @check {
+    let tool = go(version: "1.26.1")
+    let root = "testdata/go-module-with-testdata"
+    let mod = tool.module(ws, root)
+    let manual = tool.packages(ws).package(path: root).tests(ws).keys
+    let indexed = mod.packages(ws).get(key: root).tests(ws).keys
+    assert(indexed == manual, "indexed test names differ from manual discovery")
+    assert(
+      tool.packages(ws).package(path: root + "/not-a-package").tests(ws).keys.length == 0,
+      "an explicitly named directory without tests did not return an empty collection",
+    )
+    assert(
+      tool.module(ws, emptyFixturePath).hasGenerateDirectives(ws) == false,
+      "an explicitly named module with no Go files did not remain reachable",
+    )
+    assert(
+      tool.module(ws, unreadableFixturePath).hasGenerateDirectives(ws) == false,
+      "an explicitly named unreadable module did not remain reachable",
+    )
+    let skipped = directory
+      .withNewFile("go.mod", "module example.com/skipped\n\ngo 1.26.1\n")
+      .withNewFile("main.go", "package main\nfunc main() {}\n")
+      .withNewFile("main_test.go", "package main\nimport \"testing\"\nfunc TestPresent(t *testing.T) {}\n")
+      .asWorkspace
+    let buildOnly = go(version: "1.26.1", test: ["!**"]).module(skipped, ".").packages(skipped)
+    assert(buildOnly.keys == ["."], "skipping tests removed a selected build package")
+    assert(
+      buildOnly.get(key: ".").tests(skipped).keys.length == 0,
+      "a build-only package offered skipped test names",
+    )
+    null
+  }
 }
