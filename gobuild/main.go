@@ -421,6 +421,10 @@ type build struct {
 }
 
 func newBuild(ctx context.Context, ctr *dagger.Container, image string, from *dagger.Container, source *dagger.Directory, mountPath, cwd string, flags []string) (*build, error) {
+	// The plan's view of the source is a filtered copy, as slow on a large
+	// source as the rest of this setup, which it doesn't depend on: it's
+	// made alongside it. An error shows again where the plan mounts it.
+	go planSource(source).ID(ctx)
 	var err error
 	if image != "" {
 		from = dag.Container().From(image)
@@ -663,6 +667,12 @@ func (b *build) plan(ctx context.Context, headers *dagger.File, flags []string, 
 	return p.plan, p.weights, p.cc, p.goDirs, nil
 }
 
+// planSource is what a plan reads of the source whole: its files that
+// aren't Go, which an edit inside a Go file leaves as they were.
+func planSource(src *dagger.Directory) *dagger.Directory {
+	return src.Filter(dagger.DirectoryFilterOpts{Exclude: []string{"**/*.go"}})
+}
+
 // planned is a plan with what plan reads with it, and the exec that made it.
 type planned struct {
 	ran     *dagger.Container
@@ -678,7 +688,7 @@ func (b *build) planWith(ctx context.Context, headers *dagger.File, pre, goCmd s
 	ran := b.base.
 		WithMountedFile("/gobuild/gohdr", hdrTool()).
 		WithMountedDirectory(b.roots.Mod, b.mods).
-		WithMountedDirectory(b.roots.Src, b.src.Filter(dagger.DirectoryFilterOpts{Exclude: []string{"**/*.go"}})).
+		WithMountedDirectory(b.roots.Src, planSource(b.src)).
 		WithMountedFile("/gobuild/src.hdr", headers).
 		// An empty build cache, so the plan holds every step.
 		WithEnvVariable("GOCACHE", "/gobuild/plancache").
@@ -734,7 +744,7 @@ func (b *build) testmain(ctx context.Context, headers *dagger.File, flags []stri
 	return b.base.
 		WithMountedFile("/gobuild/gohdr", hdrTool()).
 		WithMountedDirectory(b.roots.Mod, b.mods).
-		WithMountedDirectory(b.roots.Src, b.src.Filter(dagger.DirectoryFilterOpts{Exclude: []string{"**/*.go"}})).
+		WithMountedDirectory(b.roots.Src, planSource(b.src)).
 		WithMountedFile("/gobuild/src.hdr", headers).
 		WithMountedDirectory("/gobuild/tests", tests).
 		WithEnvVariable("GOCACHE", "/gobuild/plancache").
