@@ -171,6 +171,39 @@ type Go {
     lib.scan(ws).file("_discovery_").contents.split("\n").filter { line => line != "" }
   }
 
+  # A small index points at one immutable catalogue file per module.
+  let discoveryIndex(ws: Workspace!): JSONValue! {
+    lib.scan(ws).file("_discovery_index_.json").asJSON
+  }
+
+  let moduleRoots(ws: Workspace!): [String!]! {
+    JSON.decode(`${discoveryIndex(ws).field(path: ["roots"]).contents}`) :: [String!]!
+  }
+
+  let moduleDiscovery(ws: Workspace!, root: String!): JSONValue! {
+    let ordinal = JSON.decode(`${discoveryIndex(ws).field(path: ["modules", root]).contents}`) :: Int!
+    lib.scan(ws).file("_discovery_modules_/" + `${ordinal}` + ".json").asJSON
+  }
+
+  let moduleDiscoveryLines(ws: Workspace!, root: String!): [String!]! {
+    let empty: [String!]! = []
+    if (moduleRoots(ws).contains(root)) {
+      JSON.decode(`${moduleDiscovery(ws, root).field(path: ["lines"]).contents}`) :: [String!]!
+    } else {
+      # Named modules remain reachable even when discovery omits them.
+      empty
+    }
+  }
+
+  let modulePackageRecords(ws: Workspace!, root: String!): [{{directory: String!, tests: [String!]!}}!]! {
+    let empty: [{{directory: String!, tests: [String!]!}}!]! = []
+    if (moduleRoots(ws).contains(root)) {
+      JSON.decode(`${moduleDiscovery(ws, root).field(path: ["packages"]).contents}`) :: [{{directory: String!, tests: [String!]!}}!]!
+    } else {
+      empty
+    }
+  }
+
   # Field n of a tab-separated discovery line; field 0 is its kind.
   let lineField(line: String!, n: Int!): String! {
     line.split("\t").takeFirst(n + 1).takeLast(1).join("")
@@ -190,12 +223,7 @@ type Go {
   # the module the working directory is inside.
   let moduleRootsHere(ws: Workspace!): [String!]! {
     let cwd = ws.cwd.trimPrefix("/").trimSuffix("/")
-    let roots = discoveryLines(ws).filter { line => line.hasPrefix("module\t") }.map { line =>
-      lineField(
-        line,
-        1,
-      )
-    }
+    let roots = moduleRoots(ws)
     if (cwd == "" or cwd == ".") {
       roots
     } else {
@@ -218,9 +246,7 @@ type Go {
 
   # The root of the Go module holding a workspace path: the innermost one.
   let moduleRootOf(ws: Workspace!, pkgPath: String!): String! {
-    let roots = discoveryLines(ws)
-      .filter { line => line.hasPrefix("module\t") }
-      .map { line => lineField(line, 1) }
+    let roots = moduleRoots(ws)
       .filter { root => root == "." or pkgPath == root or pkgPath.hasPrefix(root + "/") }
     if (roots.length == 0) {
       raise "no Go module found containing path: " + pkgPath
@@ -306,7 +332,10 @@ type Go {
         excluded,
       )
     }
-    discoveryLines(ws)
+    let lines = if (modulePath == null) { discoveryLines(ws) } else {
+      moduleDiscoveryLines(ws, modulePath!)
+    }
+    lines
       .filter { line =>
         line.hasPrefix("package\t")
           and roots.contains(lineField(line, 1))
@@ -777,15 +806,39 @@ type GoModule {
   """
   packages(ws: Workspace!): GoPackages! {
     let paths = tool.sorted(tool.packageKeys(ws, path))
+    let empty: [String!]! = []
+    let records = if (skipTest) {
+      # Build and generate can still offer packages in a module whose tests
+      # are skipped; none of their test names need to be fetched.
+      paths.map { pkg => {{directory: pkg, tests: empty}} }
+    } else {
+      # Both lists are in byte order. Select with a linear merge, avoiding a
+      # search through every package record for each selected path.
+      let next = 0
+      let selected = tool.modulePackageRecords(ws, path).filter { pkg =>
+        if (next < paths.length and pkg.directory == paths[next]!) {
+          next = next + 1
+          true
+        } else {
+          false
+        }
+      }
+      if (next != paths.length) { raise "package catalogue does not contain every selected path" }
+      selected
+    }
     GoPackages(
       paths: paths,
       mountPath: mountPath,
       tool: tool,
-      entries: paths.map { pkg =>
-        let dir = relativeDir(pkg)
+      entries: records.map { pkg =>
+        let dir = relativeDir(pkg.directory)
         GoPackageSelection(
-          directory: pkg,
-          tests: GoTests(names: testNames(ws, dir), directory: dir, module: self),
+          directory: pkg.directory,
+          tests: GoTests(
+            names: pkg.tests.uniq,
+            directory: dir,
+            module: self,
+          ),
         )
       },
     )
@@ -990,7 +1043,7 @@ type GoModule {
 
   # The scan's package discovery: see Go.discoveryLines.
   let discoveryLines(ws: Workspace!): [String!]! {
-    lib.scan(ws).file("_discovery_").contents.split("\n").filter { line => line != "" }
+    tool.moduleDiscoveryLines(ws, path)
   }
 
   # Field n of this module's discovery line: 2 for its module path, 3 for its
@@ -1040,9 +1093,8 @@ type GoModule {
     }
   }
 
-  # The shared scan already reads every Go file to discover packages. Read
-  # its test-name index instead of searching every module again per package.
-  # Names retain file and source order; build constraints are not evaluated.
+  # Manual package operations also accept directories that discovery omits.
+  # Keep their empty-list behavior when there is no indexed package record.
   let testNames(ws: Workspace!, dir: String!): [String!]! {
     let empty: [String!]! = []
     if (skipTest) {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"go/build"
 	"go/parser"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -121,6 +123,122 @@ func TestWrong(n int) {}
 	want := ".\tTestZ\n.\tFuzzé\n.\tExample\nsub\tTestZ\n.\tTest中文\n.\tTestZ\nnested\tTestNested\n"
 	if string(data) != want {
 		t.Fatalf("test index lost file/source order or module boundaries:\n got: %q\nwant: %q", data, want)
+	}
+	catalog := readDiscoveryCatalog(t, output)
+	for _, tc := range []struct{ pkg, module, names string }{
+		{".", ".", "TestZ\nFuzzé\nExample\nTest中文\nTestZ"},
+		{"sub", ".", "TestZ"},
+		{"nested", "nested", "TestNested"},
+	} {
+		pkg := catalogPackage(t, catalog, tc.module, tc.pkg)
+		if strings.Join(pkg.Tests, "\n") != tc.names {
+			t.Errorf("%s: got %#v; want module %q names %q", tc.pkg, pkg, tc.module, tc.names)
+		}
+	}
+}
+
+func TestDiscoveryIndexKeepsPackageKeysDistinct(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"go.mod":               "module example.com/index\n\ngo 1.26.1\n",
+		"main.go":              "package main\nfunc main() {}\n",
+		"tests/main.go":        "package main\nfunc main() {}\n",
+		"tests/module/main.go": "package main\nfunc main() {}\n",
+		"module/tests/main.go": "package main\nfunc main() {}\n",
+	})
+	output := t.TempDir()
+	if err := runAll([]string{"--all", "--root", root, "--output-dir", output}); err != nil {
+		t.Fatal(err)
+	}
+	catalog := readDiscoveryCatalog(t, output)
+	for _, key := range []string{".", "tests", "tests/module", "module/tests"} {
+		pkg := catalogPackage(t, catalog, ".", key)
+		if pkg.Tests == nil || len(pkg.Tests) != 0 {
+			t.Errorf("%s: got %#v; want an empty test array", key, pkg)
+		}
+	}
+	paths := make([]string, len(catalog.Packages["."]))
+	for i, pkg := range catalog.Packages["."] {
+		paths[i] = pkg.Directory
+	}
+	if !slices.IsSorted(paths) {
+		t.Errorf("package records are not in byte order: %q", paths)
+	}
+}
+
+type completeDiscoveryCatalog struct {
+	Roots    []string
+	Modules  map[string][]string
+	Packages map[string][]discoveryPackage
+}
+
+func catalogPackage(t *testing.T, catalog completeDiscoveryCatalog, module, directory string) discoveryPackage {
+	t.Helper()
+	for _, pkg := range catalog.Packages[module] {
+		if pkg.Directory == directory {
+			return pkg
+		}
+	}
+	t.Fatalf("package %q not found in module %q", directory, module)
+	return discoveryPackage{}
+}
+
+func readDiscoveryCatalog(t *testing.T, output string) completeDiscoveryCatalog {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(output, discoveryCatalogFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var catalog discoveryCatalog
+	if err := json.Unmarshal(data, &catalog); err != nil {
+		t.Fatal(err)
+	}
+	complete := completeDiscoveryCatalog{
+		Roots: catalog.Roots, Modules: map[string][]string{}, Packages: map[string][]discoveryPackage{},
+	}
+	for root, ordinal := range catalog.Modules {
+		data, err := os.ReadFile(filepath.Join(output, discoveryModulesDir, strconv.Itoa(ordinal)+".json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var module discoveryModule
+		if err := json.Unmarshal(data, &module); err != nil {
+			t.Fatal(err)
+		}
+		complete.Modules[root] = module.Lines
+		complete.Packages[root] = module.Packages
+	}
+	return complete
+}
+
+func TestDiscoveryModuleFilesKeepPathAndTestDataSeparate(t *testing.T) {
+	longRoot := strings.Repeat("a", 120) + "/" + strings.Repeat("b", 120)
+	roots := []string{".", "0.json", "index.json", "parts/0.json", longRoot}
+	files := map[string]string{}
+	for i, root := range roots {
+		files[filepath.Join(root, "go.mod")] = fmt.Sprintf("module example.com/module%d\n\ngo 1.26.1\n", i)
+		files[filepath.Join(root, "main_test.go")] = fmt.Sprintf("package example\nimport \"testing\"\nfunc TestCatalogueMarker%d(t *testing.T) {}\n", i)
+	}
+	root := writeTree(t, files)
+	output := t.TempDir()
+	if err := runAll([]string{"--all", "--root", root, "--output-dir", output}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(output, discoveryCatalogFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "TestCatalogueMarker") {
+		t.Fatal("reading the small module index would also read test data")
+	}
+	catalog := readDiscoveryCatalog(t, output)
+	if len(catalog.Roots) != len(roots) {
+		t.Fatalf("module roots = %q; want %q", catalog.Roots, roots)
+	}
+	for i, module := range roots {
+		pkg := catalogPackage(t, catalog, module, module)
+		if len(pkg.Tests) != 1 || pkg.Tests[0] != fmt.Sprintf("TestCatalogueMarker%d", i) {
+			t.Errorf("module %q read another module's data: %#v", module, pkg)
+		}
 	}
 }
 

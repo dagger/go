@@ -2,12 +2,14 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"io"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -44,7 +46,15 @@ var (
 func (index *localIndex) writeDiscovery(outPath string) error {
 	var out strings.Builder
 	var testNames strings.Builder
-	for _, root := range index.goModules() {
+	roots := append([]string{}, index.goModules()...)
+	catalog := discoveryCatalog{Roots: roots, Modules: map[string]int{}}
+	moduleDir := filepath.Join(filepath.Dir(outPath), discoveryModulesDir)
+	if err := os.MkdirAll(moduleDir, 0o755); err != nil {
+		return err
+	}
+	for ordinal, root := range roots {
+		module := discoveryModule{Packages: []discoveryPackage{}}
+		var moduleDiscovery strings.Builder
 		modPath := ""
 		goModPath := path.Join(root, "go.mod")
 		if data, err := os.ReadFile(filepath.Join(index.root, filepath.FromSlash(goModPath))); err == nil {
@@ -52,8 +62,9 @@ func (index *localIndex) writeDiscovery(outPath string) error {
 				modPath = goMod.Module.Mod.Path
 			}
 		}
-		out.WriteString("module\t" + root + "\t" + modPath + "\t" + index.goVersion(root) + "\n")
+		moduleDiscovery.WriteString("module\t" + root + "\t" + modPath + "\t" + index.goVersion(root) + "\n")
 		kinds := map[string]string{}
+		packageTests := map[string][]string{}
 		files := index.packageFiles(root)
 		fileKindsOf := make([]string, len(files))
 		fileTests := make([][]string, len(files))
@@ -70,6 +81,7 @@ func (index *localIndex) writeDiscovery(outPath string) error {
 			dir := path.Dir(moduleRelative(root, file))
 			for _, name := range fileTests[i] {
 				testNames.WriteString(path.Dir(file) + "\t" + name + "\n")
+				packageTests[dir] = append(packageTests[dir], name)
 			}
 			for _, c := range fileKindsOf[i] {
 				if !strings.ContainsRune(kinds[dir], c) {
@@ -87,13 +99,54 @@ func (index *localIndex) writeDiscovery(outPath string) error {
 		for _, dir := range dirs {
 			k := []byte(kinds[dir])
 			sort.Slice(k, func(i, j int) bool { return k[i] < k[j] })
-			out.WriteString("package\t" + root + "\t" + dir + "\t" + string(k) + "\n")
+			moduleDiscovery.WriteString("package\t" + root + "\t" + dir + "\t" + string(k) + "\n")
+			pkg := path.Join(root, dir)
+			names := append([]string{}, packageTests[dir]...)
+			module.Packages = append(module.Packages, discoveryPackage{Directory: pkg, Tests: names})
 		}
+		out.WriteString(moduleDiscovery.String())
+		module.Lines = strings.Split(strings.TrimSuffix(moduleDiscovery.String(), "\n"), "\n")
+		data, err := json.Marshal(module)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(moduleDir, strconv.Itoa(ordinal)+".json"), data, 0o644); err != nil {
+			return err
+		}
+		catalog.Modules[root] = ordinal
 	}
 	if err := os.WriteFile(outPath, []byte(out.String()), 0o644); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(filepath.Dir(outPath), testNamesFile), []byte(testNames.String()), 0o644)
+	if err := os.WriteFile(filepath.Join(filepath.Dir(outPath), testNamesFile), []byte(testNames.String()), 0o644); err != nil {
+		return err
+	}
+	data, err := json.Marshal(catalog)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(filepath.Dir(outPath), discoveryCatalogFile), data, 0o644)
+}
+
+const discoveryCatalogFile = "_discovery_index_.json"
+const discoveryModulesDir = "_discovery_modules_"
+
+// The index is small regardless of the number of tests. A consumer reads only
+// its module's data, rather than decoding the workspace's entire test catalogue.
+// Ordinals avoid turning arbitrary module paths into output file names.
+type discoveryCatalog struct {
+	Roots   []string       `json:"roots"`
+	Modules map[string]int `json:"modules"`
+}
+
+type discoveryModule struct {
+	Lines    []string           `json:"lines"`
+	Packages []discoveryPackage `json:"packages"`
+}
+
+type discoveryPackage struct {
+	Directory string   `json:"directory"`
+	Tests     []string `json:"tests"`
 }
 
 // fileKinds is what one Go file marks its directory as: "t", "m" and "g", as
