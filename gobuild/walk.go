@@ -54,6 +54,31 @@ func toNode(b *block, blocks map[string]*block, conc string) *node {
 	return n
 }
 
+// toNodes renders every block but a PGO profile's for a walk. Rendering
+// the scripts is most of gobuild's own time before the walk starts, ~0.15 s
+// for dagger's CLI one after another, and each package's is its own: they're
+// rendered at once.
+func toNodes(blocks map[string]*block, outside map[string]bool, weights map[string]int64) map[string]*node {
+	nodes := map[string]*node{}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for id, bl := range blocks {
+		if bl.isProfile {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			n := toNode(bl, blocks, compileC(outside[id], weights[id]))
+			mu.Lock()
+			nodes[id] = n
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	return nodes
+}
+
 // walker runs a set of nodes, one exec each, each after its dependencies.
 type walker struct {
 	base  *dagger.Container

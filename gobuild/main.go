@@ -382,13 +382,7 @@ func (b *build) walk(ctx context.Context, blocks map[string]*block, weights map[
 	// packages it imports: its key is what it compiles, so every build that
 	// compiles the same package the same way shares it.
 	outside := outsideSet(blocks)
-	nodes := map[string]*node{}
-	for id, bl := range blocks {
-		if bl.isProfile {
-			continue
-		}
-		nodes[id] = toNode(bl, blocks, compileC(outside[id], weights[id]))
-	}
+	nodes := toNodes(blocks, outside, weights)
 	w.heights = heights
 	return w.walk(ctx, nodes)
 }
