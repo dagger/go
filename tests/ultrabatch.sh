@@ -66,7 +66,7 @@ if "$dagger_bin" check "${selection[@]}" >teardown.stdout 2>teardown.stderr; the
 fi
 grep -q '6 passed' teardown.stderr
 grep -q '2 failed' teardown.stderr
-grep -q 'Go tests in m1/p1: package failed outside a named test' teardown.stderr
+grep -q 'Go tests in m1/p1: package failed outside a selected test check' teardown.stderr
 grep -q 'selected teardown failure' teardown.stderr
 rm m1/p1/main_test.go
 
@@ -94,4 +94,63 @@ fi
 grep -q '6 passed' build.stderr
 grep -q '2 failed' build.stderr
 grep -q 'Go tests in m2/p1:' build.stderr
+
+# A valid multiline test signature is not indexed by the source-line scanner.
+# Its failure must still fail the discovered check in that package.
+python3 - <<'REPORTING'
+from pathlib import Path
+root=Path('reporting')
+(root/'ok').mkdir(parents=True)
+(root/'hidden').mkdir()
+(root/'go.mod').write_text('module example.com/reporting\n\ngo 1.26.1\n')
+(root/'ok/ok_test.go').write_text('package ok\nimport "testing"\nfunc TestOK(t *testing.T) {}\n')
+(root/'hidden/hidden_test.go').write_text('package hidden\nimport "testing"\nfunc TestVisible(t *testing.T) {}\nfunc TestHidden(\n t *testing.T,\n) { t.Fatal("undiscovered failure") }\n')
+REPORTING
+if "$dagger_bin" check --go-module=reporting >hidden.stdout 2>hidden.stderr; then
+    echo 'Expected the undiscovered test failure to fail the package' >&2; exit 1
+fi
+grep -q '1 passed' hidden.stderr
+grep -q '1 failed' hidden.stderr
+grep -q 'Go tests in reporting/hidden: package failed outside a selected test check' hidden.stderr
+grep -q 'undiscovered failure' hidden.stderr
+
+# A represented failure in the same package must not hide the undiscovered one.
+python3 - <<'MIXED'
+from pathlib import Path
+p=Path('reporting/hidden/hidden_test.go')
+p.write_text(p.read_text()+'func TestKnownFailure(t *testing.T) { t.Fatal("known failure") }\n')
+MIXED
+if "$dagger_bin" check --go-module=reporting >mixed.stdout 2>mixed.stderr; then
+    echo 'Expected both checks in the package to fail' >&2; exit 1
+fi
+grep -q '1 passed' mixed.stderr
+grep -q '2 failed' mixed.stderr
+grep -q 'undiscovered failure' mixed.stderr
+
+# ./... also builds packages without test checks. Their failures must surface.
+python3 - <<'UNCHECKED'
+from pathlib import Path
+Path('reporting/hidden/hidden_test.go').write_text('package hidden\nimport "testing"\nfunc TestVisible(t *testing.T) {}\n')
+p=Path('reporting/broken')
+p.mkdir()
+(p/'broken.go').write_text('package broken\nvar broken = undefinedSymbol\n')
+UNCHECKED
+if "$dagger_bin" check --go-module=reporting >unchecked.stdout 2>unchecked.stderr; then
+    echo 'Expected the package without test checks to fail the module' >&2; exit 1
+fi
+grep -q '2 failed' unchecked.stderr
+grep -q 'failures in packages without selected test checks: example.com/reporting/broken' unchecked.stderr
+
+# A TestMain-only package likewise has no discovered check to own its failure.
+python3 - <<'UNCHECKEDMAIN'
+from pathlib import Path
+Path('reporting/broken/broken.go').write_text('package broken\n')
+Path('reporting/broken/main_test.go').write_text('package broken\nimport ("fmt"; "os"; "testing")\nfunc TestMain(m *testing.M) { m.Run(); fmt.Fprintln(os.Stderr, "unchecked teardown failure"); os.Exit(1) }\n')
+UNCHECKEDMAIN
+if "$dagger_bin" check --go-module=reporting >unchecked-main.stdout 2>unchecked-main.stderr; then
+    echo 'Expected the TestMain-only package to fail the module' >&2; exit 1
+fi
+grep -q '2 failed' unchecked-main.stderr
+grep -q 'failures in packages without selected test checks: example.com/reporting/broken' unchecked-main.stderr
+grep -q 'unchecked teardown failure' unchecked-main.stderr
 echo 'Ultrabatch checks passed'

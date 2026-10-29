@@ -125,6 +125,7 @@ scopes every tool to that module without a flag. Use `--go-module=sdk/go` to
 select a module explicitly. `modules` retains the include/exclude and skip
 options. Read the selected modules as an array with `modules(...).list`.
 Pass `findUp: false` to `module` when the path is already a module root.
+An explicit module's `packages` lookup is independent of the workspace cwd.
 The root `packages` helper retains manual get/subset/build/generate operations,
 but is not a collection and creates no second artifact path.
 
@@ -142,10 +143,12 @@ without `-run`. A test name in two packages selects both; `--go-package` narrows
 that selection.
 
 A failed test fails its own check. A package that fails to build fails its selected
-tests. A package failure without a named test failure, such as failed `TestMain`
-teardown, also fails its selected tests. Test failure messages include subtest
-output. Passing tests in other packages still pass. Logs and test spans belong to
-the check that starts the shared command; other checks share its result.
+tests. Failed `TestMain` setup or teardown and failures from undiscovered tests
+also fail that package's selected checks. Failures in packages without selected
+test checks fail all checks sharing that module's command. Test failure messages
+include subtest output. Otherwise, passing tests in other packages still pass.
+Logs and test spans belong to the check that starts the shared command; other
+checks share its result.
 
 `GoTests.test` remains a manual package helper, without a check marker. It does
 not replace individual checks. There is no `.batch` namespace.
@@ -516,9 +519,10 @@ Two differences are worth knowing before you switch:
 
 ### Filtered-view regression
 
-Run `DAGGER_BIN=/path/to/patched/dagger bash tests/ultrabatch.sh` to check two
-modules with multiple packages, excluded tests, isolated test failures, and
-package build failures. The command must use the patched PR engine.
+Run `DAGGER_BIN=/path/to/patched/dagger bash tests/ultrabatch.sh` to check multiple
+modules and packages, excluded tests, isolated test failures, teardown failures,
+undiscovered test failures, and build failures in packages with and without test
+checks. The command must use the patched PR engine.
 
 The filtered-view test helper reads its package and test collections through the
 engine API. This lets the engine apply the active selection before the helper

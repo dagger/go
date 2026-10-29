@@ -179,6 +179,9 @@ type GoDev {
     assert(modules.get(key: a).path == a, "module lookup lost its path")
     assert(modules.get(key: a).packages(ws).keys.contains(a), "module missed its own package")
     assert(modules.get(key: b).packages(ws).keys.contains(a) == false, "module included another module's package")
+    let elsewhere = ws.withWorkdir(b)
+    let explicit = go(version: "1.26.1").module(elsewhere, a, findUp: false).packages(elsewhere)
+    assert(explicit.keys.contains(a), "explicit module package lookup inherited the cwd filter")
     let packages = go(version: "1.26.1").packages(ws)
     assert(packages.get(key: a).path == a, "get did not return the package at its key")
     assert(
