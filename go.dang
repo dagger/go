@@ -1565,7 +1565,7 @@ type GoTest {
   let module: GoModule!
 
   """
-  Run this test.
+  Run go tests
   """
   test(ws: Workspace!, selection: GoPackages!): Void @check {
     let pkg = module.importPath(ws) + (if (directory == ".") { "" } else { "/" + directory })
