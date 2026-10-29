@@ -142,7 +142,9 @@ without `-run`. A test name in two packages selects both; `--go-package` narrows
 that selection.
 
 A failed test fails its own check. A package that fails to build fails its selected
-tests. Passing tests in other packages still pass. Logs and test spans belong to
+tests. A package failure without a named test failure, such as failed `TestMain`
+teardown, also fails its selected tests. Test failure messages include subtest
+output. Passing tests in other packages still pass. Logs and test spans belong to
 the check that starts the shared command; other checks share its result.
 
 `GoTests.test` remains a manual package helper, without a check marker. It does
