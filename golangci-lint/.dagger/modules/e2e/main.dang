@@ -248,10 +248,10 @@ type E2e {
       .withEntrypoint(["false"])
     let tool = golangciLint(base: plain)
     assert(tool.goVersion == null, "custom base exposed an assumed Go version")
-    assert(tool.version == "2.11.4", "custom base hid the release it would install")
+    assert(tool.version == "2.15.0", "custom base hid the release it would install")
     assert(tool.module(ws, embedPath).goVersion(ws) == null, "custom base resolved a Go version")
-    assert(golangciLint.version == "2.11.4", "default version changed")
-    assert(golangciLint(version: "2.11.4").version == "2.11.4", "version override was lost")
+    assert(golangciLint.version == "2.15.0", "default version changed")
+    assert(golangciLint(version: "2.15.0").version == "2.15.0", "version override was lost")
 
     # A base without golangci-lint gets the configured release, and lints.
     run(tool.project(ws, embedPath).lint(ws))
@@ -273,7 +273,7 @@ type E2e {
 
     # version says what to install, so it composes with base.
     run(
-      golangciLint(version: "2.11.4", base: plain).project(ws, embedPath).lint(ws),
+      golangciLint(version: "2.15.0", base: plain).project(ws, embedPath).lint(ws),
     )
 
     # goVersion is ignored rather than refused: the base already carries a
@@ -309,7 +309,7 @@ type E2e {
     # built against its own Go.
     let shell = older.base(ws).withExec(["sh", "-c", "go version; golangci-lint --version"]).stdout
     assert(shell.contains("go version go1.25"), "the module's toolchain was not on PATH: " + shell)
-    assert(shell.contains("has version 2.11.4"), "the pinned linter release was not copied in: " + shell)
+    assert(shell.contains("has version 2.15.0"), "the pinned linter release was not copied in: " + shell)
 
     let pinned = golangciLint(goVersion: "1.26").module(ws, parentPath)
     assert(pinned.goVersion(ws) == "1.26", "goVersion did not override the module's own")
@@ -318,6 +318,20 @@ type E2e {
       "goVersion did not reach the container",
     )
     run(golangciLint(goVersion: "1.26").project(ws, parentPath).lint(ws))
+    null
+  }
+
+  """
+  A module on Go 1.27 that uses a generic method lints clean with the default
+  release: golangci-lint refuses a module on a newer Go than its own build's.
+  """
+  genericMethodsCheck: Void @check {
+    let ws = directory
+      .withNewFile(".golangci.yml", "version: \"2\"\n")
+      .withNewFile("go.mod", "module example.com/generic\n\ngo 1.27.3\n")
+      .withNewFile("box.go", "package generic\n\n// Box holds a value.\ntype Box struct{ N int }\n\n// Map applies f to the box's value.\nfunc (b Box) Map[T any](f func(int) T) T { return f(b.N) }\n\n// Twice is twice the box's value.\nfunc Twice(b Box) int { return b.Map[int](func(n int) int { return 2 * n }) }\n")
+      .asWorkspace
+    run(golangciLint.project(ws, ".").lint(ws))
     null
   }
 }

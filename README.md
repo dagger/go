@@ -271,7 +271,7 @@ for `go`. Both linters name their check `lint`, so `dagger check --lint` runs
 them together and `--golangci-lint --lint` runs this one; select projects with
 `--golangci-lint-project=PATH`.
 
-`version` is the linter release, pinned to 2.11.4 by digest, and `goVersion` is
+`version` is the linter release, pinned to 2.15.0 by digest, and `goVersion` is
 the Go toolchain — chosen independently, because the binary is copied out of
 its image onto that toolchain. A C/C++ toolchain is present, since cgo
 dependencies need one during typecheck.
