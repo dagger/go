@@ -256,7 +256,7 @@ type Gomod {
       .withWorkdir("/helpers/go-includes")
       .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
       .withExec(["go", "build", "-o", "/usr/local/bin/go-includes", "."])
-      .withDirectory("/ws", ws.directory("/", include: ["**/*.go", "**/go.mod"]))
+      .withMountedDirectory("/ws", ws.directory("/", include: ["**/*.go", "**/go.mod"]))
       .withWorkdir("/ws")
   }
 
@@ -729,7 +729,7 @@ type GoMod {
       .withWorkdir("/helpers/go-includes")
       .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
       .withExec(["go", "build", "-o", "/usr/local/bin/go-includes", "."])
-      .withDirectory("/ws", ws.directory("/", include: ["**/*.go", "**/go.mod"]))
+      .withMountedDirectory("/ws", ws.directory("/", include: ["**/*.go", "**/go.mod"]))
       .withWorkdir("/ws")
       .withExec(["go-includes", "--all", "--output-dir", "/output"] + testFlags + generateFlags)
       .directory("/output")
