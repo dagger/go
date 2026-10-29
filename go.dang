@@ -1316,7 +1316,10 @@ type GoModule {
         redirectStderr: "/go-test-stderr.log",
         daggerInDaggerNewSession: true,
       )
+    # Only post-processing needs to create files under /. The test command
+    # above retains the custom base's configured user.
     let indexed = executed
+      .withUser("0:0")
       .withFile("/usr/local/bin/go-test-report", gomod.testReportIndexer)
       .withNewFile(
         "/go-test-selection.json",
