@@ -36,6 +36,11 @@ func TestShellWords(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("shellWords: %q, want %q", got, want)
 	}
+	got = shellWords(" a\tb  -o=c/d ")
+	want = []string{"a", "b", "-o=c/d"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("shellWords, nothing quoted: %q, want %q", got, want)
+	}
 }
 
 // A cgo package's steps run as the plan has them: the C compiler's flag
