@@ -1674,11 +1674,22 @@ type GoTestResults {
   let assertPassed(directory: String!, pkg: String!, name: String!): Void {
     let packageEvents = events.filter { event => (event.pkg ?? event.buildPkg) == pkg }
     let testEvents = packageEvents.filter { event => event.test == name }
+    let diagnosticEvents = packageEvents.filter { event =>
+      event.test == name or (event.test ?? "").hasPrefix(name + "/")
+    }
     let failed = testEvents.any { event => event.action == "fail" }
     let finished = testEvents.any { event => event.action == "pass" or event.action == "skip" }
     let packagePassed = packageEvents.any { event => event.test == null and (event.action == "pass" or event.action == "skip") }
+    let packageFailed = packageEvents.any { event => event.test == null and event.action == "fail" }
+    let namedFailure = packageEvents.any { event => event.test != null and event.action == "fail" }
     if (failed) {
-      raise "Go tests in " + directory + ": " + name + " failed\n" + testEvents.map { event => event.output ?? "" }.join("")
+      raise "Go tests in " + directory + ": " + name + " failed\n" + diagnosticEvents.map { event => event.output ?? "" }.join("")
+    } else if (packageFailed and namedFailure == false) {
+      # TestMain setup or teardown can fail even when every named test passes.
+      # A failure attributed to a named test still leaves its siblings passing.
+      raise "Go tests in " + directory + ": package failed outside a named test"
+        + " (go test exit " + `${exitCode}` + ")\n"
+        + packageEvents.map { event => event.output ?? "" }.join("") + stderr
     } else if (finished or packagePassed) {
       # A successful package with no event for a discovered name can result
       # from a build constraint. Preserve the previous behavior: it passes.

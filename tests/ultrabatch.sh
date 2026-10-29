@@ -56,6 +56,20 @@ p.write_text(p.read_text().replace('func TestUnselected(', 'func TestFoo('))
 Path('m1/p2/broken.go').unlink()
 EMPTYRESTORE
 
+# TestMain teardown failure must fail its package even after both tests pass.
+python3 - <<'TEARDOWN'
+from pathlib import Path
+Path('m1/p1/main_test.go').write_text('package p1\nimport ("fmt"; "os"; "testing")\nfunc TestMain(m *testing.M) { m.Run(); fmt.Fprintln(os.Stderr, "selected teardown failure"); os.Exit(1) }\n')
+TEARDOWN
+if "$dagger_bin" check "${selection[@]}" >teardown.stdout 2>teardown.stderr; then
+    echo 'Expected the selected package teardown to fail' >&2; exit 1
+fi
+grep -q '6 passed' teardown.stderr
+grep -q '2 failed' teardown.stderr
+grep -q 'Go tests in m1/p1: package failed outside a named test' teardown.stderr
+grep -q 'selected teardown failure' teardown.stderr
+rm m1/p1/main_test.go
+
 python3 - <<'PY'
 from pathlib import Path
 p=Path('m1/p1/tests_test.go')

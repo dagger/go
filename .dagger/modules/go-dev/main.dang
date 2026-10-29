@@ -239,7 +239,12 @@ type GoDev {
     let one = "TestGoEmbedAssets"
     assert(tests.get(key: one).name == one, "get did not return the test at its key")
     tests.subset(keys: [one]).test(ws)
-    run(tests.get(key: one).test(ws))
+    run(
+      tests.get(key: one).test(
+        ws,
+        selection: tool.module(ws, modPath).packages(ws).subset(keys: [modPath]),
+      ),
+    )
 
     # A test file with no test in it makes no package, and a module outside
     # the test selection offers none either.
@@ -298,19 +303,24 @@ type GoDev {
     let shared = directory
       .withNewFile("go.mod", "module example.com/shared\n\ngo 1.26.1\n")
       .withNewFile("a_test.go", "package shared\nimport \"testing\"\nfunc TestShared(t *testing.T) {}\n")
-      .withNewFile("sub/b_test.go", "package sub\nimport \"testing\"\nfunc TestShared(t *testing.T) { t.Fatal(\"ran in sub\") }\n")
+      .withNewFile("sub/b_test.go", "package sub\nimport \"testing\"\nfunc TestShared(t *testing.T) { t.Run(\"child\", func(t *testing.T) { t.Fatal(\"ran in sub\") }) }\n")
       .asWorkspace
-    let sharedPackages = go(version: "1.26.1").packages(shared)
+    let sharedTool = go(version: "1.26.1")
+    let sharedPackages = sharedTool.packages(shared)
     sharedPackages.get(key: ".").tests(shared).subset(keys: ["TestShared"]).test(shared)
     let failed = {
       run(
-        sharedPackages.get(key: "sub").tests(shared).get(key: "TestShared").test(shared),
+        sharedPackages.get(key: "sub").tests(shared).get(key: "TestShared").test(
+          shared,
+          selection: sharedTool.module(shared, ".").packages(shared).subset(keys: ["sub"]),
+        ),
       )
       "no failure"
     } rescue {
       err: Error => err.message
     }
     assert(failed.contains("Go tests in sub:"), "a package failure did not name the package: " + failed)
+    assert(failed.contains("ran in sub"), "a test failure lost its subtest diagnostics: " + failed)
     null
   }
 
