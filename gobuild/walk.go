@@ -97,7 +97,8 @@ func packageConcurrency() int {
 
 type result struct {
 	file *dagger.File
-	// dir is the package's evaluated work directory, which holds file.
+	// dir is the package's work directory, which holds file: evaluated, but
+	// for the link's.
 	dir  *dagger.Directory
 	err  error // set before done closes; dependents read it
 	done chan struct{}
@@ -179,6 +180,14 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 				slots.acquire(w.heights[id])
 			}
 			defer slots.release()
+			if n.Link {
+				// No exec reads the link's output, so it is read from the
+				// unevaluated directory: keyed by its content, it would cost
+				// a hash of the whole binary on every link.
+				r.dir = ran.Directory("/work/" + n.Name)
+				r.file, r.err = r.dir.File(n.Output).Sync(ctx)
+				return
+			}
 			// Evaluate the output directory first, then read the file from
 			// it: only a file read from an evaluated directory is keyed by its
 			// content, so a package whose archive came out unchanged leaves
