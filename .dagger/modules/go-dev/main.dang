@@ -816,6 +816,28 @@ type GoDev {
   }
 
   """
+  A module on Go 1.27 that uses a generic method, which no earlier Go can
+  parse, is scanned, built and tested: its binary runs and its test passes.
+  """
+  genericMethodsCheck: Void @check {
+    let ws = directory
+      .withNewFile("go.mod", "module example.com/generic\n\ngo 1.27.3\n")
+      .withNewFile("box/box.go", "package box\n\n// Box holds a value.\ntype Box struct{ N int }\n\n// Map applies f to the box's value.\nfunc (b Box) Map[T any](f func(int) T) T { return f(b.N) }\n")
+      .withNewFile("box/box_test.go", "package box\n\nimport \"testing\"\n\nfunc TestMap(t *testing.T) {\n\tif got := (Box{N: 2}).Map[string](func(n int) string { return string(rune('0' + n)) }); got != \"2\" {\n\t\tt.Fatalf(\"Map gave %q\", got)\n\t}\n}\n")
+      .withNewFile("main.go", "package main\n\nimport (\n\t\"fmt\"\n\n\t\"example.com/generic/box\"\n)\n\nfunc main() { fmt.Println(box.Box{N: 21}.Map[int](func(n int) int { return 2 * n })) }\n")
+      .asWorkspace
+    let packages = go.packages(ws)
+    let out = container
+      .from("alpine:3.23")
+      .withFile("/usr/local/bin/generic", packages.get(key: ".").binary(ws))
+      .withExec(["generic"])
+      .stdout
+    assert(out == "42\n", "the binary printed: " + out)
+    run(packages.get(key: "box").tests(ws).batch.test(ws))
+    null
+  }
+
+  """
   A downloaded dependency's cgo and assembly #include files from elsewhere in
   its module, including a testdata directory, which no plan line names: each
   package's exec still has them, and the binary runs. The dependency comes

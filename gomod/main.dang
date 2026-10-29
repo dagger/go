@@ -449,9 +449,11 @@ type Gomod {
   A caller never chooses it. Pinning it here is what makes the scan shared:
   three tools with three different base images still produce one identical
   container, so the engine builds and runs it once. Changing it also moves
-  every module that declares no go directive to that toolchain.
+  every module that declares no go directive to that toolchain. It is the
+  newest Go: the scanner parses every Go file, and an older Go cannot parse
+  a newer one's syntax, such as Go 1.27's generic methods.
   """
-  scannerVersion: String! = "1.26"
+  scannerVersion: String! = "1.27"
 
   """
   Every GOOS/GOARCH pair the pinned toolchain can target, as `go tool dist
