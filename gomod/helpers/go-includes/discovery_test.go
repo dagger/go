@@ -83,9 +83,12 @@ func TestFileKindsFindsUnicodeTestNames(t *testing.T) {
 		"y_test.go": "package x\n\nimport \"testing\"\n\nfunc Fuzzé(ф *testing.F) {}\n",
 	})
 	for _, name := range []string{"x_test.go", "y_test.go"} {
-		k, _, err := fileKinds(filepath.Join(root, name), true)
-		if err != nil || k != "t" {
-			t.Errorf("%s: kinds %q, err %v; want a test", name, k, err)
+		src, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if k, _ := fileKinds(src, true); k != "t" {
+			t.Errorf("%s: kinds %q; want a test", name, k)
 		}
 	}
 }
@@ -129,9 +132,12 @@ func TestFileKindsReadsLongLines(t *testing.T) {
 	root := writeTree(t, map[string]string{
 		"gen.go": "package main\n\nvar x = \"" + strings.Repeat("a", 17<<20) + "\"\n\nfunc main() {}\n",
 	})
-	k, _, err := fileKinds(filepath.Join(root, "gen.go"), false)
-	if err != nil || k != "m" {
-		t.Errorf("kinds %q, err %v; want a main package", k, err)
+	src, err := os.ReadFile(filepath.Join(root, "gen.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k, _ := fileKinds(src, false); k != "m" {
+		t.Errorf("kinds %q; want a main package", k)
 	}
 }
 

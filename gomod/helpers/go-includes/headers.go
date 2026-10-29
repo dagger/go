@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"io/fs"
@@ -37,16 +38,21 @@ func (index *localIndex) writeHeaderPack(path string) error {
 		files = append(files, index.goDirFilesByModule[root]...)
 	}
 	sort.Strings(files)
+	goFiles := index.goFileFacts()
 	datas := make([][]byte, len(files))
 	modes := make([]fs.FileMode, len(files))
 	errs := make([]error, len(files))
 	forEach(len(files), func(i int) {
+		if facts, ok := goFiles[files[i]]; ok {
+			datas[i], modes[i], errs[i] = facts.header, facts.headerMode, facts.headerErr
+			return
+		}
 		full := filepath.Join(index.root, files[i])
 		modes[i] = 0o644
-		// A symlink this pack holds only for a //go:embed, a test file or a
-		// file in a directory named like a Go file, stays one, its target
-		// as its data, so the embed fails, or leaves it out, as go decides.
-		if (!strings.HasSuffix(files[i], ".go") || strings.HasSuffix(files[i], "_test.go")) && filepath.Base(files[i]) != "go.mod" {
+		// A symlink this pack holds only for a //go:embed or a file in a
+		// directory named like a Go file, stays one, its target as its
+		// data, so the embed fails, or leaves it out, as go decides.
+		if filepath.Base(files[i]) != "go.mod" {
 			if fi, err := os.Lstat(full); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
 				target, err := os.Readlink(full)
 				datas[i], modes[i], errs[i] = []byte(target), fs.ModeSymlink|0o777, err
@@ -54,9 +60,6 @@ func (index *localIndex) writeHeaderPack(path string) error {
 			}
 		}
 		datas[i], errs[i] = os.ReadFile(full)
-		if errs[i] == nil && strings.HasSuffix(files[i], ".go") {
-			datas[i] = goHeader(files[i], datas[i])
-		}
 	})
 	out, err := os.Create(path)
 	if err != nil {
@@ -99,8 +102,18 @@ func goHeader(name string, src []byte) []byte {
 	if err != nil || f == nil {
 		return src
 	}
+	return headerOf(fset, f, src)
+}
+
+// headerOf is goHeader for a file already parsed, in full or imports only:
+// only the declarations an imports-only parse holds, the leading imports,
+// mark the end of the header.
+func headerOf(fset *token.FileSet, f *ast.File, src []byte) []byte {
 	end := f.Name.End()
 	for _, d := range f.Decls {
+		if gen, ok := d.(*ast.GenDecl); !ok || gen.Tok != token.IMPORT {
+			break
+		}
 		if d.End() > end {
 			end = d.End()
 		}

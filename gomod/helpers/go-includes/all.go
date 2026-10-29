@@ -3,6 +3,8 @@ package main
 import (
 	"flag"
 	"fmt"
+	"go/parser"
+	"go/token"
 	"io/fs"
 	"os"
 	"path"
@@ -270,11 +272,108 @@ type localIndex struct {
 	// parsed holds each module's directives once read: a module that several
 	// others reach through local replaces is parsed once, not once for each.
 	parsed map[string]parsedDirectives
+	// goFiles holds what the scan needs of each Go file, keyed by
+	// workspace-relative path; goFileFacts fills it on first use.
+	goFiles map[string]*goFileFacts
 }
 
 type parsedDirectives struct {
 	directives []goDirective
 	err        error
+}
+
+// goFileFacts is everything the scan needs of one Go file. Each file is read
+// and parsed once, for the header pack, discovery and directives alike.
+type goFileFacts struct {
+	// readErr is why the file could not be read; nothing else is set then.
+	readErr error
+	// directives are the file's directive comments, or parseErr why it does
+	// not parse.
+	directives []goDirective
+	parseErr   error
+	// header is the file's entry in the header pack, with its mode, or
+	// headerErr why it has none.
+	header     []byte
+	headerMode fs.FileMode
+	headerErr  error
+	// kinds and tests are what the file marks its directory as in discovery.
+	kinds string
+	tests []string
+	// generates reports a go:generate command line, as go generate reads one.
+	generates bool
+}
+
+// goFileFacts returns what the scan needs of every Go file of every module.
+// The first call reads and parses them all at once, spread over the CPUs: one
+// pass over the whole workspace keeps every CPU busy, where a pass per module
+// would leave most of them idle on each of its many small modules.
+func (index *localIndex) goFileFacts() map[string]*goFileFacts {
+	if index.goFiles != nil {
+		return index.goFiles
+	}
+	var files []string
+	for _, root := range index.moduleRoots {
+		files = append(files, index.goFilesByModule[root]...)
+	}
+	facts := make([]*goFileFacts, len(files))
+	forEach(len(files), func(i int) {
+		facts[i] = readGoFile(filepath.Join(index.root, filepath.FromSlash(files[i])), files[i])
+	})
+	index.goFiles = make(map[string]*goFileFacts, len(files))
+	for i, file := range files {
+		index.goFiles[file] = facts[i]
+	}
+	return index.goFiles
+}
+
+// readGoFile reads and parses one Go file, at full path full and
+// workspace-relative path rel.
+func readGoFile(full, rel string) *goFileFacts {
+	facts := &goFileFacts{headerMode: 0o644}
+	// A symlinked test file is in the header pack only for a //go:embed, and
+	// stays one, its target as its data, so the embed fails as go decides.
+	symlink := false
+	if strings.HasSuffix(rel, "_test.go") {
+		if fi, err := os.Lstat(full); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
+			symlink = true
+			target, err := os.Readlink(full)
+			facts.header, facts.headerMode, facts.headerErr = []byte(target), fs.ModeSymlink|0o777, err
+		}
+	}
+	data, err := os.ReadFile(full)
+	if err != nil {
+		facts.readErr = err
+		if !symlink {
+			facts.headerErr = err
+		}
+		return facts
+	}
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, rel, data, parser.ParseComments|parser.SkipObjectResolution)
+	if err != nil {
+		facts.parseErr = err
+	} else {
+		facts.directives = directivesIn(fset, rel, file)
+	}
+	if !symlink {
+		if err != nil {
+			// The header is read as go/build reads it, up to the end of the
+			// imports, so an error after them still leaves a header.
+			facts.header = goHeader(rel, data)
+		} else {
+			facts.header = headerOf(fset, file, data)
+		}
+	}
+
+	facts.kinds, facts.tests = fileKinds(data, strings.HasSuffix(rel, "_test.go"))
+	for line := range strings.SplitSeq(string(data), "\n") {
+		if strings.HasPrefix(line, "//go:generate ") || strings.HasPrefix(line, "//go:generate\t") {
+			facts.generates = true
+			break
+		}
+	}
+	return facts
 }
 
 // indexLocal walks the snapshot once, recording modules and their Go files.
@@ -413,28 +512,22 @@ func (index *localIndex) directives(moduleRoot string) ([]goDirective, error) {
 	return directives, err
 }
 
-// parseDirectives parses every Go file belonging to a module root, the files
-// spread over the CPUs; the directives and the first error are in file order.
+// parseDirectives collects the directives of every Go file belonging to a
+// module root; the directives and the first error are in file order.
 func (index *localIndex) parseDirectives(moduleRoot string) ([]goDirective, error) {
 	files := index.goFilesByModule[moduleRoot]
 	sort.Strings(files)
 
-	perFile := make([][]goDirective, len(files))
-	errs := make([]error, len(files))
-	forEach(len(files), func(i int) {
-		data, err := os.ReadFile(filepath.Join(index.root, filepath.FromSlash(files[i])))
-		if err != nil {
-			errs[i] = err
-			return
-		}
-		perFile[i], errs[i] = goDirectivesInFile(files[i], data)
-	})
+	facts := index.goFileFacts()
 	var directives []goDirective
-	for i := range files {
-		if errs[i] != nil {
-			return nil, errs[i]
+	for _, file := range files {
+		if err := facts[file].readErr; err != nil {
+			return nil, err
 		}
-		directives = append(directives, perFile[i]...)
+		if err := facts[file].parseErr; err != nil {
+			return nil, err
+		}
+		directives = append(directives, facts[file].directives...)
 	}
 	return directives, nil
 }
