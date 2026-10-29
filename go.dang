@@ -1313,14 +1313,24 @@ type GoModule {
         withSession(["otelgotest", "-json"] + run + dirs),
         expect: ANY,
         redirectStdout: "/go-test-report.json",
+        redirectStderr: "/go-test-stderr.log",
         daggerInDaggerNewSession: true,
       )
-    GoTestResults(
-      selections: selected,
-      report: executed.file("/go-test-report.json"),
-      exitCode: executed.exitCode,
-      stderr: executed.stderr,
-    )
+    let indexed = executed
+      .withFile("/usr/local/bin/go-test-report", gomod.testReportIndexer)
+      .withNewFile(
+        "/go-test-selection.json",
+        JSON.encode(selected.map { tests => {{pkg: tests.pkg, names: tests.names}} }),
+      )
+      .withExec([
+        "/usr/local/bin/go-test-report",
+        "--report", "/go-test-report.json",
+        "--stderr", "/go-test-stderr.log",
+        "--selection", "/go-test-selection.json",
+        "--exit-code", `${executed.exitCode}`,
+        "--output", "/go-test-results",
+      ])
+    GoTestResults(results: indexed.directory("/go-test-results"), selections: selected)
   }
 
   # Main packages are found by searching the source, like test names, so
@@ -1657,81 +1667,21 @@ type GoGeneration {
   let value: String!
 }
 
-# go test -json uses exported Go field names. Missing Test denotes a package event.
-type GoTestEvent {
-  action: String! @JSON.field(name: "Action")
-  pkg: String @JSON.field(name: "Package")
-  buildPkg: String @JSON.field(name: "ImportPath")
-  test: String @JSON.field(name: "Test")
-  output: String @JSON.field(name: "Output")
-}
-
+# The shared indexer keeps each result small, regardless of total report size.
 type GoTestResults {
+  let results: Directory!
   let selections: [GoTestSelection!]!
-  let report: File!
-  let exitCode: Int!
-  let stderr: String!
-
-  let events: [GoTestEvent!]! {
-    report.contents.split("\n").filter { line => line != "" }.map { line => JSON.decode(line) :: GoTestEvent! }
-  }
 
   let assertPassed(directory: String!, pkg: String!, name: String!): Void {
-    let reportEvents = events
-    let checkedPackages = selections.map { tests => tests.pkg }
-    let uncheckedFailures = reportEvents
-      .filter { event =>
-        event.test == null and event.action == "fail"
-          and checkedPackages.contains(event.pkg ?? event.buildPkg ?? "") == false
-      }
-      .map { event => event.pkg ?? event.buildPkg ?? "(unknown package)" }
-      .uniq
-    if (uncheckedFailures.length > 0) {
-      # ./... can also build or run packages that have no discovered checks.
-      # No individual check can own their failures, so fail the module's checks.
-      let output = reportEvents.filter { event =>
-        uncheckedFailures.contains(event.pkg ?? event.buildPkg ?? "(unknown package)")
-      }.map { event => event.output ?? "" }.join("")
-      raise "Go tests in " + directory + ": failures in packages without selected test checks: "
-        + uncheckedFailures.join(", ") + "\n" + output + stderr
-    }
-    if (exitCode != 0 and reportEvents.any { event => event.action == "fail" } == false) {
-      raise "Go tests in " + directory + ": shared test command failed"
-        + " (go test exit " + `${exitCode}` + ")\n" + stderr
-    }
-    let packageEvents = reportEvents.filter { event => (event.pkg ?? event.buildPkg) == pkg }
-    let selectedPackage = selections.filter { tests => tests.pkg == pkg }
-    let checkedNames = selectedPackage[0]!.names
-    let testEvents = packageEvents.filter { event => event.test == name }
-    let diagnosticEvents = packageEvents.filter { event =>
-      event.test == name or (event.test ?? "").hasPrefix(name + "/")
-    }
-    let failed = testEvents.any { event => event.action == "fail" }
-    let finished = testEvents.any { event => event.action == "pass" or event.action == "skip" }
-    let packagePassed = packageEvents.any { event => event.test == null and (event.action == "pass" or event.action == "skip") }
-    let packageFailed = packageEvents.any { event => event.test == null and event.action == "fail" }
-    let namedFailure = packageEvents.any { event => event.test != null and event.action == "fail" }
-    let uncheckedTestFailure = packageEvents.any { event =>
-      event.test != null and event.action == "fail"
-        and checkedNames.contains((event.test ?? "").split("/")[0]!) == false
-    }
-    if (failed) {
-      raise "Go tests in " + directory + ": " + name + " failed\n" + diagnosticEvents.map { event => event.output ?? "" }.join("")
-    } else if (uncheckedTestFailure or (packageFailed and namedFailure == false)) {
-      # TestMain setup or teardown can fail even when every named test passes.
-      # A named failure is covered only if its top-level test has a selected check.
-      raise "Go tests in " + directory + ": package failed outside a selected test check"
-        + " (go test exit " + `${exitCode}` + ")\n"
-        + packageEvents.map { event => event.output ?? "" }.join("") + stderr
-    } else if (finished or packagePassed) {
-      # A successful package with no event for a discovered name can result
-      # from a build constraint. Preserve the previous behavior: it passes.
-      null
-    } else {
-      raise "Go tests in " + directory + ": no successful result for " + name
-        + " (go test exit " + `${exitCode}` + ")\n"
-        + packageEvents.map { event => event.output ?? "" }.join("") + stderr
-    }
+    # Numeric ranks avoid filename limits and collisions for Go identifiers.
+    let packageIndex = selections.filter { tests => tests.pkg < pkg }.length
+    let selected = selections.filter { tests => tests.pkg == pkg }
+    if (selected.length == 0) { raise "Go package is outside the test selection: " + pkg }
+    if (selected[0]!.names.contains(name) == false) { raise "Go test is outside the selection: " + name }
+    let testIndex = selected[0]!.names.filter { test => test < name }.length
+    let failure = results.file(`${packageIndex}` + "/" + `${testIndex}`).contents
+    if (failure != "") { raise "Go tests in " + directory + ": " + failure }
+    null
   }
 }
 

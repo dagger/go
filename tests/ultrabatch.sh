@@ -153,4 +153,18 @@ fi
 grep -q '2 failed' unchecked-main.stderr
 grep -q 'failures in packages without selected test checks: example.com/reporting/broken' unchecked-main.stderr
 grep -q 'unchecked teardown failure' unchecked-main.stderr
+
+# Retained dependency tests under vendor/ must not become checks or run via ./....
+python3 - <<'VENDORED'
+from pathlib import Path
+root=Path('vendored')
+(root/'vendor/example.com/lib').mkdir(parents=True)
+(root/'go.mod').write_text('module example.com/vendored\n\ngo 1.26.1\n\nrequire example.com/lib v0.0.0\n')
+(root/'local_test.go').write_text('package vendored\nimport ("testing"; "example.com/lib")\nfunc TestLocal(t *testing.T) { if lib.Answer() != 42 { t.Fatal("bad vendored dependency") } }\n')
+(root/'vendor/modules.txt').write_text('# example.com/lib v0.0.0\n## explicit; go 1.26.1\nexample.com/lib\n')
+(root/'vendor/example.com/lib/lib.go').write_text('package lib\nfunc Answer() int { return 42 }\n')
+(root/'vendor/example.com/lib/lib_test.go').write_text('package lib\nimport "testing"\nfunc TestVendored(t *testing.T) { t.Fatal("vendored test ran") }\n')
+VENDORED
+"$dagger_bin" check --go-module=vendored >vendored.stdout 2>vendored.stderr
+grep -q '1 passed' vendored.stderr
 echo 'Ultrabatch checks passed'

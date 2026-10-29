@@ -136,6 +136,11 @@ helper, which runs one `otelgotest -json` command and returns a shared report.
 The engine deduplicates identical container operations. Separate modules use
 separate commands and their own toolchains.
 
+The shared run streams its JSON report through an indexer once. Each check reads
+one bounded result file, so total report size is independent of `File.contents`
+limits. Failure messages retain the last 32 KiB of each diagnostic stream and
+mark truncated output; the full report remains in the shared execution container.
+
 The helper reads the filtered package and test collections. A partial selection
 uses explicit package arguments and an anchored `-run` pattern. Packages without
 a selected test are omitted. With no keys removed, the command runs `./...`
@@ -155,9 +160,9 @@ not replace individual checks. There is no `.batch` namespace.
 
 Test names come from searching the package's `_test.go` files for
 `func TestXxx(t *testing.T)`, `func FuzzXxx(f *testing.F)` and
-`func ExampleXxx()`, so listing them runs no container. `TestMain`, `testdata`
-and nested modules are left out. Build constraints are not evaluated: a test
-excluded by one is still listed, and selecting it runs nothing. A module
+`func ExampleXxx()`, so listing them runs no container. `TestMain`, `testdata`,
+vendored packages and nested modules are left out. Build constraints are not
+evaluated: a test excluded by one is still listed, and selecting it runs nothing. A module
 outside the `test` selection offers no tests.
 
 `test` on a module is a plain function rather than a check, so that `dagger
