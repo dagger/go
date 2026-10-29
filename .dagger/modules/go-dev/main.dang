@@ -1919,4 +1919,167 @@ type GoDev {
     }
     null
   }
+
+  # Exercise selection through the CLI: direct Dang calls do not apply the
+  # engine's filtered collection view. The engine supplies its matching CLI.
+  let selectedCheck(
+    ws: Workspace!,
+    fixture: Directory!,
+    args: [String!]!,
+    passed: Int!,
+    failed: Int! = 0,
+    messages: [String!]! = [],
+    alias: String! = "go",
+  ): Void {
+    let result = container
+      .from("alpine:3.23")
+      .withDirectory("/source", ws.directory("/"))
+      .withDirectory("/work", fixture)
+      .withNewFile("/work/.git/HEAD", "ref: refs/heads/main\n")
+      .withNewFile("/work/dagger.toml", "[modules." + alias + "]\nsource = \"/source\"\n")
+      .withWorkdir("/work")
+      .withExec(
+        ["/dev/.dagger/dagger", "--progress=report", "check"] + args,
+        expect: ANY,
+        daggerInDaggerNewSession: true,
+      )
+    let output = result.stdout + result.stderr
+    assert((result.exitCode == 0) == (failed == 0), "unexpected check exit status:\n" + output)
+    let counts = (if (passed > 0) { [`${passed}` + " passed"] } else { [] }) + (if (failed > 0) { [`${failed}` + " failed"] } else { [] })
+    (counts + messages).map { message =>
+      assert(output.contains(message), "missing " + message + ":\n" + output)
+    }
+    null
+  }
+
+  let selectionFixture: Directory! {
+    ["m1", "m2"].reduce(directory) { fixture, mod =>
+      ["p1", "p2", "unused"].reduce(
+        fixture.withNewFile(mod + "/go.mod", "module example.com/" + mod + "\n\ngo 1.26.1\n"),
+      ) { files, pkg =>
+        files.withNewFile(mod + "/" + pkg + "/tests_test.go", "package " + pkg + "\nimport \"testing\"\nfunc TestFoo(t *testing.T) {}\nfunc TestBar(t *testing.T) {}\nfunc TestOther(t *testing.T) { t.Fatal(\"excluded test ran\") }\n")
+      }
+    }
+  }
+
+  let selectionArgs(alias: String! = "go"): [String!]! {
+    ["m1/p1", "m1/p2", "m2/p1", "m2/p2"].map { pkg => "--" + alias + "-package=" + pkg } + ["TestFoo", "TestBar"].map { name => "--" + alias + "-test=" + name }
+  }
+
+  selectedTestsCheck(ws: Workspace!): Void @check {
+    selectedCheck(ws, selectionFixture, selectionArgs, passed: 8)
+  }
+
+  selectedAliasCheck(ws: Workspace!): Void @check {
+    selectedCheck(ws, selectionFixture, selectionArgs("renamed"), passed: 8, alias: "renamed")
+  }
+
+  selectedEmptyPackageCheck(ws: Workspace!): Void @check {
+    let fixture = selectionFixture
+      .withNewFile("m1/p2/tests_test.go", "package p2\nimport \"testing\"\nfunc TestUnselected(t *testing.T) {}\n")
+      .withNewFile("m1/p2/broken.go", "package p2\nvar broken = undefinedSymbol\n")
+    selectedCheck(
+      ws,
+      fixture,
+      selectionArgs.filter { arg => arg != "--go-test=TestBar" },
+      passed: 3,
+    )
+  }
+
+  let teardownSource: String! = "package p1\nimport (\"fmt\"; \"os\"; \"testing\")\nfunc TestMain(m *testing.M) { m.Run(); fmt.Fprintln(os.Stderr, \"teardown failure\"); os.Exit(1) }\n"
+
+  selectedTeardownCheck(ws: Workspace!): Void @check {
+    selectedCheck(
+      ws,
+      selectionFixture.withNewFile("m1/p1/main_test.go", teardownSource),
+      selectionArgs,
+      passed: 6,
+      failed: 2,
+      messages: ["Go tests in m1/p1: package failed outside a selected test check", "teardown failure"],
+    )
+  }
+
+  selectedFailureCheck(ws: Workspace!): Void @check {
+    let fixture = selectionFixture.withNewFile("m1/p1/tests_test.go", "package p1\nimport \"testing\"\nfunc TestFoo(t *testing.T) { t.Fatal(\"selected failure\") }\nfunc TestBar(t *testing.T) {}\n")
+    selectedCheck(ws, fixture, selectionArgs, passed: 7, failed: 1, messages: ["selected failure"])
+  }
+
+  selectedBuildFailureCheck(ws: Workspace!): Void @check {
+    let fixture = selectionFixture.withNewFile("m2/p1/broken.go", "package p1\nvar broken = undefinedSymbol\n")
+    selectedCheck(ws, fixture, selectionArgs, passed: 6, failed: 2, messages: ["Go tests in m2/p1:"])
+  }
+
+  let reportingFixture: Directory! {
+    directory
+      .withNewFile("reporting/go.mod", "module example.com/reporting\n\ngo 1.26.1\n")
+      .withNewFile("reporting/ok/ok_test.go", "package ok\nimport \"testing\"\nfunc TestOK(t *testing.T) {}\n")
+      .withNewFile("reporting/hidden/hidden_test.go", "package hidden\nimport \"testing\"\nfunc TestVisible(t *testing.T) {}\n")
+  }
+
+  # Multiline signatures are valid Go but absent from the source-line index.
+  let hiddenFailureFixture: Directory! {
+    reportingFixture.withNewFile("reporting/hidden/multiline_test.go", "package hidden\nimport \"testing\"\nfunc TestHidden(\n t *testing.T,\n) { t.Fatal(\"undiscovered failure\") }\n")
+  }
+
+  selectedUndiscoveredFailureCheck(ws: Workspace!): Void @check {
+    selectedCheck(
+      ws,
+      hiddenFailureFixture,
+      ["--go-module=reporting"],
+      passed: 1,
+      failed: 1,
+      messages: ["Go tests in reporting/hidden: package failed outside a selected test check", "undiscovered failure"],
+    )
+  }
+
+  selectedMixedFailureCheck(ws: Workspace!): Void @check {
+    let fixture = hiddenFailureFixture.withNewFile(
+      "reporting/hidden/known_test.go",
+      "package hidden\nimport \"testing\"\nfunc TestKnownFailure(t *testing.T) { t.Fatal(\"known failure\") }\n",
+    )
+    selectedCheck(
+      ws,
+      fixture,
+      ["--go-module=reporting"],
+      passed: 1,
+      failed: 2,
+      messages: ["undiscovered failure"],
+    )
+  }
+
+  selectedUncheckedBuildCheck(ws: Workspace!): Void @check {
+    let fixture = reportingFixture.withNewFile("reporting/broken/broken.go", "package p1\nvar broken = undefinedSymbol\n")
+    selectedCheck(
+      ws,
+      fixture,
+      ["--go-module=reporting"],
+      passed: 0,
+      failed: 2,
+      messages: ["failures in packages without selected test checks: example.com/reporting/broken"],
+    )
+  }
+
+  selectedUncheckedTeardownCheck(ws: Workspace!): Void @check {
+    let fixture = reportingFixture
+      .withNewFile("reporting/broken/broken.go", "package p1\n")
+      .withNewFile("reporting/broken/main_test.go", teardownSource)
+    selectedCheck(
+      ws,
+      fixture,
+      ["--go-module=reporting"],
+      passed: 0,
+      failed: 2,
+      messages: ["failures in packages without selected test checks: example.com/reporting/broken", "teardown failure"],
+    )
+  }
+
+  selectedVendorCheck(ws: Workspace!): Void @check {
+    let fixture = directory
+      .withNewFile("vendored/go.mod", "module example.com/vendored\n\ngo 1.26.1\n\nrequire example.com/lib v0.0.0\n")
+      .withNewFile("vendored/local_test.go", "package vendored\nimport (\"testing\"; \"example.com/lib\")\nfunc TestLocal(t *testing.T) { if lib.Answer() != 42 { t.Fatal(\"bad vendored dependency\") } }\n")
+      .withNewFile("vendored/vendor/modules.txt", "# example.com/lib v0.0.0\n## explicit; go 1.26.1\nexample.com/lib\n")
+      .withNewFile("vendored/vendor/example.com/lib/lib.go", "package lib\nfunc Answer() int { return 42 }\n")
+      .withNewFile("vendored/vendor/example.com/lib/lib_test.go", "package lib\nimport \"testing\"\nfunc TestVendored(t *testing.T) { t.Fatal(\"vendored test ran\") }\n")
+    selectedCheck(ws, fixture, ["--go-module=vendored"], passed: 1)
+  }
 }

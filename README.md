@@ -477,7 +477,6 @@ The Go changes can be checked with:
 
 ```sh
 dagger check -m .dagger/modules/go-dev
-DAGGER_BIN=/path/to/patched/dagger bash tests/ultrabatch.sh
 ```
 
 The lint suites still use the old batch API and need a separate migration for
@@ -524,12 +523,16 @@ Two differences are worth knowing before you switch:
 
 ### Filtered-view regression
 
-Run `DAGGER_BIN=/path/to/patched/dagger bash tests/ultrabatch.sh` to check multiple
-modules and packages, excluded tests, isolated test failures, teardown failures,
-undiscovered test failures, and build failures in packages with and without test
-checks. The command must use the patched PR engine.
+The `selected-*` checks in `go-dev` cover multiple modules and packages, excluded
+tests, isolated test failures, teardown failures, undiscovered test failures,
+and build failures in packages with and without test checks. They run as part
+of the normal Go development suite:
 
-The filtered-view test helper reads its package and test collections through the
-engine API. This lets the engine apply the active selection before the helper
-builds the shared command. Local Dang collection calls do not apply that view.
-Test execution keeps the current isolated nested-session environment.
+```sh
+dagger check -m .dagger/modules/go-dev 'selected-*'
+```
+
+Run the suite with the patched PR 14802 engine. Each check creates its fixture
+with Dagger directories and invokes the engine-provided, version-matched CLI in
+an isolated session. This exercises the engine's active selection; direct Dang
+collection calls do not apply that view. No host Python or Bash harness is needed.
