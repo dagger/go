@@ -472,6 +472,11 @@ func addDir(b *block, r roots, p string) {
 // separates them, single quotes keep everything, and double quotes keep
 // everything but a backslash escape.
 func shellWords(line string) []string {
+	// Most lines quote and escape nothing, and their words are what's
+	// between the blanks.
+	if !strings.ContainsAny(line, `'"\`) {
+		return strings.FieldsFunc(line, func(r rune) bool { return r == ' ' || r == '\t' })
+	}
 	var words []string
 	var w strings.Builder
 	inWord := false
@@ -598,7 +603,7 @@ func (b *block) script(blocks map[string]*block, conc string) string {
 			continue
 		}
 		link := b.isLink && i == b.linkAt-1
-		if !link {
+		if !link && strings.Contains(l, "-buildid") {
 			l = reBuildID.ReplaceAllString(l, "")
 		}
 		// The go command leaves -c out when it would be 1, so the value is
@@ -696,6 +701,7 @@ func cdNeeded(lines []string) map[int]bool {
 			last = i
 		case last >= 0 && usesDir(l):
 			needed[last] = true
+			last = -1
 		}
 	}
 	return needed
@@ -704,8 +710,13 @@ func cdNeeded(lines []string) map[int]bool {
 // usesDir reports whether a plan line names a path relative to the
 // directory it runs in: "./x" or "../x", or a relative -o output.
 func usesDir(l string) bool {
-	if reRelFile.MatchString(l) {
+	// Each case needs "./" or "-o" in the line, which most lines, such as
+	// an import config's, have neither of.
+	if strings.Contains(l, "./") && reRelFile.MatchString(l) {
 		return true
+	}
+	if !strings.Contains(l, "../") && !strings.Contains(l, "-o") {
+		return false
 	}
 	words := shellWords(l)
 	for i, w := range words {
