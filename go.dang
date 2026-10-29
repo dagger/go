@@ -288,9 +288,8 @@ type Go {
   # Workspace paths of the packages with something to do: tests to run in a
   # module the test setting selects, a main package the build setting selects,
   # or go:generate commands the generate setting selects.
-  let packageKeys(ws: Workspace!, modulePath: String = null): [String!]! {
+  let packageKeys(ws: Workspace!, modulePath: String!): [String!]! {
     let empty: [String!]! = []
-    let roots = if (modulePath == null) { moduleRootsHere(ws) } else { [modulePath!] }
     let generateAll = generate.length == 1 and generate.contains("**")
     let included = generate.filter { p => p.hasPrefix("!") == false }
     let excluded = generate.filter { p => p.hasPrefix("!") }.map { p => p.trimPrefix("!") }
@@ -309,8 +308,7 @@ type Go {
     discoveryLines(ws)
       .filter { line =>
         line.hasPrefix("package\t")
-          and roots.contains(lineField(line, 1))
-          and (modulePath == null or lineField(line, 1) == modulePath)
+          and lineField(line, 1) == modulePath
       }
       .filter { line =>
         let root = lineField(line, 1)
@@ -352,18 +350,6 @@ type Go {
     }
     GoModules(
       paths: sorted(selected),
-      mountPath: workspaceMountPath(ws),
-      tool: self,
-    )
-  }
-
-  """
-  Manual package operations across the workspace. Artifact discovery uses
-  modules -> packages; this compatibility helper is not a collection.
-  """
-  packages(ws: Workspace!): GoPackageSet! {
-    GoPackageSet(
-      paths: sorted(packageKeys(ws)),
       mountPath: workspaceMountPath(ws),
       tool: self,
     )
@@ -479,126 +465,52 @@ type GoPackages @collection {
     )
   }
 
-  let operations: GoPackageSet! {
-    GoPackageSet(
-      paths: paths,
-      mountPath: mountPath,
-      tool: tool,
-    )
-  }
-
-  binary(ws: Workspace!): Directory! { operations.binary(ws) }
-
-  generate(ws: Workspace!): Changeset! { operations.generate(ws) }
-}
-
-# Manual operations remain available without adding a second artifact path.
-type GoPackageSet {
-  """
-  Package directories, relative to the workspace.
-  """
-  paths: [String!]!
-
-  # Held instead of the workspace, which would stop the collection caching.
-  let mountPath: String!
-
-  let tool: Go!
-
-  """
-  The package in this directory.
-  """
-  package(path: String!): GoPackage! {
-    GoPackage(path: path, mountPath: mountPath, tool: tool)
-  }
-
-  keys: [String!]! { paths }
-
-  get(key: String!): GoPackage! {
-    if (paths.contains(key) == false) { raise "package is outside this set: " + key }
-    self.package(key)
-  }
-
-  list: [GoPackage!]! { paths.map { path => self.package(path) } }
-
-  subset(keys: [String!]!): GoPackageSet! {
-    if (keys.uniq.length != keys.length) { raise "duplicate package keys" }
-    if (keys.any { key => paths.contains(key) == false }) { raise "unknown package key" }
-    GoPackageSet(
-      paths: paths.filter { path => keys.contains(path) },
-      mountPath: mountPath,
-      tool: tool,
-    )
-  }
-
-  # The modules holding the selected packages, each once.
-  let modules(ws: Workspace!): [GoModule!]! {
-    paths
-      .map { p => tool.moduleRootOf(ws, p) }
-      .uniq
-      .map { modPath => tool.goModuleAt(modPath, mountPath) }
-  }
-
-  # The selected packages in one module.
-  let inModule(ws: Workspace!, mod: GoModule!): [String!]! {
-    paths.filter { p => tool.moduleRootOf(ws, p) == mod.path }
-  }
+  let module: GoModule!
 
   """
   Binaries of the selected main packages for the engine's platform, one file
   each.
   """
   binary(ws: Workspace!): Directory! {
-    let mods = modules(ws)
-    let empty: [String!]! = []
-    let mains = mods.reduce(empty) { all, mod =>
-      all + mod.mainPackages(ws, inModule(
-        ws,
-        mod,
-      ))
-    }
-    let names = mains.map { p => hostName(ws, p) }
-    let clashes = mains.filter { p =>
-      let name = hostName(ws, p)
-      names.filter { other => other == name }.length > 1
-    }
-    if (clashes.length > 0) {
-      raise "Go packages build binaries with the same name: " + clashes.map { p =>
-        p + " builds " + hostName(ws, p)
-      }.join(", ")
-    }
-    # One go build per module, merged into one directory.
-    mods.reduce(directory) { out, mod =>
-      out.withDirectory(
-        ".",
-        mod.binaryFiles(ws, gomod.hostPlatform, inModule(ws, mod)),
-      )
+    if (paths.length == 0) {
+      directory
+    } else {
+      let mains = module.mainPackages(ws, paths)
+      let names = mains.map { p => hostName(ws, p) }
+      let clashes = mains.filter { p =>
+        let name = hostName(ws, p)
+        names.filter { other => other == name }.length > 1
+      }
+      if (clashes.length > 0) {
+        raise "Go packages build binaries with the same name: " + clashes.map { p =>
+          p + " builds " + hostName(ws, p)
+        }.join(", ")
+      }
+      module.binaryFiles(ws, gomod.hostPlatform, paths)
     }
   }
 
   let hostName(ws: Workspace!, pkgPath: String!): String! {
-    tool.packageModule(ws, pkgPath, mountPath).binaryFileName(ws, pkgPath, gomod.hostPlatform)
+    module.binaryFileName(ws, pkgPath, gomod.hostPlatform)
   }
 
   """
   Run go generate in the selected packages.
   """
   generate(ws: Workspace!): Changeset! {
-    # Packages run together per module, in lexical order, each seeing the
-    # output of the ones before it: with every package selected, this is
-    # go generate ./... for that module.
-    let mods = modules(ws).filter { mod =>
-      mod.skipGenerate(ws) == false and mod.generateDirsIn(ws, inModule(ws, mod)).length > 0
+    # Selected packages run in lexical order, sharing generated output.
+    if (paths.length == 0 or module.skipGenerate(ws)) {
+      directory.changes(directory)
+    } else {
+      let dirs = module.generateDirsIn(ws, paths)
+      if (dirs.length == 0) {
+        directory.changes(directory)
+      } else {
+        let before = directory.withDirectory(module.path, module.generateSource(ws))
+        let after = before.withDirectory(module.path, module.generatedTree(ws, dirs))
+        after.changes(before)
+      }
     }
-    let before = mods.reduce(directory) { before, mod =>
-      before.withDirectory(mod.path, mod.generateSource(ws))
-    }
-    let after = mods.reduce(before) { after, mod =>
-      after.withDirectory(
-        mod.path,
-        mod.generatedTree(ws, mod.generateDirsIn(ws, inModule(ws, mod))),
-      )
-    }
-    after.changes(before)
   }
 }
 
@@ -781,6 +693,7 @@ type GoModule {
       paths: paths,
       mountPath: mountPath,
       tool: tool,
+      module: self,
       entries: paths.map { pkg =>
         let dir = relativeDir(pkg)
         GoPackageSelection(

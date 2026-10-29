@@ -59,7 +59,6 @@ within each module or by their workspace path.
 
 | Function              | Description                                                   |
 | --------------------- | ------------------------------------------------------------- |
-| `packages`            | Manual package operations across the workspace.               |
 | `modules`             | Filtered Go module collection; use `list` to read its items.    |
 | `module`              | The module containing a workspace path.                       |
 
@@ -126,8 +125,10 @@ select a module explicitly. `modules` retains the include/exclude and skip
 options. Read the selected modules as an array with `modules(...).list`.
 Pass `findUp: false` to `module` when the path is already a module root.
 An explicit module's `packages` lookup is independent of the workspace cwd.
-The root `packages` helper retains manual get/subset/build/generate operations,
-but is not a collection and creates no second artifact path.
+Packages are accessed through their module, for example:
+`go.modules(ws).get(key: "sdk/go").packages(ws)`.
+There is no root `go.packages` API. To operate across modules, select each
+module's packages explicitly.
 
 #### Tests
 
@@ -173,8 +174,8 @@ check` does not run the same tests twice.
 `binary` on a package returns its binary for the engine's platform. Only a
 `main` package selected by the `build` setting has one; any other package
 fails, naming itself. The `GoPackages.binary` helper compiles the selected
-`main` packages with one `go build` per module, skips the rest, and returns one
-directory of binaries.
+`main` packages in that module, skips the rest, and returns one directory of
+binaries. Combine module outputs explicitly when building across modules.
 
 A binary is named as `go build` names it: after the last element of the
 package's import path, or the one before when that is a major version such as
