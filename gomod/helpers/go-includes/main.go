@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"io"
@@ -541,7 +542,11 @@ func goDirectivesInFile(filePath string, data []byte) ([]goDirective, error) {
 	if err != nil {
 		return nil, err
 	}
+	return directivesIn(fset, filePath, file), nil
+}
 
+// directivesIn returns the supported directive comments of a parsed Go file.
+func directivesIn(fset *token.FileSet, filePath string, file *ast.File) []goDirective {
 	var directives []goDirective
 	for _, group := range file.Comments {
 		for _, comment := range group.List {
@@ -555,7 +560,7 @@ func goDirectivesInFile(filePath string, data []byte) ([]goDirective, error) {
 			}
 		}
 	}
-	return directives, nil
+	return directives
 }
 
 // goDirective is one supported Go line directive comment.

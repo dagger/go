@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bufio"
-	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -54,24 +52,19 @@ func (index *localIndex) writeDiscovery(outPath string) error {
 		}
 		out.WriteString("module\t" + root + "\t" + modPath + "\t" + index.goVersion(root) + "\n")
 		kinds := map[string]string{}
-		files := index.packageFiles(root)
-		fileKindsOf := make([]string, len(files))
-		fileTests := make([][]string, len(files))
-		errs := make([]error, len(files))
-		forEach(len(files), func(i int) {
-			fileKindsOf[i], fileTests[i], errs[i] = fileKinds(filepath.Join(index.root, filepath.FromSlash(files[i])), strings.HasSuffix(files[i], "_test.go"))
-		})
-		for i, file := range files {
+		goFiles := index.goFileFacts()
+		for _, file := range index.packageFiles(root) {
+			facts := goFiles[file]
 			// A file that can't be read marks nothing here: the module's own
 			// scan records why, in its .err, and other modules are unaffected.
-			if errs[i] != nil {
+			if facts.readErr != nil {
 				continue
 			}
 			dir := path.Dir(moduleRelative(root, file))
-			for _, name := range fileTests[i] {
+			for _, name := range facts.tests {
 				testNames.WriteString(path.Dir(file) + "\t" + name + "\n")
 			}
-			for _, c := range fileKindsOf[i] {
+			for _, c := range facts.kinds {
 				if !strings.ContainsRune(kinds[dir], c) {
 					kinds[dir] += string(c)
 				}
@@ -98,35 +91,23 @@ func (index *localIndex) writeDiscovery(outPath string) error {
 
 // fileKinds is what one Go file marks its directory as: "t", "m" and "g", as
 // discoveryFile describes them, and the test names encountered in source order.
-func fileKinds(file string, test bool) (string, []string, error) {
-	f, err := os.Open(file)
-	if err != nil {
-		return "", nil, err
-	}
-	defer f.Close()
-	r := bufio.NewReader(f)
+// Each pattern is anchored on a literal prefix, so a line without it is
+// passed over before any match is tried.
+func fileKinds(src []byte, test bool) (string, []string) {
 	var tests []string
 	main, ignore, generate := false, false, false
-	for {
-		// Lines of any length: generated files can hold very long ones.
-		line, err := r.ReadString('\n')
-		if err != nil && err != io.EOF {
-			return "", nil, err
-		}
-		if line == "" && err == io.EOF {
-			break
-		}
-		line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+	for line := range strings.SplitSeq(string(src), "\n") {
+		line = strings.TrimSuffix(line, "\r")
 		switch {
-		case test && testFuncLine.MatchString(line):
+		case test && strings.HasPrefix(line, "func ") && testFuncLine.MatchString(line):
 			name, _, _ := strings.Cut(strings.TrimPrefix(line, "func "), "(")
 			tests = append(tests, name)
-		case !test && mainLine.MatchString(line):
+		case !test && strings.HasPrefix(line, "package main") && mainLine.MatchString(line):
 			main = true
-		case !test && ignoreLine.MatchString(line):
+		case !test && strings.HasPrefix(line, "//") && ignoreLine.MatchString(line):
 			ignore = true
 		}
-		if generateLine.MatchString(line) {
+		if strings.HasPrefix(line, "//go:generate") && generateLine.MatchString(line) {
 			generate = true
 		}
 	}
@@ -140,5 +121,5 @@ func fileKinds(file string, test bool) (string, []string, error) {
 	if generate {
 		k += "g"
 	}
-	return k, tests, nil
+	return k, tests
 }
