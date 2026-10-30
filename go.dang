@@ -305,21 +305,22 @@ type Go {
         excluded,
       )
     }
+    # Split once per line: each field taken is work for every package line,
+    # which counts on every build.
     discoveryLines(ws)
-      .filter { line =>
-        line.hasPrefix("package\t")
-          and lineField(line, 1) == modulePath
-      }
-      .filter { line =>
-        let root = lineField(line, 1)
-        let dir = lineField(line, 2)
-        let kinds = lineField(line, 3)
+      .filter { line => line.hasPrefix("package\t") }
+      .map { line => line.split("\t") }
+      .filter { fields => fields[1]! == modulePath }
+      .filter { fields =>
+        let root = fields[1]!
+        let dir = fields[2]!
+        let kinds = fields[3]!
         let key = pathIn(root, dir)
         (hasKind(kinds, "t") and selectedBy(root, test))
           or (hasKind(kinds, "m") and buildSelected(root, dir))
           or (hasKind(kinds, "g") and (generateAll or ((included.length == 0 or includeDirs.contains(key)) and excludeDirs.contains(key) == false)))
       }
-      .map { line => pathIn(lineField(line, 1), lineField(line, 2)) }
+      .map { fields => pathIn(fields[1]!, fields[2]!) }
       .uniq
   }
 
