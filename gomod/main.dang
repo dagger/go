@@ -451,6 +451,18 @@ type Gomod {
   toolBuilder: Container! { goContainer(scannerVersion) }
 
   """
+  Streams a shared Go test report into bounded per-check results.
+  """
+  testReportIndexer: File! {
+    toolBuilder
+      .withDirectory("/helpers/go-test-report", currentModule.source.directory("helpers/go-test-report"))
+      .withWorkdir("/helpers/go-test-report")
+      .withEnvVariable("CGO_ENABLED", "0")
+      .withExec(["go", "build", "-o", "/usr/local/bin/go-test-report", "."])
+      .file("/usr/local/bin/go-test-report")
+  }
+
+  """
   Go version of the image the source scanner is built and run in, and the
   fallback `defaultGoVersion` hands a module that declares no go directive.
 

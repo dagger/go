@@ -192,10 +192,15 @@ func (index *localIndex) packageFiles(moduleRoot string) []string {
 
 // goIgnores reports whether Go skips a module-relative path when it looks for
 // packages. The rules are Go's: a testdata directory, and any name starting
-// with "." or "_", hold no packages.
+// with "." or "_", hold no packages. Wildcards also exclude packages below
+// vendor/, while a directory named vendor containing its own Go files is valid.
 func goIgnores(rel string) bool {
-	for _, segment := range strings.Split(rel, "/") {
+	segments := strings.Split(rel, "/")
+	for i, segment := range segments {
 		if segment == "testdata" || strings.HasPrefix(segment, ".") || strings.HasPrefix(segment, "_") {
+			return true
+		}
+		if segment == "vendor" && i+2 < len(segments) {
 			return true
 		}
 	}

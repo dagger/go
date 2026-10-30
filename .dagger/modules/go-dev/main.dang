@@ -82,12 +82,20 @@ type GoDev {
   # Run each module's own tests. Objects from a dependency can't be mapped
   # over directly, so each module is looked up again by its path.
   let testEveryModule(tool: Go!, ws: Workspace!): Void {
-    tool.modules(ws).{{path}}.map { mod => tool.module(ws, mod.path, findUp: false).test(ws) }
+    tool.modules(ws).list.{{path}}.map { mod => tool.module(ws, mod.path, findUp: false).test(ws) }
     null
   }
 
   let pathsOf(items: [{{path: String!}}!]!): [String!]! {
     items.map { item => item.path }
+  }
+
+  # Flatten keys only for assertions spanning multiple modules.
+  let packagePaths(tool: Go!, ws: Workspace!): [String!]! {
+    let empty: [String!]! = []
+    pathsOf(tool.modules(ws).list.{{path}}).reduce(empty) { keys, path =>
+      keys + tool.modules(ws).get(key: path).packages(ws).keys
+    }
   }
 
   let containsPath(paths: [String!]!, want: String!): Boolean! {
@@ -102,7 +110,7 @@ type GoDev {
   files that are not modules are skipsNonModulesCheck's business.
   """
   discoveryCheck(ws: Workspace!): Void @check {
-    let paths = pathsOf(go(version: "1.26.1").modules(ws).{{path}})
+    let paths = pathsOf(go(version: "1.26.1").modules(ws).list.{{path}})
 
     # A go.mod is discovered at any depth: top level, nested inside another
     # module, and several directories deep.
@@ -135,7 +143,7 @@ type GoDev {
     let below = pathsOf(
       tool.modules(
         ws.withWorkdir("fixtures/go-module-with-nested-module"),
-      ).{{path}},
+      ).list.{{path}},
     )
     assert(
       containsPath(below, "fixtures/go-module-with-nested-module"),
@@ -152,7 +160,7 @@ type GoDev {
 
     let inside = ws.withWorkdir("testdata/go-module-with-testdata/testdata")
     assert(
-      containsPath(pathsOf(tool.modules(inside).{{path}}), "testdata/go-module-with-testdata"),
+      containsPath(pathsOf(tool.modules(inside).list.{{path}}), "testdata/go-module-with-testdata"),
       "discovery inside a module missed the enclosing module",
     )
 
@@ -160,7 +168,7 @@ type GoDev {
     # right: every source mount resolves it against the workspace root.
     testEveryModule(tool, inside)
     assert(
-      containsPath(tool.packages(inside).keys, "testdata/go-module-with-testdata"),
+      containsPath(tool.modules(inside).get(key: "testdata/go-module-with-testdata").packages(inside).keys, "testdata/go-module-with-testdata"),
       "packages from inside a module missed the enclosing module's",
     )
     null
@@ -170,12 +178,24 @@ type GoDev {
   Packages form a collection keyed by workspace directory. get and list build
   the packages at those keys; subset keeps parent order, rejects unknown and
   duplicate keys, and narrows what get accepts; an empty subset is valid and
-  its batches do nothing.
+  its build and generate helpers do nothing.
   """
   collectionCheck(ws: Workspace!): Void @check {
     let a = "fixtures/go-module-cross-include-a"
     let b = "fixtures/go-module-cross-include-b"
-    let packages = go(version: "1.26.1").packages(ws)
+    let modules = go(version: "1.26.1").modules(ws)
+    assert(modules.get(key: a).path == a, "module lookup lost its path")
+    assert(modules.get(key: a).packages(ws).keys.contains(a), "module missed its own package")
+    assert(modules.get(key: b).packages(ws).keys.contains(a) == false, "module included another module's package")
+    let elsewhere = ws.withWorkdir(b)
+    let explicit = go(version: "1.26.1").module(elsewhere, a, findUp: false).packages(elsewhere)
+    assert(explicit.keys.contains(a), "explicit module package lookup inherited the cwd filter")
+    let collectionWorkspace = directory
+      .withNewFile("go.mod", "module example.com/collections\n\ngo 1.26.1\n")
+      .withNewFile(a + "/a_test.go", "package a\nimport \"testing\"\nfunc TestA(t *testing.T) {}\n")
+      .withNewFile(b + "/b_test.go", "package b\nimport \"testing\"\nfunc TestB(t *testing.T) {}\n")
+      .asWorkspace
+    let packages = go(version: "1.26.1").modules(collectionWorkspace).get(key: ".").packages(collectionWorkspace)
     assert(packages.get(key: a).path == a, "get did not return the package at its key")
     assert(
       packages.list.{{path}}.map { pkg => pkg.path } == packages.keys,
@@ -203,8 +223,8 @@ type GoDev {
 
     let none = packages.subset(keys: [])
     assert(none.keys.length == 0, "empty subset kept keys: " + none.keys.join(", "))
-    assert(none.batch.binary(ws).entries.length == 0, "empty subset built binaries")
-    let noChanges = none.batch.generate(ws)
+    assert(none.binary(collectionWorkspace).entries.length == 0, "empty subset built binaries")
+    let noChanges = none.generate(collectionWorkspace)
     assert(
       noChanges.addedPaths.length == 0
         and noChanges.modifiedPaths.length == 0
@@ -222,7 +242,7 @@ type GoDev {
   testsCollectionCheck(ws: Workspace!): Void @check {
     let modPath = "testdata/go-module-with-testdata"
     let tool = go(version: "1.26.1")
-    let packages = tool.packages(ws)
+    let packages = tool.modules(ws).get(key: modPath).packages(ws)
     assert(containsPath(packages.keys, modPath), "package discovery missed " + modPath)
     let tests = packages.get(key: modPath).tests(ws)
     let missing = [
@@ -234,16 +254,21 @@ type GoDev {
 
     let one = "TestGoEmbedAssets"
     assert(tests.get(key: one).name == one, "get did not return the test at its key")
-    run(tests.subset(keys: [one]).batch.test(ws))
-    run(tests.get(key: one).test(ws))
+    tests.subset(keys: [one]).test(ws)
+    run(
+      tests.get(key: one).test(
+        ws,
+        selection: tool.module(ws, modPath).packages(ws).subset(keys: [modPath]),
+      ),
+    )
 
     # A test file with no test in it makes no package, and a module outside
     # the test selection offers none either.
     assert(
-      containsPath(packages.keys, noPackagesFixturePath) == false,
+      tool.modules(ws).get(key: noPackagesFixturePath).packages(ws).keys.length == 0,
       "a directory with no tests became a package",
     )
-    let skipped = go(version: "1.26.1", test: ["!" + modPath]).packages(ws).keys
+    let skipped = go(version: "1.26.1", test: ["!" + modPath]).modules(ws).get(key: modPath).packages(ws).keys
     assert(containsPath(skipped, modPath) == false, "a skipped module offered its test package")
 
     # Names come from the source: tests, fuzz targets and examples count;
@@ -272,9 +297,9 @@ type GoDev {
       .withNewFile("nested/go.mod", "module example.com/nested\n\ngo 1.26.1\n")
       .withNewFile("nested/d_test.go", "package nested\nimport \"testing\"\nfunc TestNested(t *testing.T) {}\n")
       .asWorkspace
-    let found = go(version: "1.26.1").packages(rooted)
+    let found = go(version: "1.26.1").modules(rooted).get(key: ".").packages(rooted)
     assert(
-      found.keys == [".", "examples", "nested", "sub"],
+      found.keys == [".", "examples", "sub"],
       "static package discovery found: " + found.keys.join(", "),
     )
     let rootNames = found.get(key: ".").tests(rooted).keys
@@ -286,7 +311,7 @@ type GoDev {
     assert(subNames == ["TestBeta", "TestAlpha"], "static test discovery in sub found: " + subNames.join(", "))
     let exampleNames = found.get(key: "examples").tests(rooted).keys
     assert(exampleNames == ["Example"], "an examples-only package found: " + exampleNames.join(", "))
-    let nestedNames = found.get(key: "nested").tests(rooted).keys
+    let nestedNames = go(version: "1.26.1").modules(rooted).get(key: "nested").packages(rooted).get(key: "nested").tests(rooted).keys
     assert(nestedNames == ["TestNested"], "the nested module's package found: " + nestedNames.join(", "))
 
     # The same name in two packages runs only where it was selected, and a
@@ -294,33 +319,36 @@ type GoDev {
     let shared = directory
       .withNewFile("go.mod", "module example.com/shared\n\ngo 1.26.1\n")
       .withNewFile("a_test.go", "package shared\nimport \"testing\"\nfunc TestShared(t *testing.T) {}\n")
-      .withNewFile("sub/b_test.go", "package sub\nimport \"testing\"\nfunc TestShared(t *testing.T) { t.Fatal(\"ran in sub\") }\n")
+      .withNewFile("sub/b_test.go", "package sub\nimport \"testing\"\nfunc TestShared(t *testing.T) { t.Run(\"child\", func(t *testing.T) { t.Fatal(\"ran in sub\") }) }\n")
       .asWorkspace
-    let sharedPackages = go(version: "1.26.1").packages(shared)
-    run(
-      sharedPackages.get(key: ".").tests(shared).subset(keys: ["TestShared"]).batch.test(shared),
-    )
+    let sharedTool = go(version: "1.26.1")
+    let sharedPackages = sharedTool.modules(shared).get(key: ".").packages(shared)
+    sharedPackages.get(key: ".").tests(shared).subset(keys: ["TestShared"]).test(shared)
     let failed = {
       run(
-        sharedPackages.get(key: "sub").tests(shared).get(key: "TestShared").test(shared),
+        sharedPackages.get(key: "sub").tests(shared).get(key: "TestShared").test(
+          shared,
+          selection: sharedTool.modules(shared).get(key: ".").packages(shared).subset(keys: ["sub"]),
+        ),
       )
       "no failure"
     } rescue {
       err: Error => err.message
     }
     assert(failed.contains("Go tests in sub:"), "a package failure did not name the package: " + failed)
+    assert(failed.contains("ran in sub"), "a test failure lost its subtest diagnostics: " + failed)
     null
   }
 
   """
   A package has a binary when it is a main package selected by build. Main packages
   are found by searching the source; binaries are named as go build names
-  them; a batch builds every selected package, across modules; build patterns
+  them; each module builds its selected packages; build patterns
   narrow the keys; and platforms build for the engine's platform unless some
   are selected, and then for exactly those.
   """
   binaryCheck(ws: Workspace!): Void @check {
-    let onDisk = go(version: "1.26.1").packages(ws).keys
+    let onDisk = packagePaths(go(version: "1.26.1"), ws)
     assert(
       containsPath(onDisk, generatedFixturePath + "/cmd/writegenerated"),
       "main package discovery on disk missed " + generatedFixturePath + "/cmd/writegenerated",
@@ -346,13 +374,14 @@ type GoDev {
       .asWorkspace
     let tool = go(version: "1.26.1")
     let mod = tool.module(caller, ".", findUp: false)
-    let packages = tool.packages(caller)
+    let packages = tool.modules(caller).get(key: ".").packages(caller)
     assert(
-      packages.keys == [".", "broken", "cmd/hello", "cmd/stamp", "cmd/tool/v2", "lib", "nested", "tools/hello"],
+      packages.keys == [".", "broken", "cmd/hello", "cmd/stamp", "cmd/tool/v2", "lib", "tools/hello"],
       "package discovery found: " + packages.keys.join(", "),
     )
 
-    let built = packages.subset(keys: ["cmd/hello", "cmd/tool/v2", ".", "nested"]).batch.binary(caller)
+    let built = packages.subset(keys: ["cmd/hello", "cmd/tool/v2", "."]).binary(caller)
+      .withDirectory(".", tool.modules(caller).get(key: "nested").packages(caller).binary(caller))
     assert(
       built.entries == ["binaries", "hello", "nested", "tool"],
       "the batch built: " + built.entries.join(", "),
@@ -369,12 +398,12 @@ type GoDev {
     }
     assert(library.contains("not a main package"), "a library package built: " + library)
     assert(
-      packages.subset(keys: ["lib", "cmd/hello"]).batch.binary(caller).entries == ["hello"],
+      packages.subset(keys: ["lib", "cmd/hello"]).binary(caller).entries == ["hello"],
       "the batch did not skip a library package",
     )
 
     let clash = {
-      packages.subset(keys: ["cmd/hello", "tools/hello"]).batch.binary(caller).entries.join(",")
+      packages.subset(keys: ["cmd/hello", "tools/hello"]).binary(caller).entries.join(",")
       "no failure"
     } rescue {
       err: Error => err.message
@@ -393,24 +422,24 @@ type GoDev {
       "a failed build did not name the package and platform: " + broken,
     )
 
-    let selected = go(version: "1.26.1", build: ["cmd/**", "!cmd/tool"]).packages(caller).keys
+    let selected = go(version: "1.26.1", build: ["cmd/**", "!cmd/tool"]).modules(caller).get(key: ".").packages(caller).keys
     assert(selected == ["cmd/hello", "cmd/stamp", "lib"], "build patterns selected: " + selected.join(", "))
-    let none = go(version: "1.26.1", build: ["!**"]).packages(caller).keys
+    let none = go(version: "1.26.1", build: ["!**"]).modules(caller).get(key: ".").packages(caller).keys
     assert(none == ["lib"], "an empty build selection kept: " + none.join(", "))
     # A workspace path reaches a nested module's main packages, whose directory
     # within their own module is ".".
-    let outside = go(version: "1.26.1", build: ["**", "!nested"]).packages(caller).keys
+    let outside = packagePaths(go(version: "1.26.1", build: ["**", "!nested"]), caller)
     assert(
       outside == [".", "broken", "cmd/hello", "cmd/stamp", "cmd/tool/v2", "lib", "tools/hello"],
       "a workspace path exclusion kept: " + outside.join(", "),
     )
-    let inside = go(version: "1.26.1", build: ["nested"]).packages(caller).keys
+    let inside = packagePaths(go(version: "1.26.1", build: ["nested"]), caller)
     assert(inside == ["lib", "nested"], "a workspace path selection kept: " + inside.join(", "))
 
     # buildFlags reach go build as separate arguments, so a value may hold
     # spaces, which GOFLAGS cannot carry.
     let stamped = go(version: "1.26.1", buildFlags: ["-trimpath", "-ldflags=-s -w -X main.message=stamped"])
-      .packages(caller)
+      .modules(caller).get(key: ".").packages(caller)
       .subset(keys: ["cmd/stamp"])
     let stampedSaid = mod
       .base(caller)
@@ -420,7 +449,7 @@ type GoDev {
     assert(stampedSaid == "stamped\n", "buildFlags did not reach the package build: " + stampedSaid)
     let fromBatch = mod
       .base(caller)
-      .withDirectory("/opt/bin", stamped.batch.binary(caller))
+      .withDirectory("/opt/bin", stamped.binary(caller))
       .withExec(["/opt/bin/stamp"])
       .stdout
     assert(fromBatch == "stamped\n", "buildFlags did not reach the batch build: " + fromBatch)
@@ -432,13 +461,13 @@ type GoDev {
       platforms.keys.contains("windows/amd64") and platforms.keys.contains(host),
       "platform keys were not Go's platforms: " + platforms.keys.join(", "),
     )
-    let hostOnly = platforms.batch.binary(caller).entries
+    let hostOnly = platforms.binary(caller).entries
     assert(
       hostOnly == [host.split("/").join("-") + "/"],
       "a run naming no platform built for: " + hostOnly.join(", "),
     )
     let cross = platforms.subset(keys: ["linux/amd64", "windows/amd64"])
-    let crossBuilt = cross.batch.binary(caller)
+    let crossBuilt = cross.binary(caller)
     assert(
       crossBuilt.entries == ["linux-amd64/", "windows-amd64/"],
       "a platform selection built for: " + crossBuilt.entries.join(", "),
@@ -472,7 +501,7 @@ type GoDev {
       .withNewFile("cmd/main.go", goMain("cmd"))
       .withNewFile("tool/main.go", goMain("tool"))
     let tool = go(version: "1.26.1")
-    let packages = tool.packages(found.asWorkspace)
+    let packages = tool.modules(found.asWorkspace).get(key: ".").packages(found.asWorkspace)
     assert(packages.keys == ["app", "cmd", "tool"], "package discovery found: " + packages.keys.join(", "))
 
     let madeMain = found.withNewFile("app/main.go", goMain("app")).asWorkspace
@@ -627,7 +656,7 @@ type GoDev {
       let got = {
         mod
           .base(ws)
-          .withFile("/usr/local/bin/embeds", tool.packages(ws).get(key: "cmd/" + shape).binary(ws))
+          .withFile("/usr/local/bin/embeds", tool.modules(ws).get(key: ".").packages(ws).get(key: "cmd/" + shape).binary(ws))
           .withExec(["embeds"])
           .stdout
       } rescue {
@@ -643,7 +672,7 @@ type GoDev {
     }.filter { failure => failure != "" }
     # Other shapes fail on purpose, so the test-file embed runs on its own.
     let tested = {
-      run(tool.packages(ws).get(key: "lib").tests(ws).batch.test(ws))
+      tool.modules(ws).get(key: ".").packages(ws).get(key: "lib").tests(ws).test(ws)
       ""
     } rescue {
       err: Error => "lib tests (Go " + version + "): " + err.message
@@ -690,8 +719,13 @@ type GoDev {
       let pkg = variant.split(";").takeFirst(1).join("")
       let flags = variant.split(";").dropFirst(1)
       let race = flags.contains("-race")
-      let tool = if (race) { go(base: cgo, buildFlags: flags) } else { go(version: "1.26.1", buildFlags: flags) }
-      let built = tool.packages(ws).get(key: pkg).testBinary(ws)
+      let tool = if (race) { go(base: cgo, buildFlags: flags) } else {
+        go(
+          version: "1.26.1",
+          buildFlags: flags,
+        )
+      }
+      let built = tool.modules(ws).get(key: ".").packages(ws).get(key: pkg).testBinary(ws)
       let compared = cgo
         .withEnvVariable("CGO_ENABLED", if (race) { "1" } else { "0" })
         .withDirectory("/src", source)
@@ -710,7 +744,7 @@ type GoDev {
           cmp -s /plain/list /module/list || echo "the test lists differ"
           cmp -s /plain/results /module/results || { echo "the results differ:"; cat /plain/results /module/results; }
           cat /module/results
-          """])
+        """])
         .stdout
       let raced = compared.contains("DATA RACE")
       let stamped = compared.contains("stamp=STAMPED")
@@ -728,7 +762,7 @@ type GoDev {
 
     # A platform's test binary is go test -c's for that GOOS/GOARCH, named
     # as go test names it there.
-    let platforms = go(version: "1.26.1").packages(ws).get(key: "lib").platforms
+    let platforms = go(version: "1.26.1").modules(ws).get(key: ".").packages(ws).get(key: "lib").platforms
     let crossed = cgo
       .withEnvVariable("CGO_ENABLED", "0")
       .withEnvVariable("GOARCH", "arm64")
@@ -746,7 +780,7 @@ type GoDev {
           done
         done
         cmp -s /plain/stripped /module/stripped && echo same || echo "the linux/arm64 test binaries differ"
-        """])
+      """])
       .stdout
     assert(crossed.trimSpace == "same", crossed)
     let windows = platforms.get(key: "windows/amd64").testBinary(ws).name
@@ -764,7 +798,10 @@ type GoDev {
     mod.test(ws)
     let said = mod
       .base(ws)
-      .withFile("/usr/local/bin/hello", go.packages(ws).get(key: vendoredFixturePath + "/cmd/hello").binary(ws))
+      .withFile(
+        "/usr/local/bin/hello",
+        go.modules(ws).get(key: vendoredFixturePath).packages(ws).get(key: vendoredFixturePath + "/cmd/hello").binary(ws),
+      )
       .withExec(["hello"])
       .stdout
     assert(said == "hello vendor\n", "the vendored binary printed: " + said)
@@ -773,7 +810,7 @@ type GoDev {
       .base(ws)
       .withFile(
         "/usr/local/bin/hello",
-        go(buildFlags: ["-mod", "vendor"]).packages(ws).get(key: vendoredFixturePath + "/cmd/hello").binary(ws),
+        go(buildFlags: ["-mod", "vendor"]).modules(ws).get(key: vendoredFixturePath).packages(ws).get(key: vendoredFixturePath + "/cmd/hello").binary(ws),
       )
       .withExec(["hello"])
       .stdout
@@ -809,7 +846,7 @@ type GoDev {
       .withExec(["go", "mod", "tidy"])
       .directory("/ws")
       .asWorkspace
-    let built = go(base: base).packages(ws).get(key: ".").binary(ws)
+    let built = go(base: base).modules(ws).get(key: ".").packages(ws).get(key: ".").binary(ws)
     let out = base.withFile("/usr/local/bin/switch", built).withExec(["switch"]).stdout
     assert(out == "go1.26.1 42\n", "the binary's Go and its dependency: " + out)
     null
@@ -847,7 +884,7 @@ type GoDev {
       .withEnvVariable("GOSUMDB", "off")
       .withEnvVariable("CGO_ENABLED", "1")
     let ws = made.directory("/ws").asWorkspace
-    let built = go(base: base).packages(ws).get(key: ".").binary(ws)
+    let built = go(base: base).modules(ws).get(key: ".").packages(ws).get(key: ".").binary(ws)
     let out = base.withFile("/usr/local/bin/depinc", built).withExec(["depinc"]).stdout
     assert(out == "42 7\n", "the dependency's included values: " + out)
     null
@@ -876,7 +913,7 @@ type GoDev {
       .withNewFile("app/main.go", "package main\n\nimport (\n\t\"fmt\"\n\n\t\"example.com/srcinc/asm\"\n\t\"example.com/srcinc/cgo\"\n)\n\nfunc main() { fmt.Println(cgo.Value(), asm.Value()) }\n")
       .asWorkspace
     let base = cgoCxxBase.withEnvVariable("CGO_ENABLED", "1")
-    let built = go(base: base, includeExtraFiles: ["native/**", "hdr.go/**"]).packages(ws).get(key: "app").binary(ws)
+    let built = go(base: base, includeExtraFiles: ["native/**", "hdr.go/**"]).modules(ws).get(key: ".").packages(ws).get(key: "app").binary(ws)
     let out = base.withFile("/usr/local/bin/srcinc", built).withExec(["srcinc"]).stdout
     assert(out == "42 7\n", "the source's included values: " + out)
     null
@@ -892,8 +929,11 @@ type GoDev {
       .withNewFile("go.mod", "module example.com/cgocover\n\ngo 1.26.1\n")
       .withNewFile("main.go", "package main\n\n// int answer(void) { return 42; }\nimport \"C\"\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(int(C.answer())) }\n")
     let ws = source.asWorkspace
-    let base = cgoCxxBase.withExec(["apk", "add", "--no-cache", "binutils"]).withEnvVariable("CGO_ENABLED", "1")
-    let built = go(base: base, buildFlags: ["-cover"]).packages(ws).get(key: ".").binary(ws)
+    let base = cgoCxxBase.withExec(["apk", "add", "--no-cache", "binutils"]).withEnvVariable(
+      "CGO_ENABLED",
+      "1",
+    )
+    let built = go(base: base, buildFlags: ["-cover"]).modules(ws).get(key: ".").packages(ws).get(key: ".").binary(ws)
     let compared = base
       .withDirectory("/src", source)
       .withWorkdir("/src")
@@ -903,7 +943,7 @@ type GoDev {
         for b in plain module; do objcopy --remove-section=.note.go.buildid --remove-section=.note.gnu.build-id /$b/cgocover /$b/stripped; done
         cmp -s /plain/stripped /module/stripped || echo "the bytes differ"
         /module/cgocover
-        """])
+      """])
       .stdout
     assert(compared == "42\n", "the cgo -cover binary: " + compared)
     null
@@ -944,11 +984,17 @@ type GoDev {
       .withWorkdir("/elsewhere")
       .withExec(["archivescheck", "/archives"])
       .stdout
-    assert(checked.trimSpace.split("\n").length == 1 and checked.hasPrefix("checked "), "the archives: " + checked)
+    assert(
+      checked.trimSpace.split("\n").length == 1 and checked.hasPrefix("checked "),
+      "the archives: " + checked,
+    )
     let wanted = ["\"example.com/archives/cmd/tool\"", "\"example.com/archives/testonly\"", "\"net/http/httptest\"", "\"runtime/cgo\""]
     let missing = wanted.filter { p => manifest.contains(p + ": {") == false }
     assert(missing.length == 0, "the manifest lacks " + missing.join(", ") + ": " + manifest)
-    assert(manifest.contains("example.com/archives/cg [") == false and manifest.contains(".test\"") == false, "the manifest lists test packages: " + manifest)
+    assert(
+      manifest.contains("example.com/archives/cg [") == false and manifest.contains(".test\"") == false,
+      "the manifest lists test packages: " + manifest,
+    )
 
     # A module with no package to compile has archives of nothing.
     let none = directory
@@ -972,10 +1018,13 @@ type GoDev {
       .withNewFile("go.mod", "module example.com/noexport\n\ngo 1.26.1\n")
       .withNewFile("main.go", "package main\n\n// int answer(void) { return 42; }\nimport \"C\"\n\nfunc main() { _ = C.answer() }\n")
     let ws = source.asWorkspace
-    let base = cgoCxxBase.withExec(["apk", "add", "--no-cache", "binutils"]).withEnvVariable("CGO_ENABLED", "1")
+    let base = cgoCxxBase.withExec(["apk", "add", "--no-cache", "binutils"]).withEnvVariable(
+      "CGO_ENABLED",
+      "1",
+    )
     let failures = ["c-shared", "c-archive"].map { mode =>
       let flag = "-buildmode=" + mode
-      let built = go(base: base, buildFlags: [flag]).packages(ws).subset(keys: ["."]).batch.binary(ws)
+      let built = go(base: base, buildFlags: [flag]).modules(ws).get(key: ".").packages(ws).subset(keys: ["."]).binary(ws)
       let compared = base
         .withDirectory("/src", source)
         .withWorkdir("/src")
@@ -989,7 +1038,7 @@ type GoDev {
             for b in plain module; do objcopy --remove-section=.note.go.buildid --remove-section=.note.gnu.build-id /$b/noexport /$b/stripped 2>/dev/null || cp /$b/noexport /$b/stripped; done
             cmp -s /plain/stripped /module/stripped || echo "the bytes differ"
           fi
-          """])
+        """])
         .stdout
       if (compared.trimSpace == "") { "" } else { mode + ": " + compared }
     }.filter { failure => failure != "" }
@@ -1008,13 +1057,16 @@ type GoDev {
   source, or a -pgo flag names it in the base image.
   """
   pgoCheck: Void @check {
-    let base = container.from("golang:1.26.1-alpine")
+    let base = container
+      .from("golang:1.26.1-alpine")
       .withExec(["apk", "add", "--no-cache", "binutils"])
       .withEnvVariable("CGO_ENABLED", "0")
     let program = directory
       .withNewFile("go.mod", "module example.com/pgo\n\ngo 1.26.1\n")
       .withNewFile("main.go", "package main\n\nimport (\n\t\"fmt\"\n\t\"os\"\n\t\"runtime/pprof\"\n\t\"time\"\n)\n\nvar sink uint64\n\nfunc main() {\n\tif len(os.Args) > 1 {\n\t\tf, _ := os.Create(os.Args[1])\n\t\tpprof.StartCPUProfile(f)\n\t\tend := time.Now().Add(time.Second)\n\t\tfor time.Now().Before(end) {\n\t\t\tfor i := uint64(0); i < 100000; i++ {\n\t\t\t\tsink += i * i\n\t\t\t}\n\t\t}\n\t\tpprof.StopCPUProfile()\n\t\tf.Close()\n\t}\n\tfmt.Println(\"ok\")\n}\n")
-    let profile = base.withDirectory("/src", program).withWorkdir("/src")
+    let profile = base
+      .withDirectory("/src", program)
+      .withWorkdir("/src")
       .withExec(["go", "build", "-o", "/profiler", "."])
       .withExec(["/profiler", "/profile.pprof"])
       .file("/profile.pprof")
@@ -1024,7 +1076,10 @@ type GoDev {
     let failures = pgoShapes.map { shape =>
       let flags = if (shape == "flag") { ["-pgo=default.pgo"] } else if (shape == "base") { ["-pgo=/profile.pprof"] } else { [] }
       let built = {
-        withProfile.withFile("/module/pgo", go(base: withProfile, buildFlags: flags).packages(ws).get(key: ".").binary(ws)).sync
+        withProfile.withFile(
+          "/module/pgo",
+          go(base: withProfile, buildFlags: flags).modules(ws).get(key: ".").packages(ws).get(key: ".").binary(ws),
+        ).sync
       } rescue {
         err: Error => withProfile.withNewFile("/module/error", err.message)
       }
@@ -1038,7 +1093,7 @@ type GoDev {
           cmp -s /plain/setting /module/setting || echo "go build recorded $(cat /plain/setting), the module $(cat /module/setting)"
           for b in plain module; do objcopy --remove-section=.note.go.buildid --remove-section=.note.gnu.build-id /$b/pgo /$b/stripped; done
           cmp -s /plain/stripped /module/stripped || echo "the bytes differ"
-          """])
+        """])
         .stdout
       if (compared.trimSpace == "") { "" } else { shape + ": " + compared.trimSpace }
     }.filter { failure => failure != "" }
@@ -1186,7 +1241,7 @@ type GoDev {
   """
   skipsNonModulesCheck(ws: Workspace!): Void @check {
     let tool = go(version: "1.26.1", test: test, generate: generate)
-    let mods = tool.modules(ws)
+    let mods = tool.modules(ws).list
     let discovered = pathsOf(mods.{{path}})
     assert(
       containsPath(discovered, unreadableFixturePath) == false,
@@ -1200,7 +1255,9 @@ type GoDev {
     # Both are in the selection patterns by way of "**", so only the filtering
     # keeps them out of these two.
     testEveryModule(tool, ws)
-    tool.packages(ws).batch.generate(ws).layer.sync
+    discovered.map { path =>
+      tool.modules(ws).get(key: path).packages(ws).generate(ws).layer.sync
+    }
 
     let named = go(version: "1.26.1").module(ws, unreadableFixturePath)
     assert(
@@ -1243,7 +1300,7 @@ type GoDev {
     )
 
     assert(
-      containsPath(tool.packages(ws).keys, baseFixturePath),
+      containsPath(tool.modules(ws).get(key: baseFixturePath).packages(ws).keys, baseFixturePath),
       "custom base package discovery did not include the module root",
     )
 
@@ -1256,13 +1313,13 @@ type GoDev {
     let cached = base
       .withMountedCache("/go/pkg/mod", cacheVolume("go-dev-custom-base-mod"))
       .withMountedCache("/root/.cache/go-build", cacheVolume("go-dev-custom-base-build"))
-    let built = go(base: cached).packages(ws).get(key: baseFixturePath + "/cmd/writegenerated").binary(ws)
+    let built = go(base: cached).modules(ws).get(key: baseFixturePath).packages(ws).get(key: baseFixturePath + "/cmd/writegenerated").binary(ws)
     assert(built.size > 0, "a custom base with Go cache volumes built an empty binary")
 
     # A base whose module cache is where the per-package build makes its
     # module download, here through a symlink, as GOMODCACHE is the module's.
     let linked = base.withExec(["sh", "-c", "mkdir -p /gobuild/modcache /go/pkg && rm -rf /go/pkg/mod && ln -s /gobuild/modcache /go/pkg/mod"])
-    let builtLinked = go(base: linked).packages(ws).get(key: baseFixturePath + "/cmd/writegenerated").binary(ws)
+    let builtLinked = go(base: linked).modules(ws).get(key: baseFixturePath).packages(ws).get(key: baseFixturePath + "/cmd/writegenerated").binary(ws)
     assert(builtLinked.size > 0, "a custom base whose module cache is the per-package download's built an empty binary")
 
     let changes = mod.generate(ws)
@@ -1308,7 +1365,7 @@ type GoDev {
     )
 
     let tool = go(version: "1.26.1", test: test, generate: generate)
-    let allModulePaths = pathsOf(tool.modules(ws).{{path}})
+    let allModulePaths = pathsOf(tool.modules(ws).list.{{path}})
     assert(
       containsPath(allModulePaths, "fixtures/go-module-cross-include-a"),
       "unfiltered modules did not include expected fixture module",
@@ -1323,7 +1380,8 @@ type GoDev {
     )
 
     let includedModulePaths = tool
-      .modules(ws, include: ["fixtures/go-module-cross-include-a"]).{{path}}.map { mod => mod.path }
+      .modules(ws, include: ["fixtures/go-module-cross-include-a"])
+      .list.{{path}}.map { mod => mod.path }
     assert(
       containsPath(includedModulePaths, "fixtures/go-module-cross-include-a"),
       "modules include filter did not include matching module root",
@@ -1334,7 +1392,8 @@ type GoDev {
     )
 
     let excludedModulePaths = tool
-      .modules(ws, exclude: ["fixtures/go-module-cross-include-a"]).{{path}}.map { mod => mod.path }
+      .modules(ws, exclude: ["fixtures/go-module-cross-include-a"])
+      .list.{{path}}.map { mod => mod.path }
     assert(
       containsPath(excludedModulePaths, "fixtures/go-module-cross-include-a") == false,
       "modules exclude filter included excluded module root",
@@ -1345,7 +1404,8 @@ type GoDev {
         ws,
         include: ["fixtures/go-module-cross-include-*"],
         exclude: ["fixtures/go-module-cross-include-b"],
-      ).{{path}}.map { mod => mod.path }
+      )
+      .list.{{path}}.map { mod => mod.path }
     assert(
       containsPath(combinedModulePaths, "fixtures/go-module-cross-include-a"),
       "modules combined filters did not include matching module root",
@@ -1356,7 +1416,8 @@ type GoDev {
     )
 
     let contentMatchedModulePaths = tool
-      .modules(ws, include: ["**/module-a-only.data"]).{{path}}.map { mod => mod.path }
+      .modules(ws, include: ["**/module-a-only.data"])
+      .list.{{path}}.map { mod => mod.path }
     assert(
       containsPath(contentMatchedModulePaths, "fixtures/go-module-cross-include-a"),
       "modules include filter did not match module directory contents",
@@ -1367,7 +1428,8 @@ type GoDev {
     )
 
     let testSkippedModulePaths = tool
-      .modules(ws, includeSkipTest: false).{{path}}.map { mod => mod.path }
+      .modules(ws, includeSkipTest: false)
+      .list.{{path}}.map { mod => mod.path }
     assert(
       containsPath(testSkippedModulePaths, "testdata/go-module-excluded") == false,
       "modules includeSkipTest false included test-skipped module",
@@ -1386,7 +1448,8 @@ type GoDev {
     )
 
     let generateSkippedModulePaths = tool
-      .modules(ws, includeSkipGenerate: false).{{path}}.map { mod => mod.path }
+      .modules(ws, includeSkipGenerate: false)
+      .list.{{path}}.map { mod => mod.path }
     assert(
       containsPath(generateSkippedModulePaths, "testdata/go-module-excluded") == false,
       "modules includeSkipGenerate false included generate-skipped module",
@@ -1547,7 +1610,13 @@ type GoDev {
       .layer
       .sync
 
-    let changes = go(version: "1.26.1", generate: generate).packages(ws).batch.generate(ws)
+    let generator = go(version: "1.26.1", generate: generate)
+    let changes = generator.modules(ws).get(key: generatedFixturePath).packages(ws).generate(ws)
+    pathsOf(generator.modules(ws).list.{{path}}).filter { path => path != generatedFixturePath }.map { path =>
+      let other = generator.modules(ws).get(key: path).packages(ws).generate(ws)
+      assert(other.addedPaths.length == 0 and other.modifiedPaths.length == 0 and other.removedPaths.length == 0,
+        "generation changed an unexpected module: " + path)
+    }
 
     assert(
       changes.addedPaths.length == 1,
@@ -1700,14 +1769,14 @@ type GoDev {
     let tool = go(version: "1.26.1", generate: [child])
     let mod = tool.module(ws, root)
     assert(mod.generateDirectories(ws) == [child], "exact directory selection included other packages")
-    let changes = tool.packages(ws.withWorkdir(root)).batch.generate(
+    let changes = tool.modules(ws.withWorkdir(root)).get(key: root).packages(ws.withWorkdir(root)).generate(
       ws.withWorkdir(root),
     )
     assert(changes.addedPaths == [child + "/generated.go"], "generation ran outside the selected directory")
     assert(changes.modifiedPaths.length == 0, "generation modified unrelated files")
     assert(changes.removedPaths.length == 0, "generation removed unrelated files")
 
-    let rootOnly = go(version: "1.26.1", generate: [root]).packages(ws).batch.generate(ws)
+    let rootOnly = go(version: "1.26.1", generate: [root]).modules(ws).get(key: root).packages(ws).generate(ws)
     assert(rootOnly.addedPaths == [root + "/generated.go"], "literal module root recursed into child directories")
 
     let globbed = go(version: "1.26.1", generate: [root + "/**", "!" + root, "!" + root + "/nested/**"])
@@ -1715,7 +1784,7 @@ type GoDev {
       globbed.module(ws, root).generateDirectories(ws) == [root + "/later", child],
       "recursive glob or exclusion failed",
     )
-    let ordered = globbed.packages(ws).batch.generate(ws)
+    let ordered = globbed.modules(ws).get(key: root).packages(ws).generate(ws)
     assert(
       ordered.layer.file(child + "/generated.go").contents.contains("Earlier"),
       "directories did not share generated output in lexical order",
@@ -1723,19 +1792,19 @@ type GoDev {
 
     # A package's own generate runs alone, so version does not see what later
     # generates; a batch of both runs them in order, as go generate does.
-    let alone = globbed.packages(ws).get(key: child).generate(ws)
+    let alone = globbed.modules(ws).get(key: root).packages(ws).get(key: child).generate(ws)
     assert(alone.addedPaths == [child + "/generated.go"], "a package's own generate ran elsewhere")
     assert(
       alone.layer.file(child + "/generated.go").contents.contains("Earlier") == false,
       "a package's own generate saw another package's output",
     )
-    let pair = globbed.packages(ws).subset(keys: [child, root + "/later"]).batch.generate(ws)
+    let pair = globbed.modules(ws).get(key: root).packages(ws).subset(keys: [child, root + "/later"]).generate(ws)
     assert(
       pair.layer.file(child + "/generated.go").contents.contains("Earlier"),
       "a batch of two packages did not run them in order",
     )
 
-    let nested = go(version: "1.26.1", generate: [root + "/nested"]).packages(ws).batch.generate(ws)
+    let nested = go(version: "1.26.1", generate: [root + "/nested"]).modules(ws).get(key: root + "/nested").packages(ws).generate(ws)
     assert(nested.addedPaths == [root + "/nested/generated.go"], "nested module generator was not isolated")
     null
   }
@@ -1871,5 +1940,168 @@ type GoDev {
       assert(result != "unexpected success" and result.contains(value), "container resolution error was not reported: " + result)
     }
     null
+  }
+
+  # Exercise selection through the CLI: direct Dang calls do not apply the
+  # engine's filtered collection view. The engine supplies its matching CLI.
+  let selectedCheck(
+    ws: Workspace!,
+    fixture: Directory!,
+    args: [String!]!,
+    passed: Int!,
+    failed: Int! = 0,
+    messages: [String!]! = [],
+    alias: String! = "go",
+  ): Void {
+    let result = container
+      .from("alpine:3.23")
+      .withDirectory("/source", ws.directory("/"))
+      .withDirectory("/work", fixture)
+      .withNewFile("/work/.git/HEAD", "ref: refs/heads/main\n")
+      .withNewFile("/work/dagger.toml", "[modules." + alias + "]\nsource = \"/source\"\n")
+      .withWorkdir("/work")
+      .withExec(
+        ["/dev/.dagger/dagger", "--progress=report", "check"] + args,
+        expect: ANY,
+        daggerInDaggerNewSession: true,
+      )
+    let output = result.stdout + result.stderr
+    assert((result.exitCode == 0) == (failed == 0), "unexpected check exit status:\n" + output)
+    let counts = (if (passed > 0) { [`${passed}` + " passed"] } else { [] }) + (if (failed > 0) { [`${failed}` + " failed"] } else { [] })
+    (counts + messages).map { message =>
+      assert(output.contains(message), "missing " + message + ":\n" + output)
+    }
+    null
+  }
+
+  let selectionFixture: Directory! {
+    ["m1", "m2"].reduce(directory) { fixture, mod =>
+      ["p1", "p2", "unused"].reduce(
+        fixture.withNewFile(mod + "/go.mod", "module example.com/" + mod + "\n\ngo 1.26.1\n"),
+      ) { files, pkg =>
+        files.withNewFile(mod + "/" + pkg + "/tests_test.go", "package " + pkg + "\nimport \"testing\"\nfunc TestFoo(t *testing.T) {}\nfunc TestBar(t *testing.T) {}\nfunc TestOther(t *testing.T) { t.Fatal(\"excluded test ran\") }\n")
+      }
+    }
+  }
+
+  let selectionArgs(alias: String! = "go"): [String!]! {
+    ["m1/p1", "m1/p2", "m2/p1", "m2/p2"].map { pkg => "--" + alias + "-package=" + pkg } + ["TestFoo", "TestBar"].map { name => "--" + alias + "-test=" + name }
+  }
+
+  selectedTestsCheck(ws: Workspace!): Void @check {
+    selectedCheck(ws, selectionFixture, selectionArgs, passed: 8)
+  }
+
+  selectedAliasCheck(ws: Workspace!): Void @check {
+    selectedCheck(ws, selectionFixture, selectionArgs("renamed"), passed: 8, alias: "renamed")
+  }
+
+  selectedEmptyPackageCheck(ws: Workspace!): Void @check {
+    let fixture = selectionFixture
+      .withNewFile("m1/p2/tests_test.go", "package p2\nimport \"testing\"\nfunc TestUnselected(t *testing.T) {}\n")
+      .withNewFile("m1/p2/broken.go", "package p2\nvar broken = undefinedSymbol\n")
+    selectedCheck(
+      ws,
+      fixture,
+      selectionArgs.filter { arg => arg != "--go-test=TestBar" },
+      passed: 3,
+    )
+  }
+
+  let teardownSource: String! = "package p1\nimport (\"fmt\"; \"os\"; \"testing\")\nfunc TestMain(m *testing.M) { m.Run(); fmt.Fprintln(os.Stderr, \"teardown failure\"); os.Exit(1) }\n"
+
+  selectedTeardownCheck(ws: Workspace!): Void @check {
+    selectedCheck(
+      ws,
+      selectionFixture.withNewFile("m1/p1/main_test.go", teardownSource),
+      selectionArgs,
+      passed: 6,
+      failed: 2,
+      messages: ["Go tests in m1/p1: package failed outside a selected test check", "teardown failure"],
+    )
+  }
+
+  selectedFailureCheck(ws: Workspace!): Void @check {
+    let fixture = selectionFixture.withNewFile("m1/p1/tests_test.go", "package p1\nimport \"testing\"\nfunc TestFoo(t *testing.T) { t.Fatal(\"selected failure\") }\nfunc TestBar(t *testing.T) {}\n")
+    selectedCheck(ws, fixture, selectionArgs, passed: 7, failed: 1, messages: ["selected failure"])
+  }
+
+  selectedBuildFailureCheck(ws: Workspace!): Void @check {
+    let fixture = selectionFixture.withNewFile("m2/p1/broken.go", "package p1\nvar broken = undefinedSymbol\n")
+    selectedCheck(ws, fixture, selectionArgs, passed: 6, failed: 2, messages: ["Go tests in m2/p1:"])
+  }
+
+  let reportingFixture: Directory! {
+    directory
+      .withNewFile("reporting/go.mod", "module example.com/reporting\n\ngo 1.26.1\n")
+      .withNewFile("reporting/ok/ok_test.go", "package ok\nimport \"testing\"\nfunc TestOK(t *testing.T) {}\n")
+      .withNewFile("reporting/hidden/hidden_test.go", "package hidden\nimport \"testing\"\nfunc TestVisible(t *testing.T) {}\n")
+  }
+
+  # Multiline signatures are valid Go but absent from the source-line index.
+  let hiddenFailureFixture: Directory! {
+    reportingFixture.withNewFile("reporting/hidden/multiline_test.go", "package hidden\nimport \"testing\"\nfunc TestHidden(\n t *testing.T,\n) { t.Fatal(\"undiscovered failure\") }\n")
+  }
+
+  selectedUndiscoveredFailureCheck(ws: Workspace!): Void @check {
+    selectedCheck(
+      ws,
+      hiddenFailureFixture,
+      ["--go-module=reporting"],
+      passed: 1,
+      failed: 1,
+      messages: ["Go tests in reporting/hidden: package failed outside a selected test check", "undiscovered failure"],
+    )
+  }
+
+  selectedMixedFailureCheck(ws: Workspace!): Void @check {
+    let fixture = hiddenFailureFixture.withNewFile(
+      "reporting/hidden/known_test.go",
+      "package hidden\nimport \"testing\"\nfunc TestKnownFailure(t *testing.T) { t.Fatal(\"known failure\") }\n",
+    )
+    selectedCheck(
+      ws,
+      fixture,
+      ["--go-module=reporting"],
+      passed: 1,
+      failed: 2,
+      messages: ["undiscovered failure"],
+    )
+  }
+
+  selectedUncheckedBuildCheck(ws: Workspace!): Void @check {
+    let fixture = reportingFixture.withNewFile("reporting/broken/broken.go", "package p1\nvar broken = undefinedSymbol\n")
+    selectedCheck(
+      ws,
+      fixture,
+      ["--go-module=reporting"],
+      passed: 0,
+      failed: 2,
+      messages: ["failures in packages without selected test checks: example.com/reporting/broken"],
+    )
+  }
+
+  selectedUncheckedTeardownCheck(ws: Workspace!): Void @check {
+    let fixture = reportingFixture
+      .withNewFile("reporting/broken/broken.go", "package p1\n")
+      .withNewFile("reporting/broken/main_test.go", teardownSource)
+    selectedCheck(
+      ws,
+      fixture,
+      ["--go-module=reporting"],
+      passed: 0,
+      failed: 2,
+      messages: ["failures in packages without selected test checks: example.com/reporting/broken", "teardown failure"],
+    )
+  }
+
+  selectedVendorCheck(ws: Workspace!): Void @check {
+    let fixture = directory
+      .withNewFile("vendored/go.mod", "module example.com/vendored\n\ngo 1.26.1\n\nrequire example.com/lib v0.0.0\n")
+      .withNewFile("vendored/local_test.go", "package vendored\nimport (\"testing\"; \"example.com/lib\")\nfunc TestLocal(t *testing.T) { if lib.Answer() != 42 { t.Fatal(\"bad vendored dependency\") } }\n")
+      .withNewFile("vendored/vendor/modules.txt", "# example.com/lib v0.0.0\n## explicit; go 1.26.1\nexample.com/lib\n")
+      .withNewFile("vendored/vendor/example.com/lib/lib.go", "package lib\nfunc Answer() int { return 42 }\n")
+      .withNewFile("vendored/vendor/example.com/lib/lib_test.go", "package lib\nimport \"testing\"\nfunc TestVendored(t *testing.T) { t.Fatal(\"vendored test ran\") }\n")
+    selectedCheck(ws, fixture, ["--go-module=vendored"], passed: 1)
   }
 }
