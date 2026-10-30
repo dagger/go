@@ -43,6 +43,56 @@ func TestShellWords(t *testing.T) {
 	}
 }
 
+// workRefs finds what reWorkRef does, in the same order.
+func TestWorkRefs(t *testing.T) {
+	for _, l := range []string{
+		"",
+		"$WORK/b",
+		"$WORK/bx $WORK/b7",
+		"packagefile fmt=$WORK/b012/_pkg_.a",
+		"cd $WORK/b001 && x $WORK/b002/a $WORK/b002/b $$WORK/b3",
+		"$WORK/b12$WORK/b34x",
+		"./$WORK/b5/x",
+	} {
+		var want []string
+		for _, m := range reWorkRef.FindAllStringSubmatch(l, -1) {
+			want = append(want, m[1])
+		}
+		got := slices.Collect(workRefs(l))
+		if !slices.Equal(got, want) {
+			t.Errorf("workRefs(%q) = %q, want %q", l, got, want)
+		}
+		if first := firstWorkRef(l); (len(want) == 0 && first != "") || (len(want) > 0 && first != want[0]) {
+			t.Errorf("firstWorkRef(%q) = %q, want the first of %q", l, first, want)
+		}
+	}
+}
+
+// mayNameInput leaves out only lines addInputs finds nothing in.
+func TestMayNameInput(t *testing.T) {
+	r := roots{Src: "/src/p", Mod: "/gobuild/modcache", Cwd: "/src/p"}
+	for _, l := range []string{
+		"packagefile fmt=$WORK/b012/_pkg_.a",
+		"$WORK/b001/compile -o $WORK/b001/_pkg_.a -p main -lang=go1.27 /src/p/main.go",
+		"gcc -I /gobuild/modcache/x@v1/include -c a.c",
+		"gcc -I ./include -c ../a.c",
+		"cat //src/p/x",
+		"cat '/src/p/a b'",
+		"cat /src/p/.",
+		"cat /src/p/x/..",
+		"echo /srcx/y",
+	} {
+		b := &block{}
+		addInputs(b, r, r.Cwd, l)
+		if (len(b.srcFiles) > 0 || len(b.modFiles) > 0) && !mayNameInput(l, r) {
+			t.Errorf("mayNameInput(%q) = false, but it names %q %q", l, b.srcFiles, b.modFiles)
+		}
+	}
+	if mayNameInput("packagefile fmt=$WORK/b012/_pkg_.a", r) {
+		t.Errorf("an import config line may name an input")
+	}
+}
+
 // A cgo package's steps run as the plan has them: the C compiler's flag
 // probes are dropped, its directory changes kept, and the package's
 // directory, which C compiles read by bare names, mounted whole.
