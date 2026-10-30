@@ -1,11 +1,16 @@
 package main
 
 import (
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"golang.org/x/mod/modfile"
@@ -232,6 +237,101 @@ func TestNonDirectiveCommentsAreIgnored(t *testing.T) {
 	}
 }
 
+// The directives found without a parse are the ones a full parse finds, at
+// the same positions, wherever a // sits in or next to strings, runes and
+// other comments.
+func TestDirectivesMatchParse(t *testing.T) {
+	for name, src := range map[string]string{
+		"string":       "package x\n\nvar s = \"//go:embed a\" //go:embed b\n",
+		"escapes":      "package x\n\nvar s, r = \"\\\"//go:embed a\\\\\", '\\''//go:embed b\nvar q = '\"' //go:embed c\n",
+		"raw":          "package x\n\nvar s = `\n//go:embed a\n` //go:embed b\n",
+		"block":        "package x\n\n/*\n//go:embed a\n*/ //go:embed b\n/*/ //go:embed c */\n",
+		"slashes":      "package x\n\nvar d = 1 / 2 //go:embed a\nvar e = 1 /* x *//2\n//go:generate go run .\n",
+		"crlf":         "package x\r\n\r\nimport \"embed\"\r\n\r\n//go:embed a\r\nvar f embed.FS\r\n//go:generate\r\n",
+		"line":         "package x\n\n//line other.go:10\n//go:embed a\nvar f string\n/*line more.go:20:5*/ //go:embed b\n",
+		"trailing":     "package x\n\nfunc F() {\n\tF() //go:generate go run .\n}\n//go:embed",
+		"header":       "//go:build linux\n\n// Package x.\n//go:generate go run ./gen\npackage x\n\nimport \"embed\" //go:embed a\n",
+		"no directive": "package x\n\n// go:embed a\n//go:embedded b\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			n, parsed := checkDirectivesMatchParse(t, name+".go", []byte(src))
+			if !parsed || (n == 0) != (name == "no directive") {
+				t.Fatalf("parsed: %v, directives: %d", parsed, n)
+			}
+		})
+	}
+}
+
+// The same over every Go file of the toolchain's own source that parses.
+func TestDirectivesMatchParseInGoroot(t *testing.T) {
+	out, err := exec.Command("go", "env", "GOROOT").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(strings.TrimSpace(string(out)), "src")
+	var files []string
+	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && d.Type().IsRegular() && strings.HasSuffix(p, ".go") {
+			files = append(files, p)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var directives atomic.Int64
+	forEach(len(files), func(i int) {
+		data, err := os.ReadFile(files[i])
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		n, _ := checkDirectivesMatchParse(t, files[i], data)
+		directives.Add(int64(n))
+	})
+	if len(files) < 1000 || directives.Load() < 100 {
+		t.Fatalf("checked %d files holding %d directives: too few to show anything", len(files), directives.Load())
+	}
+}
+
+// checkDirectivesMatchParse compares the directives directivesIn finds in a
+// file with those its full parse holds. It returns how many there are, and
+// whether the file parses at all; one that doesn't is not compared.
+func checkDirectivesMatchParse(t *testing.T, filePath string, data []byte) (int, bool) {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, filePath, data, parser.ParseComments|parser.SkipObjectResolution)
+	if err != nil {
+		return 0, false
+	}
+	var want []goDirective
+	for _, group := range file.Comments {
+		for _, comment := range group.List {
+			if directive, ok := supportedDirective(filePath, fset.Position(comment.Slash), comment.Text); ok {
+				want = append(want, directive)
+			}
+		}
+	}
+	got := directivesIn(filePath, data)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("%s: directives\n got: %#v\nwant: %#v", filePath, got, want)
+	}
+	return len(want), true
+}
+
+// A file whose body does not parse is the compiler's to report, as with go
+// build: the scan reads it up to its imports, and its directives still count.
+func TestBodySyntaxErrorIsNoScanFailure(t *testing.T) {
+	data := []byte("package x\n\nimport \"embed\"\n\n//go:embed a.txt\nvar f embed.FS\n\nfunc {{{\n")
+	includes, _, err := scanGoFileDirectives("x/x.go", data, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(includes, []string{"x/a.txt"}) {
+		t.Fatalf("includes: %#v", includes)
+	}
+}
+
 func scanGoFileDirectives(filePath string, data []byte, test, generate bool) ([]string, []string, error) {
 	directives, err := goDirectivesInFile(filePath, data)
 	if err != nil {
@@ -357,7 +457,7 @@ func TestScanRecordsFailurePerModuleAndCarriesOn(t *testing.T) {
 		"good/g.go":          "package good\n",
 		"good/g_test.go":     "package good\n",
 		"unparseable/go.mod": "module example.com/unparseable\n\ngo 1.25\n",
-		"unparseable/u.go":   "package unparseable\n\nfunc {{{\n",
+		"unparseable/u.go":   "package unparseable\n\nimport {{{\n",
 	})
 	output := t.TempDir()
 	if err := runAll([]string{"--all", "--root", root, "--output-dir", output}); err != nil {

@@ -83,9 +83,12 @@ func TestFileKindsFindsUnicodeTestNames(t *testing.T) {
 		"y_test.go": "package x\n\nimport \"testing\"\n\nfunc Fuzzé(ф *testing.F) {}\n",
 	})
 	for _, name := range []string{"x_test.go", "y_test.go"} {
-		k, _, err := fileKinds(filepath.Join(root, name), true)
-		if err != nil || k != "t" {
-			t.Errorf("%s: kinds %q, err %v; want a test", name, k, err)
+		src, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if k, _ := fileKinds(src, true); k != "t" {
+			t.Errorf("%s: kinds %q; want a test", name, k)
 		}
 	}
 }
@@ -129,9 +132,12 @@ func TestFileKindsReadsLongLines(t *testing.T) {
 	root := writeTree(t, map[string]string{
 		"gen.go": "package main\n\nvar x = \"" + strings.Repeat("a", 17<<20) + "\"\n\nfunc main() {}\n",
 	})
-	k, _, err := fileKinds(filepath.Join(root, "gen.go"), false)
-	if err != nil || k != "m" {
-		t.Errorf("kinds %q, err %v; want a main package", k, err)
+	src, err := os.ReadFile(filepath.Join(root, "gen.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k, _ := fileKinds(src, false); k != "m" {
+		t.Errorf("kinds %q; want a main package", k)
 	}
 }
 
@@ -212,5 +218,40 @@ func TestHeaderPackHoldsEmbeddable(t *testing.T) {
 	}
 	if want := fmt.Sprintf("link_test.go\n%o\n9\nx_test.go\n", uint32(fs.ModeSymlink|0o777)); !strings.Contains(pack, want) {
 		t.Errorf("the test file symlink is not in the pack as one:\n%s", pack)
+	}
+}
+
+// Discovery lists every module, then every package in byte order of its
+// workspace path, across modules: the go module lists packages in that order
+// without sorting them.
+func TestDiscoveryListsPackagesByWorkspacePath(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"go.mod":        "module example.com/root\n\ngo 1.25\n",
+		"z/main.go":     "package main\n\nfunc main() {}\n",
+		"a/a_test.go":   "package a\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) {}\n",
+		"m/go.mod":      "module example.com/m\n\ngo 1.25\n",
+		"m/main.go":     "package main\n\nfunc main() {}\n",
+		"m/b/gen.go":    "package b\n\n//go:generate go run .\n",
+		"m-x/go.mod":    "module example.com/mx\n\ngo 1.25\n",
+		"m-x/m_test.go": "package mx\n\nimport \"testing\"\n\nfunc TestM(t *testing.T) {}\n",
+	})
+	output := t.TempDir()
+	if err := runAll([]string{"--all", "--root", root, "--output-dir", output}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(output, discoveryFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "module\t.\texample.com/root\t1.25\n" +
+		"module\tm-x\texample.com/mx\t1.25\n" +
+		"module\tm\texample.com/m\t1.25\n" +
+		"package\t.\ta\tt\n" +
+		"package\tm\t.\tm\n" +
+		"package\tm-x\t.\tt\n" +
+		"package\tm\tb\tg\n" +
+		"package\t.\tz\tm\n"
+	if got := string(data); got != want {
+		t.Errorf("discovery:\n got: %q\nwant: %q", got, want)
 	}
 }

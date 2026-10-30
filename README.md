@@ -408,10 +408,12 @@ whose files are all constrained out is still a module, and the toolchain's
 message about it names the module already.
 
 **A module the scan cannot read fails alone.** One scan serves every tool in
-the workspace, so a module with an unreadable `go.mod` or a Go file that will
-not parse records the reason against itself and the pass carries on. Anything
-that needs that module's sources raises the reason, which names the file;
-everything else is unaffected. The batch `test` reports it beside the modules
+the workspace, so a module with an unreadable `go.mod` or a Go file whose
+imports will not parse records the reason against itself and the pass carries
+on. A syntax error after a file's imports is the compiler's to report, as with
+`go build`: the scan parses no further than the imports. Anything that needs
+that module's sources raises the reason, which names the file; everything else
+is unaffected. The batch `test` reports it beside the modules
 that passed, and the batch `generate` — which has to ask every selected module
 whether it holds generators — gets an answer rather than an error. Failing the
 whole scan instead would let one bad file stop every check in the repository,

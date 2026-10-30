@@ -3,6 +3,8 @@ package main
 import (
 	"flag"
 	"fmt"
+	"go/parser"
+	"go/token"
 	"io/fs"
 	"os"
 	"path"
@@ -12,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"golang.org/x/mod/modfile"
 )
 
 // runAll computes includes for every module in one local pass over a mounted
@@ -63,11 +67,11 @@ func moduleOutputFile(moduleRoot, suffix string) string {
 // reads only its own slice instead of re-scanning a combined blob.
 //
 // A module whose inputs cannot be computed -- an unreadable go.mod, a Go file
-// that will not parse -- records the reason in its own .err file, and the scan
-// carries on to the next module. One scan serves every tool in the workspace,
-// so failing the whole pass here would let a single bad module stop every
-// other module's checks. The tools read the reason back and raise it only when
-// something actually asks for that module's sources.
+// whose imports will not parse -- records the reason in its own .err file,
+// and the scan carries on to the next module. One scan serves every tool in
+// the workspace, so failing the whole pass here would let a single bad module
+// stop every other module's checks. The tools read the reason back and raise
+// it only when something actually asks for that module's sources.
 func (index *localIndex) writeAllDir(dir string, test, generate bool) error {
 	if err := writeModuleOutput(dir, "_modules_", linesWithTrailer(index.goModules())); err != nil {
 		return err
@@ -140,12 +144,7 @@ func (index *localIndex) goModules() []string {
 // bumped to a patch Docker has not published yet would otherwise stop the
 // module being checked at all.
 func (index *localIndex) goVersion(moduleRoot string) string {
-	goModPath := path.Join(moduleRoot, "go.mod")
-	data, err := os.ReadFile(filepath.Join(index.root, filepath.FromSlash(goModPath)))
-	if err != nil {
-		return ""
-	}
-	goMod, err := parseGoMod(goModPath, data)
+	goMod, err := index.goMod(moduleRoot)
 	if err != nil || goMod.Go == nil {
 		return ""
 	}
@@ -164,18 +163,34 @@ func minorSeries(version string) string {
 // moduleSkipReason says why a directory holding a go.mod is not a Go module a
 // tool can work on, or "" when it is one.
 func (index *localIndex) moduleSkipReason(moduleRoot string) string {
-	goModPath := path.Join(moduleRoot, "go.mod")
-	data, err := os.ReadFile(filepath.Join(index.root, filepath.FromSlash(goModPath)))
-	if err != nil {
-		return err.Error()
-	}
-	if _, err := parseGoMod(goModPath, data); err != nil {
+	if _, err := index.goMod(moduleRoot); err != nil {
 		return err.Error()
 	}
 	if len(index.packageFiles(moduleRoot)) == 0 {
-		return goModPath + ": module holds no Go files"
+		return path.Join(moduleRoot, "go.mod") + ": module holds no Go files"
 	}
 	return ""
+}
+
+// goMod returns a module root's go.mod, read and parsed the first time it is
+// asked for: every module's go.mod is read for discovery, its Go version and
+// its local replaces, and a module that many others replace into, such as a
+// repository's root, is read for each of them.
+func (index *localIndex) goMod(moduleRoot string) (*modfile.File, error) {
+	if p, ok := index.goMods[moduleRoot]; ok {
+		return p.file, p.err
+	}
+	goModPath := path.Join(moduleRoot, "go.mod")
+	data, err := os.ReadFile(filepath.Join(index.root, filepath.FromSlash(goModPath)))
+	var file *modfile.File
+	if err == nil {
+		file, err = parseGoMod(goModPath, data)
+	}
+	if index.goMods == nil {
+		index.goMods = map[string]parsedGoMod{}
+	}
+	index.goMods[moduleRoot] = parsedGoMod{file, err}
+	return file, err
 }
 
 // packageFiles returns the module's Go files that Go itself would look at.
@@ -270,11 +285,118 @@ type localIndex struct {
 	// parsed holds each module's directives once read: a module that several
 	// others reach through local replaces is parsed once, not once for each.
 	parsed map[string]parsedDirectives
+	// goMods holds each module's go.mod once read, for the same reason.
+	goMods map[string]parsedGoMod
+	// goFiles holds what the scan needs of each Go file, keyed by
+	// workspace-relative path; goFileFacts fills it on first use.
+	goFiles map[string]*goFileFacts
 }
 
 type parsedDirectives struct {
 	directives []goDirective
 	err        error
+}
+
+type parsedGoMod struct {
+	file *modfile.File
+	err  error
+}
+
+// goFileFacts is everything the scan needs of one Go file. Each file is read
+// once, and parsed up to the end of its imports once, for the header pack,
+// discovery and directives alike.
+type goFileFacts struct {
+	// readErr is why the file could not be read; nothing else is set then.
+	readErr error
+	// directives are the file's directive comments, or parseErr why it does
+	// not parse up to the end of its imports.
+	directives []goDirective
+	parseErr   error
+	// header is the file's entry in the header pack, with its mode, or
+	// headerErr why it has none.
+	header     []byte
+	headerMode fs.FileMode
+	headerErr  error
+	// kinds and tests are what the file marks its directory as in discovery.
+	kinds string
+	tests []string
+	// generates reports a go:generate command line, as go generate reads one.
+	generates bool
+}
+
+// goFileFacts returns what the scan needs of every Go file of every module.
+// The first call reads and parses them all at once, spread over the CPUs: one
+// pass over the whole workspace keeps every CPU busy, where a pass per module
+// would leave most of them idle on each of its many small modules.
+func (index *localIndex) goFileFacts() map[string]*goFileFacts {
+	if index.goFiles != nil {
+		return index.goFiles
+	}
+	var files []string
+	for _, root := range index.moduleRoots {
+		files = append(files, index.goFilesByModule[root]...)
+	}
+	facts := make([]*goFileFacts, len(files))
+	forEach(len(files), func(i int) {
+		facts[i] = readGoFile(filepath.Join(index.root, filepath.FromSlash(files[i])), files[i])
+	})
+	index.goFiles = make(map[string]*goFileFacts, len(files))
+	for i, file := range files {
+		index.goFiles[file] = facts[i]
+	}
+	return index.goFiles
+}
+
+// readGoFile reads one Go file, at full path full and workspace-relative path
+// rel.
+func readGoFile(full, rel string) *goFileFacts {
+	facts := &goFileFacts{headerMode: 0o644}
+	// A symlinked test file is in the header pack only for a //go:embed, and
+	// stays one, its target as its data, so the embed fails as go decides.
+	symlink := false
+	if strings.HasSuffix(rel, "_test.go") {
+		if fi, err := os.Lstat(full); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
+			symlink = true
+			target, err := os.Readlink(full)
+			facts.header, facts.headerMode, facts.headerErr = []byte(target), fs.ModeSymlink|0o777, err
+		}
+	}
+	data, err := os.ReadFile(full)
+	if err != nil {
+		facts.readErr = err
+		if !symlink {
+			facts.headerErr = err
+		}
+		return facts
+	}
+
+	// Only up to the end of the imports, as go/build reads a file: a syntax
+	// error after them is the compiler's to report, and the rest of the file
+	// is only searched, for directives and discovery's lines.
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, rel, data, parser.ImportsOnly|parser.SkipObjectResolution)
+	if err != nil {
+		facts.parseErr = err
+	} else {
+		facts.directives = directivesIn(rel, data)
+	}
+	if !symlink {
+		if err != nil {
+			// Kept whole, as goHeader keeps a file whose imports don't parse.
+			facts.header = data
+		} else {
+			facts.header = headerOf(fset, file, data)
+		}
+	}
+
+	facts.kinds, facts.tests = fileKinds(data, strings.HasSuffix(rel, "_test.go"))
+	for line := range strings.SplitSeq(string(data), "\n") {
+		if strings.HasPrefix(line, "//go:generate ") || strings.HasPrefix(line, "//go:generate\t") {
+			facts.generates = true
+			break
+		}
+	}
+	return facts
 }
 
 // indexLocal walks the snapshot once, recording modules and their Go files.
@@ -413,28 +535,22 @@ func (index *localIndex) directives(moduleRoot string) ([]goDirective, error) {
 	return directives, err
 }
 
-// parseDirectives parses every Go file belonging to a module root, the files
-// spread over the CPUs; the directives and the first error are in file order.
+// parseDirectives collects the directives of every Go file belonging to a
+// module root; the directives and the first error are in file order.
 func (index *localIndex) parseDirectives(moduleRoot string) ([]goDirective, error) {
 	files := index.goFilesByModule[moduleRoot]
 	sort.Strings(files)
 
-	perFile := make([][]goDirective, len(files))
-	errs := make([]error, len(files))
-	forEach(len(files), func(i int) {
-		data, err := os.ReadFile(filepath.Join(index.root, filepath.FromSlash(files[i])))
-		if err != nil {
-			errs[i] = err
-			return
-		}
-		perFile[i], errs[i] = goDirectivesInFile(files[i], data)
-	})
+	facts := index.goFileFacts()
 	var directives []goDirective
-	for i := range files {
-		if errs[i] != nil {
-			return nil, errs[i]
+	for _, file := range files {
+		if err := facts[file].readErr; err != nil {
+			return nil, err
 		}
-		directives = append(directives, perFile[i]...)
+		if err := facts[file].parseErr; err != nil {
+			return nil, err
+		}
+		directives = append(directives, facts[file].directives...)
 	}
 	return directives, nil
 }
@@ -467,11 +583,7 @@ func (index *localIndex) testDirectoriesFor(moduleRoot string) []string {
 // replaceModules resolves local go.mod replace targets to module roots.
 func (index *localIndex) replaceModules(moduleRoot string) ([]string, error) {
 	goModPath := path.Join(moduleRoot, "go.mod")
-	data, err := os.ReadFile(filepath.Join(index.root, filepath.FromSlash(goModPath)))
-	if err != nil {
-		return nil, err
-	}
-	goMod, err := parseGoMod(goModPath, data)
+	goMod, err := index.goMod(moduleRoot)
 	if err != nil {
 		return nil, err
 	}
