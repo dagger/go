@@ -4,12 +4,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
-	"go/ast"
 	"go/parser"
+	"go/scanner"
 	"go/token"
 	"io"
 	"os"
@@ -535,32 +536,116 @@ func (t targetModule) goDirectives(ctx context.Context) ([]goDirective, error) {
 	return directives, nil
 }
 
-// goDirectivesInFile extracts Go comment directives from one parsed Go file.
+// goDirectivesInFile extracts Go comment directives from one Go file. It
+// reads the file as go/build does: parsed only up to the end of its imports,
+// so a syntax error after them is the compiler's to report.
 func goDirectivesInFile(filePath string, data []byte) ([]goDirective, error) {
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, filePath, data, parser.ParseComments|parser.SkipObjectResolution)
-	if err != nil {
+	if _, err := parser.ParseFile(token.NewFileSet(), filePath, data, parser.ImportsOnly|parser.SkipObjectResolution); err != nil {
 		return nil, err
 	}
-	return directivesIn(fset, filePath, file), nil
+	return directivesIn(filePath, data), nil
 }
 
-// directivesIn returns the supported directive comments of a parsed Go file.
-func directivesIn(fset *token.FileSet, filePath string, file *ast.File) []goDirective {
+// directivesIn returns the supported directive comments of a Go file, in
+// source order, at the positions a parse gives them.
+//
+// It finds the comments without a parse, skipping strings, raw strings and
+// runes as go/build does when it looks for go:embed lines: a full parse cost
+// the scan most of its time. A //line or /*line comment moves the positions
+// after it, so a file that may hold one is scanned by go/scanner, which
+// applies them.
+func directivesIn(filePath string, src []byte) []goDirective {
+	if bytes.Contains(src, []byte("//line ")) || bytes.Contains(src, []byte("/*line ")) {
+		return scannedDirectives(filePath, src)
+	}
 	var directives []goDirective
-	for _, group := range file.Comments {
-		for _, comment := range group.List {
-			directive := goDirective{
-				filePath: filePath,
-				position: fset.Position(comment.Slash).String(),
-				comment:  comment.Text,
-			}
-			if directive.isEmbed() || directive.isTestInclude() || directive.isGenerateInclude() || directive.hasName("go:generate:container") || directive.isGenerate() {
+	var lines *token.File
+	lineComments(src, func(start, end int) {
+		text := src[start:end]
+		// The scanner drops a comment's carriage returns.
+		if bytes.IndexByte(text, '\r') >= 0 {
+			text = bytes.ReplaceAll(text, []byte("\r"), nil)
+		}
+		if !bytes.HasPrefix(text, []byte("//go:")) {
+			return
+		}
+		if lines == nil {
+			lines = token.NewFileSet().AddFile(filePath, -1, len(src))
+			lines.SetLinesForContent(src)
+		}
+		if directive, ok := supportedDirective(filePath, lines.Position(lines.Pos(start)), string(text)); ok {
+			directives = append(directives, directive)
+		}
+	})
+	return directives
+}
+
+// scannedDirectives is directivesIn for a file that may hold line directives.
+func scannedDirectives(filePath string, src []byte) []goDirective {
+	fset := token.NewFileSet()
+	var s scanner.Scanner
+	s.Init(fset.AddFile(filePath, -1, len(src)), src, nil, scanner.ScanComments)
+	var directives []goDirective
+	for {
+		pos, tok, lit := s.Scan()
+		if tok == token.EOF {
+			return directives
+		}
+		if tok == token.COMMENT {
+			if directive, ok := supportedDirective(filePath, fset.Position(pos), lit); ok {
 				directives = append(directives, directive)
 			}
 		}
 	}
-	return directives
+}
+
+func supportedDirective(filePath string, position token.Position, comment string) (goDirective, bool) {
+	directive := goDirective{
+		filePath: filePath,
+		position: position.String(),
+		comment:  comment,
+	}
+	ok := directive.isEmbed() || directive.isTestInclude() || directive.isGenerateInclude() || directive.hasName("go:generate:container") || directive.isGenerate()
+	return directive, ok
+}
+
+// lineComments calls yield with the offsets of each // comment in src, from
+// its first slash to the end of its line. Strings, raw strings, runes and
+// /* comments are skipped, so a // inside one is not a comment.
+func lineComments(src []byte, yield func(start, end int)) {
+	for i := 0; i < len(src); i++ {
+		switch src[i] {
+		case '"', '\'':
+			quote := src[i]
+			for i++; i < len(src) && src[i] != quote && src[i] != '\n'; i++ {
+				if src[i] == '\\' {
+					i++
+				}
+			}
+		case '`':
+			for i++; i < len(src) && src[i] != '`'; i++ {
+			}
+		case '/':
+			if i+1 == len(src) {
+				return
+			}
+			switch src[i+1] {
+			case '/':
+				end := bytes.IndexByte(src[i:], '\n')
+				if end < 0 {
+					end = len(src) - i
+				}
+				yield(i, i+end)
+				i += end
+			case '*':
+				end := bytes.Index(src[i+2:], []byte("*/"))
+				if end < 0 {
+					return
+				}
+				i += 2 + end + 1
+			}
+		}
+	}
 }
 
 // goDirective is one supported Go line directive comment.
