@@ -189,8 +189,13 @@ type Go {
   # Workspace paths of the Go modules at or below the working directory, and of
   # the module the working directory is inside.
   let moduleRootsHere(ws: Workspace!): [String!]! {
+    moduleRootsAmong(ws, discoveryLines(ws))
+  }
+
+  # moduleRootsHere from discovery lines already read.
+  let moduleRootsAmong(ws: Workspace!, lines: [String!]!): [String!]! {
     let cwd = ws.cwd.trimPrefix("/").trimSuffix("/")
-    let roots = discoveryLines(ws).filter { line => line.hasPrefix("module\t") }.map { line => lineField(line, 1) }
+    let roots = lines.filter { line => line.hasPrefix("module\t") }.map { line => lineField(line, 1) }
     if (cwd == "" or cwd == ".") {
       roots
     } else {
@@ -276,24 +281,29 @@ type Go {
   # or go:generate commands the generate setting selects.
   let packageKeys(ws: Workspace!): [String!]! {
     let empty: [String!]! = []
-    let roots = moduleRootsHere(ws)
+    # Read once and split once per line: each read and each field taken is
+    # work for every package line, which counts on every build.
+    let lines = discoveryLines(ws)
+    let roots = moduleRootsAmong(ws, lines)
     let generateAll = generate.length == 1 and generate.contains("**")
     let included = generate.filter { p => p.hasPrefix("!") == false }
     let excluded = generate.filter { p => p.hasPrefix("!") }.map { p => p.trimPrefix("!") }
     let includeDirs = if (generateAll) { empty } else { matchingDirectories(ws, included) }
     let excludeDirs = if (generateAll) { empty } else { matchingDirectories(ws, excluded) }
-    discoveryLines(ws)
-      .filter { line => line.hasPrefix("package\t") and roots.contains(lineField(line, 1)) }
-      .filter { line =>
-        let root = lineField(line, 1)
-        let dir = lineField(line, 2)
-        let kinds = lineField(line, 3)
+    lines
+      .filter { line => line.hasPrefix("package\t") }
+      .map { line => line.split("\t") }
+      .filter { fields => roots.contains(fields[1]!) }
+      .filter { fields =>
+        let root = fields[1]!
+        let dir = fields[2]!
+        let kinds = fields[3]!
         let key = pathIn(root, dir)
         (hasKind(kinds, "t") and selectedBy(root, test))
           or (hasKind(kinds, "m") and buildSelected(root, dir))
           or (hasKind(kinds, "g") and (generateAll or ((included.length == 0 or includeDirs.contains(key)) and excludeDirs.contains(key) == false)))
       }
-      .map { line => pathIn(lineField(line, 1), lineField(line, 2)) }
+      .map { fields => pathIn(fields[1]!, fields[2]!) }
       .uniq
   }
 
