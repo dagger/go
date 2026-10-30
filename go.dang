@@ -327,7 +327,8 @@ type Go {
   """
   packages(ws: Workspace!): GoPackages! {
     GoPackages(
-      paths: sorted(packageKeys(ws)),
+      # In byte order already: discovery lists packages by workspace path.
+      paths: packageKeys(ws),
       mountPath: workspaceMountPath(ws),
       tool: self,
     )
@@ -337,33 +338,6 @@ type Go {
   # that the collection needs no workspace.
   let packageModule(ws: Workspace!, pkgPath: String!, mount: String!): GoModule! {
     goModuleAt(moduleRootOf(ws, pkgPath), mount)
-  }
-
-  # Byte-order sort, as Go's sort.Strings: a merge sort, n log n comparisons.
-  let sorted(items: [String!]!): [String!]! {
-    if (items.length < 2) {
-      items
-    } else {
-      let half = items.length / 2
-      mergeSorted(sorted(items.takeFirst(half)), sorted(items.dropFirst(half)))
-    }
-  }
-
-  # Merges two byte-ordered lists into one.
-  let mergeSorted(a: [String!]!, b: [String!]!): [String!]! {
-    let i = 0
-    let j = 0
-    (a + b).map { unused =>
-      if (j == b.length or (i < a.length and a[i]! <= b[j]!)) {
-        let item = a[i]!
-        i += 1
-        item
-      } else {
-        let item = b[j]!
-        j += 1
-        item
-      }
-    }
   }
 
   """

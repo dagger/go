@@ -220,3 +220,38 @@ func TestHeaderPackHoldsEmbeddable(t *testing.T) {
 		t.Errorf("the test file symlink is not in the pack as one:\n%s", pack)
 	}
 }
+
+// Discovery lists every module, then every package in byte order of its
+// workspace path, across modules: the go module lists packages in that order
+// without sorting them.
+func TestDiscoveryListsPackagesByWorkspacePath(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"go.mod":        "module example.com/root\n\ngo 1.25\n",
+		"z/main.go":     "package main\n\nfunc main() {}\n",
+		"a/a_test.go":   "package a\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) {}\n",
+		"m/go.mod":      "module example.com/m\n\ngo 1.25\n",
+		"m/main.go":     "package main\n\nfunc main() {}\n",
+		"m/b/gen.go":    "package b\n\n//go:generate go run .\n",
+		"m-x/go.mod":    "module example.com/mx\n\ngo 1.25\n",
+		"m-x/m_test.go": "package mx\n\nimport \"testing\"\n\nfunc TestM(t *testing.T) {}\n",
+	})
+	output := t.TempDir()
+	if err := runAll([]string{"--all", "--root", root, "--output-dir", output}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(output, discoveryFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "module\t.\texample.com/root\t1.25\n" +
+		"module\tm-x\texample.com/mx\t1.25\n" +
+		"module\tm\texample.com/m\t1.25\n" +
+		"package\t.\ta\tt\n" +
+		"package\tm\t.\tm\n" +
+		"package\tm-x\t.\tt\n" +
+		"package\tm\tb\tg\n" +
+		"package\t.\tz\tm\n"
+	if got := string(data); got != want {
+		t.Errorf("discovery:\n got: %q\nwant: %q", got, want)
+	}
+}
