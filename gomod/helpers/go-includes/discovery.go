@@ -16,8 +16,10 @@ import (
 //	module	<root>	<module path>	<go version>
 //	package	<root>	<module-relative directory>	<kinds>
 //
-// There is a module line for every module the scan accepts, followed by a
-// package line for each of its package directories with something to do.
+// There is a module line for every module the scan accepts, then a package
+// line for each of their package directories with something to do, in byte
+// order of the directory's workspace path, so a reader lists packages in that
+// order without sorting them.
 // kinds holds "t" when a _test.go file there declares a test, fuzz or example
 // function, "m" when a non-test file is package main without an ignore build
 // tag, and "g" when a file has a go:generate line. The files are the module's
@@ -42,6 +44,8 @@ var (
 func (index *localIndex) writeDiscovery(outPath string) error {
 	var out strings.Builder
 	var testNames strings.Builder
+	type packageLine struct{ key, line string }
+	var packages []packageLine
 	for _, root := range index.goModules() {
 		modPath := ""
 		goModPath := path.Join(root, "go.mod")
@@ -70,18 +74,18 @@ func (index *localIndex) writeDiscovery(outPath string) error {
 				}
 			}
 		}
-		dirs := make([]string, 0, len(kinds))
 		for dir, k := range kinds {
-			if k != "" {
-				dirs = append(dirs, dir)
+			if k == "" {
+				continue
 			}
+			sorted := []byte(k)
+			sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+			packages = append(packages, packageLine{path.Join(root, dir), "package\t" + root + "\t" + dir + "\t" + string(sorted) + "\n"})
 		}
-		sort.Strings(dirs)
-		for _, dir := range dirs {
-			k := []byte(kinds[dir])
-			sort.Slice(k, func(i, j int) bool { return k[i] < k[j] })
-			out.WriteString("package\t" + root + "\t" + dir + "\t" + string(k) + "\n")
-		}
+	}
+	sort.Slice(packages, func(i, j int) bool { return packages[i].key < packages[j].key })
+	for _, p := range packages {
+		out.WriteString(p.line)
 	}
 	if err := os.WriteFile(outPath, []byte(out.String()), 0o644); err != nil {
 		return err

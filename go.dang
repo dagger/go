@@ -688,7 +688,8 @@ type GoModule {
   Packages owned by this module. Nested Go modules have their own collection.
   """
   packages(ws: Workspace!): GoPackages! {
-    let paths = tool.sorted(tool.packageKeys(ws, path))
+    # In byte order already: discovery lists packages by workspace path.
+    let paths = tool.packageKeys(ws, path)
     GoPackages(
       paths: paths,
       mountPath: mountPath,
