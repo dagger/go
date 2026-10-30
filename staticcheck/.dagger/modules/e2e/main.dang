@@ -232,8 +232,10 @@ type E2e {
     )
     run(staticcheck(goVersion: "1.26").project(ws, configuredPath).lint(ws))
 
-    # A toolchain newer than gomod's tool builder: Staticcheck built with the
-    # builder's Go could not read this one's standard library.
+    # The newest Go, the tool builder's own. A toolchain newer than the
+    # builder's gets Staticcheck built with it instead, since Staticcheck built
+    # with an older Go could not read its standard library; no released Go is
+    # newer than the builder's to check that with.
     run(staticcheck(goVersion: "1.27").project(ws, configuredPath).lint(ws))
     null
   }
