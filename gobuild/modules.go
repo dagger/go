@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -20,7 +21,8 @@ import (
 // changes only that module's packages and what imports them. A package
 // mounts each module it reads whole, so its C and assembly can include any
 // file of the module, which the plan never names, and nothing is selected
-// file by file.
+// file by file. What no build of a module reads, its tests and testdata,
+// is left out (testExclude), unless the plan reads it.
 type modules struct {
 	// root is where they are, GOMODCACHE.
 	root string
@@ -30,6 +32,12 @@ type modules struct {
 	// sums holds the checksum of each module the build downloaded, by its
 	// directory name, as the go command recorded it in the module cache.
 	sums map[string]string
+	// keep holds, by module directory name, the files the build reads that
+	// testExclude leaves out, as patterns that put them back: a
+	// dependency's tests that go test -c compiles, or a file a package
+	// embeds from testdata. A module the build reads none of those from,
+	// nearly every one, extracts the same in every build.
+	keep map[string][]string
 
 	mu   sync.Mutex
 	dirs map[string]*dagger.Directory
@@ -55,12 +63,69 @@ func (m *modules) dir(name string) *dagger.Directory {
 	zip := m.all.File(path.Join("cache/download", name[:at], "@v", name[at+1:]+".zip"))
 	// The zip holds the module's files under "<module>@<version>/", the
 	// module path not escaped.
-	d := zip.Extract().Directory(unescapeModule(name))
+	exclude := append(slices.Clone(testExclude), m.keep[name]...)
+	d := zip.Extract(dagger.FileExtractOpts{Exclude: exclude}).Directory(unescapeModule(name))
 	if m.dirs == nil {
 		m.dirs = map[string]*dagger.Directory{}
 	}
 	m.dirs[name] = d
 	return d
+}
+
+// testExclude matches what a module holds that building it never reads: its
+// tests, and its testdata directories, which the go command ignores. In
+// some modules they are most of the files.
+var testExclude = []string{"**/*_test.go", "**/testdata"}
+
+// keepRead records in m.keep the files blocks read from downloaded modules
+// that testExclude would leave out of their extraction.
+func (m *modules) keepRead(blocks map[string]*block) {
+	m.keep = map[string][]string{}
+	for _, b := range blocks {
+		for _, f := range b.modFiles {
+			name := m.downloaded(f)
+			if name == "" {
+				continue
+			}
+			// A directory the plan reads whole is put back whole.
+			rel := strings.TrimSuffix(strings.TrimPrefix(f, name+"/"), "/**")
+			if !testExcluded(rel) {
+				continue
+			}
+			pattern := "!" + unescapeModule(name) + "/" + escapePattern(rel)
+			m.keep[name] = appendUniq(m.keep[name], pattern)
+		}
+	}
+	for _, patterns := range m.keep {
+		sort.Strings(patterns)
+	}
+}
+
+// testExcluded reports whether testExclude matches rel, a path in a module,
+// or a directory it is in.
+func testExcluded(rel string) bool {
+	if strings.HasSuffix(rel, "_test.go") {
+		return true
+	}
+	for _, elem := range strings.Split(rel, "/") {
+		if elem == "testdata" {
+			return true
+		}
+	}
+	return false
+}
+
+// escapePattern escapes what a path pattern would read as a wildcard, or as
+// an escape, so the pattern matches p alone.
+func escapePattern(p string) string {
+	var b strings.Builder
+	for _, c := range p {
+		if strings.ContainsRune(`*?[]\`, c) {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(c)
+	}
+	return b.String()
 }
 
 // downloaded is the downloaded module a file, relative to the module cache,
