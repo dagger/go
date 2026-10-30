@@ -88,10 +88,17 @@ type GolangciLint {
     exclude: [String!]! = [],
     includeSkipLint: Boolean! = false,
   ): GolangciLintProjects! {
+    # The selection goes to the library rather than filtering its result, so
+    # skipped roots are dropped before their modules are scoped.
+    let everything: [String!]! = []
     GolangciLintProjects(
-      paths: lib
-        .projectRoots(ws, configNames, include: include, exclude: exclude)
-        .filter { root => includeSkipLint or goProject(root).skipLint == false },
+      paths: lib.projectRoots(
+        ws,
+        configNames,
+        include: include,
+        exclude: exclude,
+        select: if (includeSkipLint) { everything } else { lint },
+      ),
       tool: self,
     )
   }

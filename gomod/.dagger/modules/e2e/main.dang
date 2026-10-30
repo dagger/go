@@ -113,6 +113,12 @@ type E2e {
     let roots = gomod.projectRoots(ws, markers)
     assert(roots.contains(projectsPath), "a marker above its modules did not root a project")
     assert(roots.contains(projectsPath + "/notes") == false, "a marker with no Go code rooted a project")
+    let selected = gomod.projectRoots(ws, markers, select: ["!" + projectsPath + "/inner"])
+    assert(selected.contains(projectsPath), "a selection dropped a root it does not exclude")
+    assert(
+      selected.contains(projectsPath + "/inner/quiet") == false,
+      "a selection kept a root below an excluded path",
+    )
     assert(
       gomod.projectRoot(ws, projectsPath + "/inner/quiet", markers) == projectsPath + "/inner/quiet",
       "lookup passed over the nearest marker",
