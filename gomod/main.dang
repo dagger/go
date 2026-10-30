@@ -112,19 +112,27 @@ type Gomod {
   A linter's configuration applies to the directory it sits in and everything
   below, so that directory is the natural unit to lint, whatever Go modules it
   happens to cross.
+
+  `select` takes a tool's selection patterns, as `GoMod.selected` reads them.
+  Roots they leave out are dropped before their Go modules are worked out,
+  which takes several workspace calls per root: a vendor tree full of
+  dependencies' own linter configs would otherwise cost those calls for every
+  one of them.
   """
   projectRoots(
     ws: Workspace!,
     markers: [String!]!,
     include: [String!]! = [],
     exclude: [String!]! = [],
+    select: [String!]! = [],
   ): [String!]! {
     ws
       .findRoots(markers: markers)
       .map { root => workspaceRootPath(ws, root) }
       .uniq
-      .filter { root => projectScopes(ws, root, markers).length > 0 }
+      .filter { root => at(root).selected(select) }
       .filter { root => pathIncluded(ws, root, include, exclude) }
+      .filter { root => projectScopes(ws, root, markers).length > 0 }
   }
 
   """
