@@ -273,11 +273,50 @@ type Gomod {
         # wins that back (see go-includes/main.go).
         .withExec(["go", "build", "-gcflags=std=-l", "-o", "/usr/local/bin/go-includes", "."])
         .sync,
-      source: ws.directory("/", include: ["**/*.go", "**/go.mod"]).sync,
+      source: goSource(ws).sync,
     }}
     parts.helper
       .withMountedDirectory("/ws", parts.source)
       .withWorkdir("/ws")
+  }
+
+  """
+  Include patterns for every file in the workspace that a Go build can need
+  and that its name alone picks out: Go files, cgo and assembly sources,
+  go.mod, go.sum and the rest of a module's includeBase, at any depth.
+  """
+  goSourceInclude: [String!]! = [
+    "**/*.go",
+    "**/*.c",
+    "**/*.cc",
+    "**/*.cpp",
+    "**/*.cxx",
+    "**/*.h",
+    "**/*.hh",
+    "**/*.hpp",
+    "**/*.hxx",
+    "**/*.s",
+    "**/*.S",
+    "**/*.syso",
+    "**/go.mod",
+    "**/go.sum",
+    "go.work",
+    "go.work.sum",
+    "vendor/modules.txt",
+    "**/default.pgo",
+  ]
+
+  """
+  The workspace's files that goSourceInclude matches.
+
+  The scan reads it, and so does every module's source, so a build reads them
+  from the client once: the engine answers a repeated workspace read from the
+  same session without reading again. A module's source reads again only the
+  patterns this doesn't cover, such as its embedded files, whose patterns name
+  the directories they are in, so that read skips the rest of the workspace.
+  """
+  goSource(ws: Workspace!): Directory! {
+    ws.directory("/", include: goSourceInclude)
   }
 
   """
@@ -798,7 +837,7 @@ type GoMod {
         .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
         .withExec(["go", "build", "-gcflags=std=-l", "-o", "/usr/local/bin/go-includes", "."])
         .sync,
-      source: ws.directory("/", include: ["**/*.go", "**/go.mod"]).sync,
+      source: ws.directory("/", include: gomod.goSourceInclude).sync,
     }}
     parts.helper
       .withMountedDirectory("/ws", parts.source)
@@ -1009,7 +1048,30 @@ type GoMod {
     generate: Boolean! = false,
     extra: [String!]! = [],
   ): Directory! {
-    ws.directory("/", include: include(ws, test: test, generate: generate, extra: extra))
+    let goSourceInclude = gomod.goSourceInclude
+    let patterns = include(ws, test: test, generate: generate, extra: extra)
+    let covered = patterns.filter { p => coveredByGoSource(goSourceInclude, p) }
+    let rest = patterns.filter { p => coveredByGoSource(goSourceInclude, p) == false }
+    let goSource = ws.directory("/", include: goSourceInclude)
+    # Every pattern goSource was read with is among covered at the workspace
+    # root, so goSource is already that selection.
+    let own = if (goSourceInclude.all { p => covered.contains(p) }) {
+      goSource
+    } else {
+      goSource.filter(include: covered)
+    }
+    if (rest.length == 0) { own } else { own.withDirectory(".", ws.directory("/", include: rest)) }
+  }
+
+  # Whether every path the include pattern p matches is one goSource holds:
+  # p is one of its patterns, or its last element is the last element of one
+  # of its "**/" patterns, which matches that name at any depth. A "!" pattern
+  # excludes rather than selects, so it is never covered.
+  let coveredByGoSource(goSourceInclude: [String!]!, p: String!): Boolean! {
+    p.hasPrefix("!") == false and (goSourceInclude.contains(p) or goSourceInclude.any { g =>
+      let name = g.trimPrefix("**/")
+      g.hasPrefix("**/") and (p == name or p.hasSuffix("/" + name))
+    })
   }
 
   """
