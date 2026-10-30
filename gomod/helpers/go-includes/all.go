@@ -65,11 +65,11 @@ func moduleOutputFile(moduleRoot, suffix string) string {
 // reads only its own slice instead of re-scanning a combined blob.
 //
 // A module whose inputs cannot be computed -- an unreadable go.mod, a Go file
-// that will not parse -- records the reason in its own .err file, and the scan
-// carries on to the next module. One scan serves every tool in the workspace,
-// so failing the whole pass here would let a single bad module stop every
-// other module's checks. The tools read the reason back and raise it only when
-// something actually asks for that module's sources.
+// whose imports will not parse -- records the reason in its own .err file,
+// and the scan carries on to the next module. One scan serves every tool in
+// the workspace, so failing the whole pass here would let a single bad module
+// stop every other module's checks. The tools read the reason back and raise
+// it only when something actually asks for that module's sources.
 func (index *localIndex) writeAllDir(dir string, test, generate bool) error {
 	if err := writeModuleOutput(dir, "_modules_", linesWithTrailer(index.goModules())); err != nil {
 		return err
@@ -283,12 +283,13 @@ type parsedDirectives struct {
 }
 
 // goFileFacts is everything the scan needs of one Go file. Each file is read
-// and parsed once, for the header pack, discovery and directives alike.
+// once, and parsed up to the end of its imports once, for the header pack,
+// discovery and directives alike.
 type goFileFacts struct {
 	// readErr is why the file could not be read; nothing else is set then.
 	readErr error
 	// directives are the file's directive comments, or parseErr why it does
-	// not parse.
+	// not parse up to the end of its imports.
 	directives []goDirective
 	parseErr   error
 	// header is the file's entry in the header pack, with its mode, or
@@ -326,8 +327,8 @@ func (index *localIndex) goFileFacts() map[string]*goFileFacts {
 	return index.goFiles
 }
 
-// readGoFile reads and parses one Go file, at full path full and
-// workspace-relative path rel.
+// readGoFile reads one Go file, at full path full and workspace-relative path
+// rel.
 func readGoFile(full, rel string) *goFileFacts {
 	facts := &goFileFacts{headerMode: 0o644}
 	// A symlinked test file is in the header pack only for a //go:embed, and
@@ -349,18 +350,20 @@ func readGoFile(full, rel string) *goFileFacts {
 		return facts
 	}
 
+	// Only up to the end of the imports, as go/build reads a file: a syntax
+	// error after them is the compiler's to report, and the rest of the file
+	// is only searched, for directives and discovery's lines.
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, rel, data, parser.ParseComments|parser.SkipObjectResolution)
+	file, err := parser.ParseFile(fset, rel, data, parser.ImportsOnly|parser.SkipObjectResolution)
 	if err != nil {
 		facts.parseErr = err
 	} else {
-		facts.directives = directivesIn(fset, rel, file)
+		facts.directives = directivesIn(rel, data)
 	}
 	if !symlink {
 		if err != nil {
-			// The header is read as go/build reads it, up to the end of the
-			// imports, so an error after them still leaves a header.
-			facts.header = goHeader(rel, data)
+			// Kept whole, as goHeader keeps a file whose imports don't parse.
+			facts.header = data
 		} else {
 			facts.header = headerOf(fset, file, data)
 		}

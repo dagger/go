@@ -787,10 +787,10 @@ type GoMod {
   Why this module's inputs could not be worked out, or null when they could.
 
   The scan covers every module in the workspace at once, so a module it cannot
-  read -- an unreadable go.mod, a Go file that will not parse -- records the
-  reason rather than failing the pass: one bad module must not stop every other
-  module's checks. The reason names the file, and anything that asks this
-  module for sources raises it.
+  read -- an unreadable go.mod, a Go file whose imports will not parse --
+  records the reason rather than failing the pass: one bad module must not stop
+  every other module's checks. The reason names the file, and anything that
+  asks this module for sources raises it.
 
   Read it directly when a caller would otherwise have to ask a question about a
   module it is never going to run, such as whether it holds generators.
