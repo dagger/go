@@ -1051,8 +1051,9 @@ type GoMod {
     let goSourceInclude = gomod.goSourceInclude
     let patterns = include(ws, test: test, generate: generate, extra: extra)
     # A "!" pattern takes back files the patterns before it selected, which
-    # only one read of the whole list in order does.
-    if (patterns.any { p => p.trimSpace.hasPrefix("!") }) {
+    # only one read of the whole list in order does. Any "!" counts: Dagger
+    # cleans a pattern's path before it looks for one, so "./!a.go" is "!a.go".
+    if (patterns.any { p => p.contains("!") }) {
       ws.directory("/", include: patterns)
     } else {
       let covered = patterns.filter { p => coveredByGoSource(goSourceInclude, p) }
