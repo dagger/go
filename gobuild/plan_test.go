@@ -858,6 +858,39 @@ func TestParseSums(t *testing.T) {
 	}
 }
 
+// A module's tests and testdata are left out of its extraction, but for
+// what the build reads: a dependency's test files, compiled by go test -c,
+// or a file embedded from testdata, put back by a pattern that names just
+// it, in the zip's unescaped module path.
+func TestKeepRead(t *testing.T) {
+	m := &modules{sums: map[string]string{
+		"github.com/!burnt!sushi/toml@v1.2.0": "h1:abc=",
+		"golang.org/x/sys@v0.30.0":            "h1:def=",
+	}}
+	m.keepRead(map[string]*block{
+		"b001": {modFiles: []string{
+			"github.com/!burnt!sushi/toml@v1.2.0/decode.go",
+			"github.com/!burnt!sushi/toml@v1.2.0/decode_test.go",
+			"github.com/!burnt!sushi/toml@v1.2.0/testdata/[x].toml",
+		}},
+		"b002": {modFiles: []string{
+			"golang.org/x/sys@v0.30.0/unix/syscall.go",
+			"golang.org/x/sys@v0.30.0/unix/testdata/inc/**",
+			"cache/download/golang.org/x/sys/@v/list",
+		}},
+	})
+	want := map[string][]string{
+		"github.com/!burnt!sushi/toml@v1.2.0": {
+			"!github.com/BurntSushi/toml@v1.2.0/decode_test.go",
+			`!github.com/BurntSushi/toml@v1.2.0/testdata/\[x\].toml`,
+		},
+		"golang.org/x/sys@v0.30.0": {"!golang.org/x/sys@v0.30.0/unix/testdata/inc"},
+	}
+	if !reflect.DeepEqual(m.keep, want) {
+		t.Errorf("keep = %q, want %q", m.keep, want)
+	}
+}
+
 // A plan of many packages for their archives keeps each main package's
 // compile and leaves out its link, from its import config on: no block
 // links, and a main package depends on what it imports, not on what its
