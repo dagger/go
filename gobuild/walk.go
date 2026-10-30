@@ -54,6 +54,31 @@ func toNode(b *block, blocks map[string]*block, conc string) *node {
 	return n
 }
 
+// toNodes renders every block but a PGO profile's for a walk. Rendering
+// the scripts is most of gobuild's own time before the walk starts, ~0.15 s
+// for dagger's CLI one after another, and each package's is its own: they're
+// rendered at once.
+func toNodes(blocks map[string]*block, outside map[string]bool, weights map[string]int64) map[string]*node {
+	nodes := map[string]*node{}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for id, bl := range blocks {
+		if bl.isProfile {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			n := toNode(bl, blocks, compileC(outside[id], weights[id]))
+			mu.Lock()
+			nodes[id] = n
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	return nodes
+}
+
 // walker runs a set of nodes, one exec each, each after its dependencies.
 type walker struct {
 	base  *dagger.Container
@@ -97,7 +122,8 @@ func packageConcurrency() int {
 
 type result struct {
 	file *dagger.File
-	// dir is the package's evaluated work directory, which holds file.
+	// dir is the package's work directory, which holds file: evaluated, but
+	// for the link's.
 	dir  *dagger.Directory
 	err  error // set before done closes; dependents read it
 	done chan struct{}
@@ -179,6 +205,14 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 				slots.acquire(w.heights[id])
 			}
 			defer slots.release()
+			if n.Link {
+				// No exec reads the link's output, so it is read from the
+				// unevaluated directory: keyed by its content, it would cost
+				// a hash of the whole binary on every link.
+				r.dir = ran.Directory("/work/" + n.Name)
+				r.file, r.err = r.dir.File(n.Output).Sync(ctx)
+				return
+			}
 			// Evaluate the output directory first, then read the file from
 			// it: only a file read from an evaluated directory is keyed by its
 			// content, so a package whose archive came out unchanged leaves

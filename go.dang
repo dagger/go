@@ -1202,6 +1202,24 @@ type GoModule {
     out
   }
 
+  # One main package's binary, named name, built as buildOutputs builds it.
+  # It is read from the directory before that is evaluated: read from an
+  # evaluated directory, a file is keyed by its content, which costs a hash of
+  # the whole binary.
+  let buildFile(ws: Workspace!, platform: String!, pkg: String!, name: String!): File! {
+    let ctr = platformBase(ws, platform)
+    let flags = buildFlags + (ctr.envVariable("GOFLAGS") ?? "").split(" ").filter { f => f != "" }
+    let out = if (gccgo(flags)) {
+      wholeBuild(ws, ctr, pkg, name).file(name)
+    } else {
+      perPackageBuild(ws, ctr, pkg, name).file(name)
+    }
+    out.sync rescue {
+      err: Error => raise "Go binary " + packagePath(pkg) + " for " + platform + ": " + err.message
+    }
+    out
+  }
+
   # Whether go build flags, with GOFLAGS, pick the gccgo compiler.
   let gccgo(flags: [String!]!): Boolean! {
     flags.any { f => f == "-compiler=gccgo" or f == "--compiler=gccgo" }
@@ -1271,17 +1289,23 @@ type GoModule {
   # One package's binary for a platform. Only a main package selected by the
   # build setting has one.
   let binaryFile(ws: Workspace!, platform: String!, pkgPath: String!): File! {
-    binaryOutputs(ws, platform, pkgPath).file(binaryFileName(ws, pkgPath, platform))
+    buildFile(ws, platform, selectedMain(ws, pkgPath), binaryFileName(ws, pkgPath, platform))
   }
 
   # One package's binary for a platform with what go build writes next to
   # it: the C header of a c-archive or c-shared build.
   let binaryOutputs(ws: Workspace!, platform: String!, pkgPath: String!): Directory! {
+    buildOutputs(ws, platform, selectedMain(ws, pkgPath), binaryFileName(ws, pkgPath, platform))
+  }
+
+  # A package's directory relative to the module, which must be a main
+  # package selected by the build setting.
+  let selectedMain(ws: Workspace!, pkgPath: String!): String! {
     let rel = relativeDir(pkgPath)
     if (binaryPackages(ws).contains(rel) == false) {
       raise "Go package " + pkgPath + " is not a main package selected by build"
     }
-    buildOutputs(ws, platform, rel, binaryFileName(ws, pkgPath, platform))
+    rel
   }
 
   # One package's test binary for a platform, named as go test -c names it.
