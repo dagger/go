@@ -858,36 +858,57 @@ func TestParseSums(t *testing.T) {
 	}
 }
 
-// A module's tests and testdata are left out of its extraction, but for
-// what the build reads: a dependency's test files, compiled by go test -c,
-// or a file embedded from testdata, put back by a pattern that names just
-// it, in the zip's unescaped module path.
-func TestKeepRead(t *testing.T) {
+// A module's tests and testdata are left out of its extraction, by
+// patterns under its directory in the zip, but for what the build reads:
+// a dependency's test files, compiled by go test -c, a file embedded from
+// testdata, or a directory read whole, each put back by a pattern that
+// names just it. A module read whole, for its C or assembly, is extracted
+// whole.
+func TestExcludeUnread(t *testing.T) {
 	m := &modules{sums: map[string]string{
-		"github.com/!burnt!sushi/toml@v1.2.0": "h1:abc=",
-		"golang.org/x/sys@v0.30.0":            "h1:def=",
+		"github.com/!burnt!sushi/toml@v1.2.0": "h1:a=",
+		"golang.org/x/sys@v0.30.0":            "h1:b=",
+		"example.com/testdata/lib@v1.0.0":     "h1:c=",
+		"example.com/incdep@v1.0.0":           "h1:d=",
 	}}
-	m.keepRead(map[string]*block{
+	m.excludeUnread(map[string]*block{
 		"b001": {modFiles: []string{
 			"github.com/!burnt!sushi/toml@v1.2.0/decode.go",
 			"github.com/!burnt!sushi/toml@v1.2.0/decode_test.go",
 			"github.com/!burnt!sushi/toml@v1.2.0/testdata/[x].toml",
+			"github.com/!burnt!sushi/toml@v1.2.0/fixtures_test.go/value.go",
 		}},
 		"b002": {modFiles: []string{
 			"golang.org/x/sys@v0.30.0/unix/syscall.go",
-			"golang.org/x/sys@v0.30.0/unix/testdata/inc/**",
+			"golang.org/x/sys@v0.30.0/cpu/**",
 			"cache/download/golang.org/x/sys/@v/list",
+		}},
+		"b003": {modFiles: []string{"example.com/testdata/lib@v1.0.0/lib.go"}},
+		"b004": {modFiles: []string{
+			"example.com/incdep@v1.0.0/asm/value_amd64.s",
+			"example.com/incdep@v1.0.0/**",
 		}},
 	})
 	want := map[string][]string{
 		"github.com/!burnt!sushi/toml@v1.2.0": {
+			"github.com/BurntSushi/toml@v1.2.0/**/*_test.go",
+			"github.com/BurntSushi/toml@v1.2.0/**/testdata",
 			"!github.com/BurntSushi/toml@v1.2.0/decode_test.go",
+			"!github.com/BurntSushi/toml@v1.2.0/fixtures_test.go/value.go",
 			`!github.com/BurntSushi/toml@v1.2.0/testdata/\[x\].toml`,
 		},
-		"golang.org/x/sys@v0.30.0": {"!golang.org/x/sys@v0.30.0/unix/testdata/inc"},
+		"golang.org/x/sys@v0.30.0": {
+			"golang.org/x/sys@v0.30.0/**/*_test.go",
+			"golang.org/x/sys@v0.30.0/**/testdata",
+			"!golang.org/x/sys@v0.30.0/cpu/**",
+		},
+		"example.com/testdata/lib@v1.0.0": {
+			"example.com/testdata/lib@v1.0.0/**/*_test.go",
+			"example.com/testdata/lib@v1.0.0/**/testdata",
+		},
 	}
-	if !reflect.DeepEqual(m.keep, want) {
-		t.Errorf("keep = %q, want %q", m.keep, want)
+	if !reflect.DeepEqual(m.exclude, want) {
+		t.Errorf("exclude = %q, want %q", m.exclude, want)
 	}
 }
 
