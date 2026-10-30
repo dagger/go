@@ -164,14 +164,9 @@ type Go {
   let lib: Gomod! { gomod(includeExtraFiles: includeExtraFiles) }
 
   # The scan's package discovery, which gomod's scanner writes in its one pass
-  # over every Go file (go-includes, discovery.go): a "module" line per Go
-  # module, then a "package" line per package directory with something to do.
-  # Reading it replaces a search, glob or field read per result.
-  let discoveryLines(ws: Workspace!): [String!]! {
-    lib.scan(ws).file("_discovery_").contents.split("\n").filter { line => line != "" }
-  }
-
-  # A small index points at one immutable catalogue file per module.
+  # over every Go file (go-includes, discovery.go): a small index of the
+  # modules, pointing at one catalogue file per module. Reading it replaces a
+  # search, glob or field read per result.
   let discoveryIndex(ws: Workspace!): JSONValue! {
     lib.scan(ws).file("_discovery_index_.json").asJSON
   }
@@ -185,6 +180,8 @@ type Go {
     lib.scan(ws).file("_discovery_modules_/" + `${ordinal}` + ".json").asJSON
   }
 
+  # A module's "module" line, then a "package" line per package directory
+  # with something to do.
   let moduleDiscoveryLines(ws: Workspace!, root: String!): [String!]! {
     let empty: [String!]! = []
     if (moduleRoots(ws).contains(root)) {
@@ -195,6 +192,8 @@ type Go {
     }
   }
 
+  # A module's package directories, each with its test names in file and
+  # source order.
   let modulePackageRecords(ws: Workspace!, root: String!): [{{directory: String!, tests: [String!]!}}!]! {
     let empty: [{{directory: String!, tests: [String!]!}}!]! = []
     if (moduleRoots(ws).contains(root)) {
@@ -477,12 +476,11 @@ type GoPackages @collection {
   entries: [GoPackageSelection!]!
 
   package(path: String!): GoPackage! @get {
-    let selected = entries.filter { entry => entry.directory == path }
     GoPackage(
       path: path,
       mountPath: mountPath,
       tool: tool,
-      selectedTests: if (selected.length == 0) { null } else { selected[0]!.tests },
+      selectedTests: entries.filter { entry => entry.directory == path }[0]!.tests,
     )
   }
 
@@ -553,7 +551,7 @@ type GoPackage {
 
   let tool: Go!
 
-  let selectedTests: GoTests
+  let selectedTests: GoTests!
 
   let module(ws: Workspace!): GoModule! {
     tool.packageModule(ws, path, mountPath)
@@ -562,15 +560,7 @@ type GoPackage {
   """
   Tests in this package, keyed by name.
   """
-  tests(ws: Workspace!): GoTests! {
-    if (selectedTests != null) {
-      selectedTests!
-    } else {
-      let mod = module(ws)
-      let dir = mod.relativeDir(path)
-      GoTests(names: mod.testNames(ws, dir), directory: dir, module: mod)
-    }
-  }
+  tests(ws: Workspace!): GoTests! { selectedTests }
 
   """
   This package's binary for the engine's platform. It must be a main package.
@@ -947,7 +937,7 @@ type GoModule {
     if (declared == "") { null } else { declared }
   }
 
-  # The scan's package discovery: see Go.discoveryLines.
+  # This module's discovery lines: see Go.moduleDiscoveryLines.
   let discoveryLines(ws: Workspace!): [String!]! {
     tool.moduleDiscoveryLines(ws, path)
   }
@@ -996,25 +986,6 @@ type GoModule {
       pkgPath
     } else {
       pkgPath.trimPrefix(path + "/")
-    }
-  }
-
-  # Manual package operations also accept directories that discovery omits.
-  # Keep their empty-list behavior when there is no indexed package record.
-  let testNames(ws: Workspace!, dir: String!): [String!]! {
-    let empty: [String!]! = []
-    if (skipTest) {
-      empty
-    } else {
-      let prefix = packagePath(dir) + "\t"
-      lib
-        .scan(ws)
-        .file("_testnames_")
-        .contents
-        .split("\n")
-        .filter { line => line.hasPrefix(prefix) }
-        .map { line => line.trimPrefix(prefix) }
-        .uniq
     }
   }
 

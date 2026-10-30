@@ -11,28 +11,15 @@ import (
 	"strings"
 )
 
-// discoveryFile names the scan's package discovery: what the go module needs
-// to list and build a workspace's packages, found in this one pass over the
-// files instead of an engine search, glob or field read per result.
-//
-//	module	<root>	<module path>	<go version>
-//	package	<root>	<module-relative directory>	<kinds>
-//
-// There is a module line for every module the scan accepts, then a package
-// line for each of their package directories with something to do, in byte
-// order of the directory's workspace path, so a reader lists packages in that
-// order without sorting them.
-// kinds holds "t" when a _test.go file there declares a test, fuzz or example
-// function, "m" when a non-test file is package main without an ignore build
-// tag, and "g" when a file has a go:generate line. The files are the module's
-// own, as packageFiles lists them, and each line is matched on its own, as a
-// search would.
-const discoveryFile = "_discovery_"
-
-// Test names in file and source order, keyed by workspace-relative package
-// directory. Keeping these alongside discovery avoids searching the entire
-// module and reading every match again for each package's test collection.
-const testNamesFile = "_testnames_"
+// discoveryCatalogFile names the scan's package discovery: what the go module
+// needs to list and build a workspace's packages, found in this one pass over
+// the files instead of an engine search, glob or field read per result. It is
+// a small index of the modules the scan accepts, each pointing at its own
+// catalogue in discoveryModulesDir, so a consumer reads only its module's data
+// rather than the workspace's entire test catalogue. Ordinals name the
+// catalogue files, rather than arbitrary module paths.
+const discoveryCatalogFile = "_discovery_index_.json"
+const discoveryModulesDir = "_discovery_modules_"
 
 var (
 	// The go module's test search pattern, with ripgrep's Unicode \w spelled
@@ -43,14 +30,10 @@ var (
 	generateLine = regexp.MustCompile(`^//go:generate\s.*$`)
 )
 
-func (index *localIndex) writeDiscovery(outPath string) error {
-	var out strings.Builder
-	var testNames strings.Builder
-	type packageLine struct{ key, line string }
-	var packages []packageLine
+func (index *localIndex) writeDiscovery(outDir string) error {
 	roots := append([]string{}, index.goModules()...)
 	catalog := discoveryCatalog{Roots: roots, Modules: map[string]int{}}
-	moduleDir := filepath.Join(filepath.Dir(outPath), discoveryModulesDir)
+	moduleDir := filepath.Join(outDir, discoveryModulesDir)
 	if err := os.MkdirAll(moduleDir, 0o755); err != nil {
 		return err
 	}
@@ -61,7 +44,6 @@ func (index *localIndex) writeDiscovery(outPath string) error {
 		if goMod, err := index.goMod(root); err == nil {
 			modPath = goMod.Module.Mod.Path
 		}
-		out.WriteString("module\t" + root + "\t" + modPath + "\t" + index.goVersion(root) + "\n")
 		moduleDiscovery.WriteString("module\t" + root + "\t" + modPath + "\t" + index.goVersion(root) + "\n")
 		kinds := map[string]string{}
 		packageTests := map[string][]string{}
@@ -74,10 +56,7 @@ func (index *localIndex) writeDiscovery(outPath string) error {
 				continue
 			}
 			dir := path.Dir(moduleRelative(root, file))
-			for _, name := range facts.tests {
-				testNames.WriteString(path.Dir(file) + "\t" + name + "\n")
-				packageTests[dir] = append(packageTests[dir], name)
-			}
+			packageTests[dir] = append(packageTests[dir], facts.tests...)
 			for _, c := range facts.kinds {
 				if !strings.ContainsRune(kinds[dir], c) {
 					kinds[dir] += string(c)
@@ -97,10 +76,8 @@ func (index *localIndex) writeDiscovery(outPath string) error {
 		for _, dir := range dirs {
 			k := []byte(kinds[dir])
 			sort.Slice(k, func(i, j int) bool { return k[i] < k[j] })
-			line := "package\t" + root + "\t" + dir + "\t" + string(k) + "\n"
+			moduleDiscovery.WriteString("package\t" + root + "\t" + dir + "\t" + string(k) + "\n")
 			pkg := path.Join(root, dir)
-			packages = append(packages, packageLine{pkg, line})
-			moduleDiscovery.WriteString(line)
 			names := append([]string{}, packageTests[dir]...)
 			module.Packages = append(module.Packages, discoveryPackage{Directory: pkg, Tests: names})
 		}
@@ -114,34 +91,32 @@ func (index *localIndex) writeDiscovery(outPath string) error {
 		}
 		catalog.Modules[root] = ordinal
 	}
-	sort.Slice(packages, func(i, j int) bool { return packages[i].key < packages[j].key })
-	for _, p := range packages {
-		out.WriteString(p.line)
-	}
-	if err := os.WriteFile(outPath, []byte(out.String()), 0o644); err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(filepath.Dir(outPath), testNamesFile), []byte(testNames.String()), 0o644); err != nil {
-		return err
-	}
 	data, err := json.Marshal(catalog)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(filepath.Dir(outPath), discoveryCatalogFile), data, 0o644)
+	return os.WriteFile(filepath.Join(outDir, discoveryCatalogFile), data, 0o644)
 }
 
-const discoveryCatalogFile = "_discovery_index_.json"
-const discoveryModulesDir = "_discovery_modules_"
-
-// The index is small regardless of the number of tests. A consumer reads only
-// its module's data, rather than decoding the workspace's entire test catalogue.
-// Ordinals avoid turning arbitrary module paths into output file names.
+// The index is small regardless of the number of tests.
 type discoveryCatalog struct {
 	Roots   []string       `json:"roots"`
 	Modules map[string]int `json:"modules"`
 }
 
+// A module's catalogue. Its lines are
+//
+//	module	<root>	<module path>	<go version>
+//	package	<root>	<module-relative directory>	<kinds>
+//
+// a module line, followed by a package line for each of its package
+// directories with something to do. kinds holds "t" when a _test.go file there
+// declares a test, fuzz or example function, "m" when a non-test file is
+// package main without an ignore build tag, and "g" when a file has a
+// go:generate line. The files are the module's own, as packageFiles lists
+// them, and each line is matched on its own, as a search would. Packages
+// holds the same directories as workspace paths, in that order, each with its
+// test names in file and source order.
 type discoveryModule struct {
 	Lines    []string           `json:"lines"`
 	Packages []discoveryPackage `json:"packages"`
@@ -153,7 +128,7 @@ type discoveryPackage struct {
 }
 
 // fileKinds is what one Go file marks its directory as: "t", "m" and "g", as
-// discoveryFile describes them, and the test names encountered in source order.
+// discoveryModule describes them, and the test names encountered in source order.
 // Each pattern is anchored on a literal prefix, so a line without it is
 // passed over before any match is tried.
 func fileKinds(src []byte, test bool) (string, []string) {

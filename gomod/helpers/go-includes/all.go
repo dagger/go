@@ -79,7 +79,7 @@ func (index *localIndex) writeAllDir(dir string, test, generate bool) error {
 	if err := index.writeHeaderPack(filepath.Join(dir, headerPackFile)); err != nil {
 		return err
 	}
-	if err := index.writeDiscovery(filepath.Join(dir, discoveryFile)); err != nil {
+	if err := index.writeDiscovery(dir); err != nil {
 		return err
 	}
 	for _, moduleRoot := range index.moduleRoots {

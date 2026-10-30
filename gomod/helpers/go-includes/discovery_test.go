@@ -120,15 +120,17 @@ func TestWrong(n int) {}
 	if err := runAll([]string{"--all", "--root", root, "--output-dir", output}); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(filepath.Join(output, testNamesFile))
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := ".\tTestZ\n.\tFuzzé\n.\tExample\nsub\tTestZ\n.\tTest中文\n.\tTestZ\nnested\tTestNested\n"
-	if string(data) != want {
-		t.Fatalf("test index lost file/source order or module boundaries:\n got: %q\nwant: %q", data, want)
-	}
 	catalog := readDiscoveryCatalog(t, output)
+	// testdata, _ignored and vendored directories hold no packages.
+	for module, want := range map[string][]string{".": {".", "sub"}, "nested": {"nested"}} {
+		var dirs []string
+		for _, pkg := range catalog.Packages[module] {
+			dirs = append(dirs, pkg.Directory)
+		}
+		if !slices.Equal(dirs, want) {
+			t.Errorf("module %q packages = %q; want %q", module, dirs, want)
+		}
+	}
 	for _, tc := range []struct{ pkg, module, names string }{
 		{".", ".", "TestZ\nFuzzé\nExample\nTest中文\nTestZ"},
 		{"sub", ".", "TestZ"},
@@ -323,10 +325,10 @@ func TestUnreadableFileStaysInItsModule(t *testing.T) {
 		}
 		return string(data)
 	}
-	discovery := read(discoveryFile)
-	for _, want := range []string{"package\ta\t.\tm\n", "package\tb\t.\tm\n"} {
-		if !strings.Contains(discovery, want) {
-			t.Errorf("discovery lost %q:\n%s", want, discovery)
+	catalog := readDiscoveryCatalog(t, output)
+	for _, root := range []string{"a", "b"} {
+		if want := "package\t" + root + "\t.\tm"; !slices.Contains(catalog.Modules[root], want) {
+			t.Errorf("discovery lost %q: %q", want, catalog.Modules[root])
 		}
 	}
 	if pack := read(headerPackFile); !strings.Contains(pack, "a/main.go\n") || !strings.Contains(pack, "b/main.go\n") {
@@ -379,37 +381,3 @@ func TestHeaderPackHoldsEmbeddable(t *testing.T) {
 	}
 }
 
-// Discovery lists every module, then every package in byte order of its
-// workspace path, across modules: the go module lists packages in that order
-// without sorting them.
-func TestDiscoveryListsPackagesByWorkspacePath(t *testing.T) {
-	root := writeTree(t, map[string]string{
-		"go.mod":        "module example.com/root\n\ngo 1.25\n",
-		"z/main.go":     "package main\n\nfunc main() {}\n",
-		"a/a_test.go":   "package a\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) {}\n",
-		"m/go.mod":      "module example.com/m\n\ngo 1.25\n",
-		"m/main.go":     "package main\n\nfunc main() {}\n",
-		"m/b/gen.go":    "package b\n\n//go:generate go run .\n",
-		"m-x/go.mod":    "module example.com/mx\n\ngo 1.25\n",
-		"m-x/m_test.go": "package mx\n\nimport \"testing\"\n\nfunc TestM(t *testing.T) {}\n",
-	})
-	output := t.TempDir()
-	if err := runAll([]string{"--all", "--root", root, "--output-dir", output}); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(filepath.Join(output, discoveryFile))
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := "module\t.\texample.com/root\t1.25\n" +
-		"module\tm-x\texample.com/mx\t1.25\n" +
-		"module\tm\texample.com/m\t1.25\n" +
-		"package\t.\ta\tt\n" +
-		"package\tm\t.\tm\n" +
-		"package\tm-x\t.\tt\n" +
-		"package\tm\tb\tg\n" +
-		"package\t.\tz\tm\n"
-	if got := string(data); got != want {
-		t.Errorf("discovery:\n got: %q\nwant: %q", got, want)
-	}
-}
