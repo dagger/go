@@ -1050,28 +1050,33 @@ type GoMod {
   ): Directory! {
     let goSourceInclude = gomod.goSourceInclude
     let patterns = include(ws, test: test, generate: generate, extra: extra)
-    let covered = patterns.filter { p => coveredByGoSource(goSourceInclude, p) }
-    let rest = patterns.filter { p => coveredByGoSource(goSourceInclude, p) == false }
-    let goSource = ws.directory("/", include: goSourceInclude)
-    # Every pattern goSource was read with is among covered at the workspace
-    # root, so goSource is already that selection.
-    let own = if (goSourceInclude.all { p => covered.contains(p) }) {
-      goSource
+    # A "!" pattern takes back files the patterns before it selected, which
+    # only one read of the whole list in order does.
+    if (patterns.any { p => p.trimSpace.hasPrefix("!") }) {
+      ws.directory("/", include: patterns)
     } else {
-      goSource.filter(include: covered)
+      let covered = patterns.filter { p => coveredByGoSource(goSourceInclude, p) }
+      let rest = patterns.filter { p => coveredByGoSource(goSourceInclude, p) == false }
+      let goSource = ws.directory("/", include: goSourceInclude)
+      # Every pattern goSource was read with is among covered at the workspace
+      # root, so goSource is already that selection.
+      let own = if (goSourceInclude.all { p => covered.contains(p) }) {
+        goSource
+      } else {
+        goSource.filter(include: covered)
+      }
+      if (rest.length == 0) { own } else { own.withDirectory(".", ws.directory("/", include: rest)) }
     }
-    if (rest.length == 0) { own } else { own.withDirectory(".", ws.directory("/", include: rest)) }
   }
 
   # Whether every path the include pattern p matches is one goSource holds:
   # p is one of its patterns, or its last element is the last element of one
-  # of its "**/" patterns, which matches that name at any depth. A "!" pattern
-  # excludes rather than selects, so it is never covered.
+  # of its "**/" patterns, which matches that name at any depth.
   let coveredByGoSource(goSourceInclude: [String!]!, p: String!): Boolean! {
-    p.hasPrefix("!") == false and (goSourceInclude.contains(p) or goSourceInclude.any { g =>
+    goSourceInclude.contains(p) or goSourceInclude.any { g =>
       let name = g.trimPrefix("**/")
       g.hasPrefix("**/") and (p == name or p.hasSuffix("/" + name))
-    })
+    }
   }
 
   """

@@ -228,6 +228,10 @@ type E2e {
       "caller-supplied extra pattern was not mounted",
     )
     assert(
+      mod.source(ws, extra: ["!" + embedPath + "/embed_test.go"]).glob("**/*").contains(embedPath + "/embed_test.go") == false,
+      "a negated extra pattern did not take back a Go file",
+    )
+    assert(
       mod.testData(ws).file(embedPath + "/testdata/fixture.txt").contents.contains("mounted from testdata"),
       "testdata was not mounted",
     )
