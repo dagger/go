@@ -48,11 +48,8 @@ func (index *localIndex) writeDiscovery(outPath string) error {
 	var packages []packageLine
 	for _, root := range index.goModules() {
 		modPath := ""
-		goModPath := path.Join(root, "go.mod")
-		if data, err := os.ReadFile(filepath.Join(index.root, filepath.FromSlash(goModPath))); err == nil {
-			if goMod, err := parseGoMod(goModPath, data); err == nil {
-				modPath = goMod.Module.Mod.Path
-			}
+		if goMod, err := index.goMod(root); err == nil {
+			modPath = goMod.Module.Mod.Path
 		}
 		out.WriteString("module\t" + root + "\t" + modPath + "\t" + index.goVersion(root) + "\n")
 		kinds := map[string]string{}

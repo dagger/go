@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"golang.org/x/mod/modfile"
 )
 
 // runAll computes includes for every module in one local pass over a mounted
@@ -142,12 +144,7 @@ func (index *localIndex) goModules() []string {
 // bumped to a patch Docker has not published yet would otherwise stop the
 // module being checked at all.
 func (index *localIndex) goVersion(moduleRoot string) string {
-	goModPath := path.Join(moduleRoot, "go.mod")
-	data, err := os.ReadFile(filepath.Join(index.root, filepath.FromSlash(goModPath)))
-	if err != nil {
-		return ""
-	}
-	goMod, err := parseGoMod(goModPath, data)
+	goMod, err := index.goMod(moduleRoot)
 	if err != nil || goMod.Go == nil {
 		return ""
 	}
@@ -166,18 +163,34 @@ func minorSeries(version string) string {
 // moduleSkipReason says why a directory holding a go.mod is not a Go module a
 // tool can work on, or "" when it is one.
 func (index *localIndex) moduleSkipReason(moduleRoot string) string {
-	goModPath := path.Join(moduleRoot, "go.mod")
-	data, err := os.ReadFile(filepath.Join(index.root, filepath.FromSlash(goModPath)))
-	if err != nil {
-		return err.Error()
-	}
-	if _, err := parseGoMod(goModPath, data); err != nil {
+	if _, err := index.goMod(moduleRoot); err != nil {
 		return err.Error()
 	}
 	if len(index.packageFiles(moduleRoot)) == 0 {
-		return goModPath + ": module holds no Go files"
+		return path.Join(moduleRoot, "go.mod") + ": module holds no Go files"
 	}
 	return ""
+}
+
+// goMod returns a module root's go.mod, read and parsed the first time it is
+// asked for: every module's go.mod is read for discovery, its Go version and
+// its local replaces, and a module that many others replace into, such as a
+// repository's root, is read for each of them.
+func (index *localIndex) goMod(moduleRoot string) (*modfile.File, error) {
+	if p, ok := index.goMods[moduleRoot]; ok {
+		return p.file, p.err
+	}
+	goModPath := path.Join(moduleRoot, "go.mod")
+	data, err := os.ReadFile(filepath.Join(index.root, filepath.FromSlash(goModPath)))
+	var file *modfile.File
+	if err == nil {
+		file, err = parseGoMod(goModPath, data)
+	}
+	if index.goMods == nil {
+		index.goMods = map[string]parsedGoMod{}
+	}
+	index.goMods[moduleRoot] = parsedGoMod{file, err}
+	return file, err
 }
 
 // packageFiles returns the module's Go files that Go itself would look at.
@@ -272,6 +285,8 @@ type localIndex struct {
 	// parsed holds each module's directives once read: a module that several
 	// others reach through local replaces is parsed once, not once for each.
 	parsed map[string]parsedDirectives
+	// goMods holds each module's go.mod once read, for the same reason.
+	goMods map[string]parsedGoMod
 	// goFiles holds what the scan needs of each Go file, keyed by
 	// workspace-relative path; goFileFacts fills it on first use.
 	goFiles map[string]*goFileFacts
@@ -280,6 +295,11 @@ type localIndex struct {
 type parsedDirectives struct {
 	directives []goDirective
 	err        error
+}
+
+type parsedGoMod struct {
+	file *modfile.File
+	err  error
 }
 
 // goFileFacts is everything the scan needs of one Go file. Each file is read
@@ -563,11 +583,7 @@ func (index *localIndex) testDirectoriesFor(moduleRoot string) []string {
 // replaceModules resolves local go.mod replace targets to module roots.
 func (index *localIndex) replaceModules(moduleRoot string) ([]string, error) {
 	goModPath := path.Join(moduleRoot, "go.mod")
-	data, err := os.ReadFile(filepath.Join(index.root, filepath.FromSlash(goModPath)))
-	if err != nil {
-		return nil, err
-	}
-	goMod, err := parseGoMod(goModPath, data)
+	goMod, err := index.goMod(moduleRoot)
 	if err != nil {
 		return nil, err
 	}
