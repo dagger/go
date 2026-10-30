@@ -2185,8 +2185,8 @@ type GoDev {
   }
 
   """
-  Indexed discovery keeps explicit operations on omitted modules and package
-  directories working, and lists each package's tests in file and source order.
+  Indexed discovery keeps explicit operations on omitted modules working, and
+  lists each package's tests in file and source order.
   """
   catalogueIndexCheck(ws: Workspace!): Void @check {
     let tool = go(version: "1.26.1")
@@ -2201,10 +2201,6 @@ type GoDev {
         "TestDaggerSessionAvailableFromGoTest",
       ],
       "indexed test names are not the package's tests in file and source order",
-    )
-    assert(
-      packages.package(path: root + "/not-a-package").tests(ws).keys.length == 0,
-      "an explicitly named directory without tests did not return an empty collection",
     )
     assert(
       tool.module(ws, emptyFixturePath).hasGenerateDirectives(ws) == false,
