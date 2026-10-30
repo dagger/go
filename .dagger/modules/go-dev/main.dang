@@ -2225,6 +2225,19 @@ type GoDev {
       buildOnly.get(key: ".").tests(skipped).keys.length == 0,
       "a build-only package offered skipped test names",
     )
+    # A module's own directory sorts first among its package paths, though
+    # "-tools" sorts before "." as a module-relative directory.
+    let dashed = directory
+      .withNewFile("m/go.mod", "module example.com/m\n\ngo 1.26.1\n")
+      .withNewFile("m/m_test.go", "package m\nimport \"testing\"\nfunc TestRoot(t *testing.T) {}\n")
+      .withNewFile("m/-tools/t_test.go", "package tools\nimport \"testing\"\nfunc TestTools(t *testing.T) {}\n")
+      .asWorkspace
+    let dashedPackages = tool.module(dashed, "m").packages(dashed)
+    assert(dashedPackages.keys == ["m", "m/-tools"], "a module's packages were not listed in path order")
+    assert(
+      dashedPackages.get(key: "m/-tools").tests(dashed).keys == ["TestTools"],
+      "a package after the module's own directory lost its tests",
+    )
     null
   }
 }

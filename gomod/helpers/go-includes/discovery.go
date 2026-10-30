@@ -90,7 +90,10 @@ func (index *localIndex) writeDiscovery(outPath string) error {
 				dirs = append(dirs, dir)
 			}
 		}
-		sort.Strings(dirs)
+		// In workspace-path order, which go.dang's package selection merges
+		// against: there the module's own directory sorts first, while among
+		// relative directories "-tools" would sort before ".".
+		sort.Slice(dirs, func(i, j int) bool { return path.Join(root, dirs[i]) < path.Join(root, dirs[j]) })
 		for _, dir := range dirs {
 			k := []byte(kinds[dir])
 			sort.Slice(k, func(i, j int) bool { return k[i] < k[j] })

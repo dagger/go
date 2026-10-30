@@ -169,6 +169,28 @@ func TestDiscoveryIndexKeepsPackageKeysDistinct(t *testing.T) {
 	}
 }
 
+// A module's own directory is its first package in workspace-path order, even
+// beside a directory whose relative name sorts before ".".
+func TestDiscoveryIndexOrdersNestedModuleByWorkspacePath(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"m/go.mod":              "module example.com/m\n\ngo 1.26.1\n",
+		"m/m_test.go":           "package m\nimport \"testing\"\nfunc TestRoot(t *testing.T) {}\n",
+		"m/-tools/t_test.go":    "package tools\nimport \"testing\"\nfunc TestTools(t *testing.T) {}\n",
+		"m/tools/tools_test.go": "package tools\nimport \"testing\"\nfunc TestMore(t *testing.T) {}\n",
+	})
+	output := t.TempDir()
+	if err := runAll([]string{"--all", "--root", root, "--output-dir", output}); err != nil {
+		t.Fatal(err)
+	}
+	var paths []string
+	for _, pkg := range readDiscoveryCatalog(t, output).Packages["m"] {
+		paths = append(paths, pkg.Directory)
+	}
+	if want := []string{"m", "m/-tools", "m/tools"}; !slices.Equal(paths, want) {
+		t.Errorf("package records = %q; want %q", paths, want)
+	}
+}
+
 type completeDiscoveryCatalog struct {
 	Roots    []string
 	Modules  map[string][]string
