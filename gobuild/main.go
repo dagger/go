@@ -361,7 +361,7 @@ func (b *build) walk(ctx context.Context, blocks map[string]*block, weights map[
 	if err := mods.expandLoose(ctx, blocks); err != nil {
 		return nil, err
 	}
-	mods.keepRead(blocks)
+	mods.excludeUnread(blocks)
 	heights := heightsOf(blocks, weights)
 	mods.fetch(ctx, blocks, heights)
 	// Go 1.25 and later run "go tool pack" for packages with assembly, the
