@@ -35,6 +35,12 @@ const toolImage = "golang:1.26-alpine"
 // exec is stopped whole.
 var bare = dagger.ContainerWithExecOpts{DisableDaggerInDagger: true, NoInit: true}
 
+// pkgExec is bare for a package's own exec, its compile and link, which also
+// asks for transparent huge pages: the compiler's heap grows into fresh
+// memory, and on a host set to "always" huge pages save it most of its page
+// faults. Elsewhere it changes nothing.
+var pkgExec = dagger.ContainerWithExecOpts{DisableDaggerInDagger: true, NoInit: true, TransparentHugePages: true}
+
 // Binary builds the main package pkg as "go build" would and returns a
 // directory holding the binary, named output, and for a c-archive or
 // c-shared build the C header go build writes next to it. The binary's Go
