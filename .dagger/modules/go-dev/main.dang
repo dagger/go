@@ -1872,4 +1872,18 @@ type GoDev {
     }
     null
   }
+
+  """
+  gobuild's own unit tests: the build plan's parsing and scripts, and its
+  in-container gohdr tool.
+  """
+  gobuildCheck(ws: Workspace!): Void @check {
+    container
+      .from("golang:1.26.1-alpine")
+      .withDirectory("/src", ws.directory("/gobuild"))
+      .withWorkdir("/src")
+      .withExec(["go", "test", "./..."])
+      .sync
+    null
+  }
 }
