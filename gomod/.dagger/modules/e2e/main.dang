@@ -325,15 +325,18 @@ type E2e {
   }
 
   """
-  The source scanner's own unit tests.
+  The unit tests of the library's helpers: the source scanner and the test
+  report indexer.
   """
   helperCheck(ws: Workspace!): Void @check {
-    gomod
-      .withGoCaches(container.from("golang:" + gomod.scannerVersion + "-alpine"))
-      .withDirectory("/src", ws.directory("/" + helperPath))
-      .withWorkdir("/src")
-      .withExec(["go", "test", "./..."])
-      .sync
+    [helperPath, "gomod/helpers/go-test-report"].map { helper =>
+      gomod
+        .withGoCaches(container.from("golang:" + gomod.scannerVersion + "-alpine"))
+        .withDirectory("/src", ws.directory("/" + helper))
+        .withWorkdir("/src")
+        .withExec(["go", "test", "./..."])
+        .sync
+    }
     null
   }
 }
