@@ -244,7 +244,7 @@ type GoDev {
     let tool = go(version: "1.27.3")
     let packages = tool.modules(ws).get(key: modPath).packages(ws)
     assert(containsPath(packages.keys, modPath), "package discovery missed " + modPath)
-    let tests = packages.get(key: modPath).tests(ws)
+    let tests = packages.get(key: modPath).tests
     let missing = [
       "TestFixtureFromTestdata",
       "TestGoTestIncludeAnnotation",
@@ -306,16 +306,16 @@ type GoDev {
       found.keys == [".", "examples", "sub"],
       "static package discovery found: " + found.keys.join(", "),
     )
-    let rootNames = found.get(key: ".").tests(rooted).keys
+    let rootNames = found.get(key: ".").tests.keys
     assert(
       rootNames == ["TestAlpha", "FuzzAlpha", "ExampleAlpha"],
       "static test discovery found: " + rootNames.join(", "),
     )
-    let subNames = found.get(key: "sub").tests(rooted).keys
+    let subNames = found.get(key: "sub").tests.keys
     assert(subNames == ["TestBeta", "TestAlpha"], "static test discovery in sub found: " + subNames.join(", "))
-    let exampleNames = found.get(key: "examples").tests(rooted).keys
+    let exampleNames = found.get(key: "examples").tests.keys
     assert(exampleNames == ["Example"], "an examples-only package found: " + exampleNames.join(", "))
-    let nestedNames = go(version: "1.27.3").modules(rooted).get(key: "nested").packages(rooted).get(key: "nested").tests(rooted).keys
+    let nestedNames = go(version: "1.27.3").modules(rooted).get(key: "nested").packages(rooted).get(key: "nested").tests.keys
     assert(nestedNames == ["TestNested"], "the nested module's package found: " + nestedNames.join(", "))
 
     # The same name in two packages runs only where it was selected, and a
@@ -327,10 +327,10 @@ type GoDev {
       .asWorkspace
     let sharedTool = go(version: "1.27.3")
     let sharedPackages = sharedTool.modules(shared).get(key: ".").packages(shared)
-    sharedPackages.get(key: ".").tests(shared).subset(keys: ["TestShared"]).test(shared)
+    sharedPackages.get(key: ".").tests.subset(keys: ["TestShared"]).test(shared)
     let failed = {
       run(
-        sharedPackages.get(key: "sub").tests(shared).get(key: "TestShared").test(
+        sharedPackages.get(key: "sub").tests.get(key: "TestShared").test(
           shared,
           selection: sharedTool.modules(shared).get(key: ".").packages(shared).subset(keys: ["sub"]),
         ),
@@ -676,7 +676,7 @@ type GoDev {
     }.filter { failure => failure != "" }
     # Other shapes fail on purpose, so the test-file embed runs on its own.
     let tested = {
-      tool.modules(ws).get(key: ".").packages(ws).get(key: "lib").tests(ws).test(ws)
+      tool.modules(ws).get(key: ".").packages(ws).get(key: "lib").tests.test(ws)
       ""
     } rescue {
       err: Error => "lib tests (Go " + version + "): " + err.message
@@ -884,7 +884,7 @@ type GoDev {
       .withExec(["generic"])
       .stdout
     assert(out == "42\n", "the binary printed: " + out)
-    packages.get(key: "box").tests(ws).test(ws)
+    packages.get(key: "box").tests.test(ws)
     null
   }
 
@@ -2209,22 +2209,22 @@ type GoDev {
       .asWorkspace
     let plain = go.module(fixture, "c").packages(fixture)
     assert(
-      plain.get(key: "c").tests(fixture).keys == ["TestBuilt", "TestNoRace"],
+      plain.get(key: "c").tests.keys == ["TestBuilt", "TestNoRace"],
       "discovery listed tests go test does not run",
     )
     let tagged = go(version: "1.26.1", goflags: "-count=1\t-tags=integration").module(fixture, "c").packages(fixture)
     assert(
-      tagged.get(key: "c").tests(fixture).keys == ["TestBuilt", "TestNewerGo", "TestNoRace", "TestTagged"],
+      tagged.get(key: "c").tests.keys == ["TestBuilt", "TestNewerGo", "TestNoRace", "TestTagged"],
       "discovery did not follow the configured Go version and goflags",
     )
     let based = go(base: cgoCxxBase.withEnvVariable("GOFLAGS", "-count=1\n-tags=integration")).module(fixture, "c").packages(fixture)
     assert(
-      based.get(key: "c").tests(fixture).keys == ["TestBuilt", "TestCgo", "TestNewerGo", "TestNoRace", "TestTagged"],
+      based.get(key: "c").tests.keys == ["TestBuilt", "TestCgo", "TestNewerGo", "TestNoRace", "TestTagged"],
       "discovery did not follow the custom base's toolchain, cgo and GOFLAGS",
     )
     let raced = go(base: cgoCxxBase, goflags: "-race").module(fixture, "c").packages(fixture)
     assert(
-      raced.get(key: "c").tests(fixture).keys == ["TestBuilt", "TestCgo", "TestNewerGo", "TestRace"],
+      raced.get(key: "c").tests.keys == ["TestBuilt", "TestCgo", "TestNewerGo", "TestRace"],
       "discovery did not follow -race's build tag",
     )
     null
@@ -2238,7 +2238,7 @@ type GoDev {
     let tool = go(version: "1.26.1")
     let root = "testdata/go-module-with-testdata"
     let packages = tool.module(ws, root).packages(ws)
-    let indexed = packages.get(key: root).tests(ws).keys
+    let indexed = packages.get(key: root).tests.keys
     assert(
       indexed == [
         "TestGoEmbedAssets",
@@ -2264,7 +2264,7 @@ type GoDev {
     let buildOnly = go(version: "1.26.1", test: ["!**"]).module(skipped, ".").packages(skipped)
     assert(buildOnly.keys == ["."], "skipping tests removed a selected build package")
     assert(
-      buildOnly.get(key: ".").tests(skipped).keys.length == 0,
+      buildOnly.get(key: ".").tests.keys.length == 0,
       "a build-only package offered skipped test names",
     )
     # A module's own directory sorts first among its package paths, though
@@ -2277,7 +2277,7 @@ type GoDev {
     let dashedPackages = tool.module(dashed, "m").packages(dashed)
     assert(dashedPackages.keys == ["m", "m/-tools"], "a module's packages were not listed in path order")
     assert(
-      dashedPackages.get(key: "m/-tools").tests(dashed).keys == ["TestTools"],
+      dashedPackages.get(key: "m/-tools").tests.keys == ["TestTools"],
       "a package after the module's own directory lost its tests",
     )
     null

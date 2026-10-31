@@ -500,7 +500,7 @@ type GoPackages @collection {
       path: path,
       mountPath: mountPath,
       tool: tool,
-      selectedTests: entries.filter { entry => entry.directory == path }[0]!.tests,
+      tests: entries.filter { entry => entry.directory == path }[0]!.tests,
     )
   }
 
@@ -571,8 +571,6 @@ type GoPackage {
 
   let tool: Go!
 
-  let selectedTests: GoTests!
-
   let module(ws: Workspace!): GoModule! {
     tool.packageModule(ws, path, mountPath)
   }
@@ -580,7 +578,7 @@ type GoPackage {
   """
   Tests in this package, keyed by name.
   """
-  tests(ws: Workspace!): GoTests! { selectedTests }
+  tests: GoTests!
 
   """
   This package's binary for the engine's platform. It must be a main package.
