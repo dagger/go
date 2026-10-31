@@ -168,7 +168,27 @@ type Go {
   # modules, pointing at one catalogue file per module. Reading it replaces a
   # search, glob or field read per result.
   let discoveryIndex(ws: Workspace!): JSONValue! {
-    lib.scan(ws).file("_discovery_index_.json").asJSON
+    discoveryScan(ws).file("_discovery_index_.json").asJSON
+  }
+
+  # The scan, discovering the tests go test builds as the test containers are
+  # configured. With no settings to pass, it is the one scan every module and
+  # tool shares. The default containers have no C compiler, so no cgo.
+  let discoveryScan(ws: Workspace!): Directory! {
+    if (base == null) {
+      lib.scan(ws, goflags: goflags ?? "", goVersion: version ?? "")
+    } else {
+      let env = baseGoEnv
+      lib.scan(ws, goflags: env.GOFLAGS, goVersion: env.GOVERSION, cgo: env.CGO_ENABLED == "1")
+    }
+  }
+
+  # A custom base brings its own toolchain, C compiler and GOFLAGS, so ask its
+  # go, with goflags over the image's GOFLAGS.
+  let baseGoEnv: {{GOVERSION: String!, CGO_ENABLED: String!, GOFLAGS: String!}}! {
+    let probed = if (goflags == null) { base! } else { base!.withEnvVariable("GOFLAGS", goflags!) }
+    let env = probed.withoutEntrypoint.withExec(["go", "env", "-json", "GOVERSION", "CGO_ENABLED", "GOFLAGS"]).stdout
+    JSON.decode(env) :: {{GOVERSION: String!, CGO_ENABLED: String!, GOFLAGS: String!}}!
   }
 
   let moduleRoots(ws: Workspace!): [String!]! {
@@ -177,7 +197,7 @@ type Go {
 
   let moduleDiscovery(ws: Workspace!, root: String!): JSONValue! {
     let ordinal = JSON.decode(`${discoveryIndex(ws).field(path: ["modules", root]).contents}`) :: Int!
-    lib.scan(ws).file("_discovery_modules_/" + `${ordinal}` + ".json").asJSON
+    discoveryScan(ws).file("_discovery_modules_/" + `${ordinal}` + ".json").asJSON
   }
 
   # A module's "module" line, then a "package" line per package directory

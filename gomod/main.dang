@@ -281,11 +281,29 @@ type Gomod {
     ws: Workspace!,
     test: Boolean! = false,
     generate: Boolean! = false,
+    """
+    GOFLAGS go test runs with. Discovery lists only the tests go test builds,
+    so it needs their build tags.
+    """
+    goflags: String! = "",
+    """
+    The Go toolchain go test runs with, when not each module's go.mod version.
+    """
+    goVersion: String! = "",
+    """
+    Whether go test builds with cgo.
+    """
+    cgo: Boolean! = false,
   ): Directory! {
     let testFlags = if (test) { ["--test"] } else { [] }
     let generateFlags = if (generate) { ["--generate"] } else { [] }
+    let goflagsFlags = if (goflags == "") { [] } else { ["--goflags", goflags] }
+    let versionFlags = if (goVersion == "") { [] } else { ["--go-version", goVersion] }
+    let cgoFlags = if (cgo) { ["--cgo"] } else { [] }
     scanner(ws)
-      .withExec(["go-includes", "--all", "--output-dir", "/output"] + testFlags + generateFlags)
+      .withExec(
+        ["go-includes", "--all", "--output-dir", "/output"] + testFlags + generateFlags + goflagsFlags + versionFlags + cgoFlags,
+      )
       .directory("/output")
   }
 

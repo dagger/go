@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -89,7 +90,7 @@ func TestFileKindsFindsUnicodeTestNames(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if k, _ := fileKinds(src, true); k != "t" {
+		if k, _ := fileKinds(name, src, true); k != "t" {
 			t.Errorf("%s: kinds %q; want a test", name, k)
 		}
 	}
@@ -102,12 +103,14 @@ func TestScanIndexesTestNames(t *testing.T) {
 import "testing"
 func TestZ(t *testing.T) {}
 func Fuzzé(ф *testing.F) {}
-func Example() {}
+func Example() {
+	// Output:
+}
 func TestMain(m *testing.M) {}
 func Testify(t *testing.T) {}
 func TestWrong(n int) {}
 `,
-		"z_test.go":                        "//go:build never\n\npackage root\nimport \"testing\"\nfunc Test中文(t *testing.T) {}\nfunc TestZ(t *testing.T) {}\n",
+		"z_test.go":                        "//go:build !never\n\npackage root\nimport \"testing\"\nfunc Test中文(t *testing.T) {}\nfunc TestZ(t *testing.T) {}\n",
 		"sub/a_test.go":                    "package sub\nimport \"testing\"\nfunc TestZ(t *testing.T) {}\n",
 		"sub/main.go":                      "package main\nfunc main() {}\n",
 		"testdata/a_test.go":               "package ignored\nimport \"testing\"\nfunc TestIgnored(t *testing.T) {}\n",
@@ -168,6 +171,77 @@ func TestDiscoveryIndexKeepsPackageKeysDistinct(t *testing.T) {
 	}
 	if !slices.IsSorted(paths) {
 		t.Errorf("package records are not in byte order: %q", paths)
+	}
+}
+
+// Discovery lists only the tests go test builds and runs: a test file must
+// build for the platform, with the configured cgo, Go version and GOFLAGS
+// tags, and an example needs an output comment go test recognizes.
+func TestDiscoveryListsOnlyTestsGoTestBuilds(t *testing.T) {
+	test := func(name string) string { return "func " + name + "(t *testing.T) {}\n" }
+	otherOS := "windows"
+	if runtime.GOOS == otherOS {
+		otherOS = "linux"
+	}
+	examples := "func ExampleShown() {\n\t// Output: shown\n}\n" +
+		"func ExampleBlock() {\n\t/* Output: block */\n}\n" +
+		"func ExampleHidden() {\n}\n" +
+		"func ExampleTrailing() {\n\t// Output: trailing\n\n\t// A later comment means go test doesn't run it.\n}\n"
+	root := writeTree(t, map[string]string{
+		"go.mod":                     "module example.com/c\n\ngo 1.22\n",
+		"a_test.go":                  "package c\nimport \"testing\"\n" + test("TestBuilt") + examples,
+		"never_test.go":              "//go:build never\n\npackage c\nimport \"testing\"\n" + test("TestNever"),
+		"tagged_test.go":             "//go:build integration\n\npackage c\nimport \"testing\"\n" + test("TestTagged"),
+		"os_" + otherOS + "_test.go": "package c\nimport \"testing\"\n" + test("TestOtherOS"),
+		"cgo_test.go":                "//go:build cgo\n\npackage c\nimport \"testing\"\n" + test("TestCgo"),
+		"newer_test.go":              "//go:build go1.23\n\npackage c\nimport \"testing\"\n" + test("TestNewerGo"),
+		"module_go_test.go":          "//go:build go1.22\n\npackage c\nimport \"testing\"\n" + test("TestModuleGo"),
+		"excluded/excluded_test.go":  "//go:build never\n\npackage excluded\nimport \"testing\"\n" + test("TestExcluded"),
+	})
+	built := []string{"TestBuilt", "ExampleShown", "ExampleBlock"}
+	for _, tc := range []struct {
+		args []string
+		want []string
+	}{
+		{nil, append(built, "TestModuleGo")},
+		{[]string{"--goflags", "-count=1\t'-tags=other integration'"}, append(built, "TestModuleGo", "TestTagged")},
+		{[]string{"--go-version", "go1.26.1", "--cgo"}, append(built, "TestCgo", "TestModuleGo", "TestNewerGo")},
+	} {
+		output := t.TempDir()
+		if err := runAll(append([]string{"--all", "--root", root, "--output-dir", output}, tc.args...)); err != nil {
+			t.Fatal(err)
+		}
+		catalog := readDiscoveryCatalog(t, output)
+		if packages := catalog.Packages["."]; len(packages) != 1 || !slices.Equal(packages[0].Tests, tc.want) {
+			t.Errorf("%q: packages %#v; want only . with tests %q", tc.args, packages, tc.want)
+		}
+	}
+}
+
+// GOFLAGS is split as cmd/go splits it, and its last -tags is parsed as
+// cmd/go's -tags flag parses it.
+func TestTestConfigReadsGOFLAGSTags(t *testing.T) {
+	for goflags, want := range map[string][]string{
+		"":                           nil,
+		"-count=1":                   nil,
+		"-tags=a,b":                  {"a", "b"},
+		"--tags=a,,b":                {"a", "b"},
+		"-count=1\t-tags=a\n-race":   {"a", "race"},
+		"-tags=a -tags=b":            {"b"},
+		`"-tags=a b" -count=1`:       {"a", "b"},
+		`'-tags=a' '-ldflags=-s -w'`: {"a"},
+		"-tags=":                     nil,
+		"-race -tags=a":              {"a", "race"},
+		"--race=true -asan=false":    {"race"},
+		"-msan -race -msan=0":        {"race"},
+	} {
+		config, err := newTestConfig(goflags, "", false)
+		if err != nil || !slices.Equal(config.tags, want) {
+			t.Errorf("GOFLAGS %q: tags %q, %v; want %q", goflags, config.tags, err, want)
+		}
+	}
+	if _, err := newTestConfig("'-tags=a", "", false); err == nil {
+		t.Error("accepted an unterminated quote")
 	}
 }
 
@@ -296,7 +370,7 @@ func TestFileKindsReadsLongLines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if k, _ := fileKinds(src, false); k != "m" {
+	if k, _ := fileKinds("gen.go", src, false); k != "m" {
 		t.Errorf("kinds %q; want a main package", k)
 	}
 }

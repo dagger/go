@@ -2,10 +2,16 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"go/build"
+	"go/doc"
+	"go/parser"
+	"go/token"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -48,16 +54,26 @@ func (index *localIndex) writeDiscovery(outDir string) error {
 		kinds := map[string]string{}
 		packageTests := map[string][]string{}
 		goFiles := index.goFileFacts()
-		for _, file := range index.packageFiles(root) {
-			facts := goFiles[file]
+		files := index.packageFiles(root)
+		fileKindsOf := make([]string, len(files))
+		fileTests := make([][]string, len(files))
+		buildContext := index.testBuildContext(root)
+		forEach(len(files), func(i int) {
+			facts := goFiles[files[i]]
+			fileKindsOf[i], fileTests[i] = facts.kinds, facts.tests
+			if len(fileTests[i]) > 0 && !testFileBuilds(buildContext, filepath.Join(index.root, filepath.FromSlash(files[i]))) {
+				fileKindsOf[i], fileTests[i] = strings.ReplaceAll(fileKindsOf[i], "t", ""), nil
+			}
+		})
+		for i, file := range files {
 			// A file that can't be read marks nothing here: the module's own
 			// scan records why, in its .err, and other modules are unaffected.
-			if facts.readErr != nil {
+			if goFiles[file].readErr != nil {
 				continue
 			}
 			dir := path.Dir(moduleRelative(root, file))
-			packageTests[dir] = append(packageTests[dir], facts.tests...)
-			for _, c := range facts.kinds {
+			packageTests[dir] = append(packageTests[dir], fileTests[i]...)
+			for _, c := range fileKindsOf[i] {
 				if !strings.ContainsRune(kinds[dir], c) {
 					kinds[dir] += string(c)
 				}
@@ -111,12 +127,12 @@ type discoveryCatalog struct {
 //
 // a module line, followed by a package line for each of its package
 // directories with something to do. kinds holds "t" when a _test.go file there
-// declares a test, fuzz or example function, "m" when a non-test file is
-// package main without an ignore build tag, and "g" when a file has a
-// go:generate line. The files are the module's own, as packageFiles lists
-// them, and each line is matched on its own, as a search would. Packages
-// holds the same directories as workspace paths, in that order, each with its
-// test names in file and source order.
+// that go test builds declares a test or fuzz function, or an example with an
+// output comment; "m" when a non-test file is package main without an ignore
+// build tag; and "g" when a file has a go:generate line. The files are the
+// module's own, as packageFiles lists them, and each line is matched on its
+// own, as a search would. Packages holds the same directories as workspace
+// paths, in that order, each with its test names in file and source order.
 type discoveryModule struct {
 	Lines    []string           `json:"lines"`
 	Packages []discoveryPackage `json:"packages"`
@@ -127,12 +143,141 @@ type discoveryPackage struct {
 	Tests     []string `json:"tests"`
 }
 
+// testConfig is how go test builds a workspace's tests, beyond the platform
+// the scan runs on, which is the engine's and so the test container's: the
+// build tags its GOFLAGS set, the Go toolchain when not each module's go.mod
+// version, and whether cgo is on.
+type testConfig struct {
+	tags      []string
+	goVersion string
+	cgo       bool
+}
+
+func newTestConfig(goflags, goVersion string, cgo bool) (testConfig, error) {
+	config := testConfig{goVersion: goVersion, cgo: cgo}
+	flags, err := splitQuoted(goflags)
+	if err != nil {
+		return config, fmt.Errorf("GOFLAGS: %w", err)
+	}
+	// The last -tags wins, and its value is parsed as cmd/go's -tags flag
+	// parses it: comma-separated, or space-separated in the old syntax. The
+	// -race, -msan and -asan modes add their own tag, as cmd/go does.
+	var modes []string
+	for _, flag := range flags {
+		name, value, hasValue := strings.Cut(flag, "=")
+		switch name = "-" + strings.TrimLeft(name, "-"); name {
+		case "-race", "-msan", "-asan":
+			on, err := strconv.ParseBool(value)
+			if !hasValue {
+				on, err = true, nil
+			}
+			if err != nil {
+				return config, fmt.Errorf("GOFLAGS %s: %w", name, err)
+			}
+			modes = slices.DeleteFunc(modes, func(mode string) bool { return mode == name[1:] })
+			if on {
+				modes = append(modes, name[1:])
+			}
+		case "-tags":
+			config.tags = nil
+			if strings.ContainsAny(value, " '") {
+				if config.tags, err = splitQuoted(value); err != nil {
+					return config, fmt.Errorf("GOFLAGS -tags: %w", err)
+				}
+				continue
+			}
+			for _, tag := range strings.Split(value, ",") {
+				if tag != "" {
+					config.tags = append(config.tags, tag)
+				}
+			}
+		}
+	}
+	config.tags = append(config.tags, modes...)
+	return config, nil
+}
+
+// splitQuoted splits s into fields as cmd/go splits GOFLAGS: at whitespace,
+// except inside a field wholly quoted in single or double quotes.
+func splitQuoted(s string) ([]string, error) {
+	var fields []string
+	for {
+		s = strings.TrimLeft(s, " \t\n\r")
+		if s == "" {
+			return fields, nil
+		}
+		if quote := s[0]; quote == '"' || quote == '\'' {
+			end := strings.IndexByte(s[1:], quote)
+			if end < 0 {
+				return nil, fmt.Errorf("unterminated %c string", quote)
+			}
+			fields = append(fields, s[1:end+1])
+			s = s[end+2:]
+			continue
+		}
+		end := strings.IndexAny(s, " \t\n\r")
+		if end < 0 {
+			end = len(s)
+		}
+		fields = append(fields, s[:end])
+		s = s[end:]
+	}
+}
+
+// testBuildContext is what go test builds a module's test files for: the scan's
+// platform, the configured tags and cgo, and the Go toolchain's release tags.
+func (index *localIndex) testBuildContext(root string) *build.Context {
+	ctx := build.Default
+	ctx.CgoEnabled = index.testConfig.cgo
+	ctx.BuildTags = index.testConfig.tags
+	version := index.testConfig.goVersion
+	if version == "" {
+		version = index.goVersion(root)
+	}
+	var minor int
+	if _, err := fmt.Sscanf(strings.TrimPrefix(version, "go"), "1.%d", &minor); err == nil {
+		ctx.ReleaseTags = nil
+		for i := 1; i <= minor; i++ {
+			ctx.ReleaseTags = append(ctx.ReleaseTags, fmt.Sprintf("go1.%d", i))
+		}
+	}
+	return &ctx
+}
+
+// testFileBuilds reports whether go test builds a _test.go file: its name's
+// GOOS and GOARCH suffixes and its build constraints, as go/build reads them.
+// A file whose constraints can't be read counts as built, so that go test
+// reports the problem rather than discovery hiding the file's tests.
+func testFileBuilds(ctx *build.Context, file string) bool {
+	match, err := ctx.MatchFile(filepath.Dir(file), filepath.Base(file))
+	return err != nil || match
+}
+
+// runnableExamples is the names of a test file's examples that go test runs:
+// those go/doc finds an output comment for, as go test decides. A file that
+// does not parse keeps every example, for go test to report.
+func runnableExamples(file string, src []byte) (map[string]bool, bool) {
+	f, err := parser.ParseFile(token.NewFileSet(), file, src, parser.ParseComments)
+	if err != nil {
+		return nil, false
+	}
+	runnable := map[string]bool{}
+	for _, example := range doc.Examples(f) {
+		if example.Output != "" || example.EmptyOutput {
+			runnable["Example"+example.Name] = true
+		}
+	}
+	return runnable, true
+}
+
 // fileKinds is what one Go file marks its directory as: "t", "m" and "g", as
 // discoveryModule describes them, and the test names encountered in source order.
-// Each pattern is anchored on a literal prefix, so a line without it is
-// passed over before any match is tried.
-func fileKinds(src []byte, test bool) (string, []string) {
+// An example counts only when go test runs it: see runnableExamples. Each
+// pattern is anchored on a literal prefix, so a line without it is passed
+// over before any match is tried.
+func fileKinds(file string, src []byte, test bool) (string, []string) {
 	var tests []string
+	examples := false
 	main, ignore, generate := false, false, false
 	for line := range strings.SplitSeq(string(src), "\n") {
 		line = strings.TrimSuffix(line, "\r")
@@ -140,6 +285,7 @@ func fileKinds(src []byte, test bool) (string, []string) {
 		case test && strings.HasPrefix(line, "func ") && testFuncLine.MatchString(line):
 			name, _, _ := strings.Cut(strings.TrimPrefix(line, "func "), "(")
 			tests = append(tests, name)
+			examples = examples || strings.HasPrefix(name, "Example")
 		case !test && strings.HasPrefix(line, "package main") && mainLine.MatchString(line):
 			main = true
 		case !test && strings.HasPrefix(line, "//") && ignoreLine.MatchString(line):
@@ -147,6 +293,13 @@ func fileKinds(src []byte, test bool) (string, []string) {
 		}
 		if strings.HasPrefix(line, "//go:generate") && generateLine.MatchString(line) {
 			generate = true
+		}
+	}
+	if examples {
+		if runnable, ok := runnableExamples(file, src); ok {
+			tests = slices.DeleteFunc(tests, func(name string) bool {
+				return strings.HasPrefix(name, "Example") && !runnable[name]
+			})
 		}
 	}
 	k := ""

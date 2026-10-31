@@ -29,6 +29,9 @@ func runAll(cliArgs []string) error {
 	generate := flags.Bool("generate", false, "also follow //go:generate:include directives and go:generate go -C modules")
 	root := flags.String("root", ".", "workspace root to scan")
 	outputDir := flags.String("output-dir", "", "directory to write one file of include patterns per module to")
+	goflags := flags.String("goflags", "", "GOFLAGS go test runs with, for the build tags discovery lists tests for")
+	goVersion := flags.String("go-version", "", "Go toolchain go test runs with, when not each module's go.mod version")
+	cgo := flags.Bool("cgo", false, "whether go test builds with cgo")
 	if err := flags.Parse(cliArgs); err != nil {
 		return err
 	}
@@ -38,6 +41,9 @@ func runAll(cliArgs []string) error {
 
 	index, err := indexLocal(*root)
 	if err != nil {
+		return err
+	}
+	if index.testConfig, err = newTestConfig(*goflags, *goVersion, *cgo); err != nil {
 		return err
 	}
 	return index.writeAllDir(*outputDir, *test, *generate)
@@ -290,6 +296,8 @@ type localIndex struct {
 	// parsed holds each module's directives once read: a module that several
 	// others reach through local replaces is parsed once, not once for each.
 	parsed map[string]parsedDirectives
+	// testConfig is how go test builds the tests discovery lists.
+	testConfig testConfig
 	// goMods holds each module's go.mod once read, for the same reason.
 	goMods map[string]parsedGoMod
 	// goFiles holds what the scan needs of each Go file, keyed by
@@ -394,7 +402,7 @@ func readGoFile(full, rel string) *goFileFacts {
 		}
 	}
 
-	facts.kinds, facts.tests = fileKinds(data, strings.HasSuffix(rel, "_test.go"))
+	facts.kinds, facts.tests = fileKinds(rel, data, strings.HasSuffix(rel, "_test.go"))
 	for line := range strings.SplitSeq(string(data), "\n") {
 		if strings.HasPrefix(line, "//go:generate ") || strings.HasPrefix(line, "//go:generate\t") {
 			facts.generates = true
