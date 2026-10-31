@@ -470,7 +470,9 @@ func indexLocal(root string) (*localIndex, error) {
 	return index, nil
 }
 
-// includesFor mirrors targetModule.includes using local file reads.
+// includesFor returns a module's include patterns, first seen first: its Go
+// sources and directive patterns, then those of every module it reaches through
+// a local replace or, when generating, a go:generate go -C directory.
 func (index *localIndex) includesFor(moduleRoot string, test, generate bool) ([]string, error) {
 	queued := map[string]bool{moduleRoot: true}
 	queue := []string{moduleRoot}
