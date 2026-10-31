@@ -166,9 +166,13 @@ func summarize(report io.Reader, selections []selection, exitCode int, stderr io
 				case p.uncheckedTestFailure || (p.failed && !p.namedFailure):
 					failure = fmt.Sprintf("package failed outside a selected test check (go test exit %d)\n%s%s", exitCode, p.log.String(), stderrTail.String())
 				case t.finished:
-				case !t.observed && (p.passed || (p.failed && p.namedFailure)):
-					// Tests excluded by build constraints or -failfast have no
-					// events. A represented failure does not make them fail.
+				case !t.observed && p.passed:
+					// go test left the test out: a build constraint excluded the file
+					// declaring it, or TestMain never called m.Run.
+					failure = fmt.Sprintf("%s did not run: go test passed %s without it\n%s", name, s.Pkg, p.log.String())
+				case !t.observed && p.failed && p.namedFailure:
+					// -failfast stops the package at a represented failure, so later
+					// tests have no events. That failure does not make them fail.
 					// Tests that started but did not finish still fail below.
 				default:
 					failure = fmt.Sprintf("no successful result for %s (go test exit %d)\n%s%s", name, exitCode, p.log.String(), stderrTail.String())

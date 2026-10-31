@@ -87,6 +87,25 @@ func TestAbsentAndInterruptedTests(t *testing.T) {
 	}
 }
 
+// A passing package does not pass a selected test it never ran, such as one in
+// a file a build constraint excludes.
+func TestSelectedTestThatNeverRan(t *testing.T) {
+	selected := []selection{{"example.com/p", []string{"TestRan", "TestExcluded"}}}
+	got, err := summarize(report(
+		event{Action: "pass", Package: "example.com/p", Test: "TestRan"},
+		event{Action: "pass", Package: "example.com/p"},
+	), selected, 0, strings.NewReader(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message := got[check{"example.com/p", "TestRan"}]; message != "" {
+		t.Errorf("TestRan: %q, want a pass", message)
+	}
+	if message := got[check{"example.com/p", "TestExcluded"}]; !strings.Contains(message, "TestExcluded did not run") {
+		t.Errorf("TestExcluded: %q, want it reported as not run", message)
+	}
+}
+
 func TestLargeReportAndBoundedDiagnostics(t *testing.T) {
 	// Over 128 MiB in total, with bounded reader and per-check memory.
 	chunk, err := json.Marshal(event{Action: "output", Package: "example.com/p", Test: "TestBig/child", Output: strings.Repeat("x", 4096)})
