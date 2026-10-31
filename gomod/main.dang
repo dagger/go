@@ -304,7 +304,7 @@ type Gomod {
     let cgoFlags = if (cgo) { ["--cgo"] } else { [] }
     scanner(ws)
       .withExec(
-        ["go-includes", "--all", "--output-dir", "/output"] + testFlags + generateFlags + goflagsFlags + versionFlags + cgoFlags,
+        ["go-includes", "--output-dir", "/output"] + testFlags + generateFlags + goflagsFlags + versionFlags + cgoFlags,
       )
       .directory("/output")
   }
@@ -773,7 +773,7 @@ type GoMod {
       .withExec(["go", "build", "-o", "/usr/local/bin/go-includes", "."])
       .withMountedDirectory("/ws", ws.directory("/", include: ["**/*.go", "**/go.mod"]))
       .withWorkdir("/ws")
-      .withExec(["go-includes", "--all", "--output-dir", "/output"] + testFlags + generateFlags)
+      .withExec(["go-includes", "--output-dir", "/output"] + testFlags + generateFlags)
       .directory("/output")
   }
 

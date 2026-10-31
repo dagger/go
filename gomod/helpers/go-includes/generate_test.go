@@ -46,7 +46,7 @@ func TestGenerationDirectoryDiscovery(t *testing.T) {
 		}
 	}
 	output := t.TempDir()
-	if err := runAll([]string{"--all", "--generate", "--root", root, "--output-dir", output}); err != nil {
+	if err := runAll([]string{"--generate", "--root", root, "--output-dir", output}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(filepath.Join(output, "_root_.generatedirs"))
@@ -117,7 +117,7 @@ func TestGenerationContainers(t *testing.T) {
 				// it against that module and carries on, so every other
 				// module in the workspace is still scanned.
 				output := t.TempDir()
-				if err := runAll([]string{"--all", "--generate", "--root", root, "--output-dir", output}); err != nil {
+				if err := runAll([]string{"--generate", "--root", root, "--output-dir", output}); err != nil {
 					t.Fatalf("one module's bad directive failed the whole scan: %v", err)
 				}
 				recorded, err := os.ReadFile(filepath.Join(output, "_root_.err"))

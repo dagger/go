@@ -120,7 +120,7 @@ func TestWrong(n int) {}
 		"nested/a_test.go":                 "package nested\nimport \"testing\"\nfunc TestNested(t *testing.T) {}\n",
 	})
 	output := t.TempDir()
-	if err := runAll([]string{"--all", "--root", root, "--output-dir", output}); err != nil {
+	if err := runAll([]string{"--root", root, "--output-dir", output}); err != nil {
 		t.Fatal(err)
 	}
 	catalog := readDiscoveryCatalog(t, output)
@@ -155,7 +155,7 @@ func TestDiscoveryIndexKeepsPackageKeysDistinct(t *testing.T) {
 		"module/tests/main.go": "package main\nfunc main() {}\n",
 	})
 	output := t.TempDir()
-	if err := runAll([]string{"--all", "--root", root, "--output-dir", output}); err != nil {
+	if err := runAll([]string{"--root", root, "--output-dir", output}); err != nil {
 		t.Fatal(err)
 	}
 	catalog := readDiscoveryCatalog(t, output)
@@ -208,7 +208,7 @@ func TestDiscoveryListsOnlyTestsGoTestBuilds(t *testing.T) {
 		{[]string{"--go-version", "go1.26.1", "--cgo"}, append(built, "TestCgo", "TestModuleGo", "TestNewerGo")},
 	} {
 		output := t.TempDir()
-		if err := runAll(append([]string{"--all", "--root", root, "--output-dir", output}, tc.args...)); err != nil {
+		if err := runAll(append([]string{"--root", root, "--output-dir", output}, tc.args...)); err != nil {
 			t.Fatal(err)
 		}
 		catalog := readDiscoveryCatalog(t, output)
@@ -255,7 +255,7 @@ func TestDiscoveryIndexOrdersNestedModuleByWorkspacePath(t *testing.T) {
 		"m/tools/tools_test.go": "package tools\nimport \"testing\"\nfunc TestMore(t *testing.T) {}\n",
 	})
 	output := t.TempDir()
-	if err := runAll([]string{"--all", "--root", root, "--output-dir", output}); err != nil {
+	if err := runAll([]string{"--root", root, "--output-dir", output}); err != nil {
 		t.Fatal(err)
 	}
 	var paths []string
@@ -322,7 +322,7 @@ func TestDiscoveryModuleFilesKeepPathAndTestDataSeparate(t *testing.T) {
 	}
 	root := writeTree(t, files)
 	output := t.TempDir()
-	if err := runAll([]string{"--all", "--root", root, "--output-dir", output}); err != nil {
+	if err := runAll([]string{"--root", root, "--output-dir", output}); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(output, discoveryCatalogFile))
@@ -388,7 +388,7 @@ func TestUnreadableFileStaysInItsModule(t *testing.T) {
 		t.Fatal(err)
 	}
 	output := t.TempDir()
-	if err := runAll([]string{"--all", "--root", root, "--output-dir", output}); err != nil {
+	if err := runAll([]string{"--root", root, "--output-dir", output}); err != nil {
 		t.Fatalf("one unreadable file failed the whole scan: %v", err)
 	}
 	read := func(name string) string {
@@ -433,7 +433,7 @@ func TestHeaderPackHoldsEmbeddable(t *testing.T) {
 		t.Fatal(err)
 	}
 	output := t.TempDir()
-	if err := runAll([]string{"--all", "--root", root, "--output-dir", output}); err != nil {
+	if err := runAll([]string{"--root", root, "--output-dir", output}); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(output, headerPackFile))
@@ -454,4 +454,3 @@ func TestHeaderPackHoldsEmbeddable(t *testing.T) {
 		t.Errorf("the test file symlink is not in the pack as one:\n%s", pack)
 	}
 }
-

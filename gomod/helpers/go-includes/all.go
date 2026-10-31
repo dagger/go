@@ -20,11 +20,9 @@ import (
 
 // runAll computes includes for every module in one local pass over a mounted
 // workspace snapshot (default: the current directory), writing one file of
-// include patterns per module. It never touches the workspace gateway; all
-// reads are os.ReadFile.
+// include patterns per module. All reads are os.ReadFile.
 func runAll(cliArgs []string) error {
-	flags := flag.NewFlagSet("go-includes --all", flag.ExitOnError)
-	flags.Bool("all", false, "compute includes for every module")
+	flags := flag.NewFlagSet("go-includes", flag.ExitOnError)
 	test := flags.Bool("test", false, "also follow //go:test:include directives")
 	generate := flags.Bool("generate", false, "also follow //go:generate:include directives and go:generate go -C modules")
 	root := flags.String("root", ".", "workspace root to scan")
