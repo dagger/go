@@ -162,10 +162,18 @@ not replace individual checks. There is no `.batch` namespace.
 
 Test names come from searching the package's `_test.go` files for
 `func TestXxx(t *testing.T)`, `func FuzzXxx(f *testing.F)` and
-`func ExampleXxx()`, so listing them runs no container. `TestMain`, `testdata`,
-vendored packages and nested modules are left out. Build constraints are not
-evaluated: a test excluded by one is still listed, and selecting it runs nothing. A module
-outside the `test` selection offers no tests.
+`func ExampleXxx()`, so listing them runs no tests: only the shared source
+scan and, with a custom `base`, one `go env` in it. A file counts when Go's
+build rules accept it for the engine's platform with the build tags of
+`goflags` (and `-race`'s), the Go version and no cgo, the settings the default
+containers run tests with. With a custom `base`, they are the toolchain, cgo
+and `GOFLAGS` its own `go env` reports, read once; a base that lets Go switch
+to a newer toolchain for a module can still run tests constrained to that newer
+release unlisted. An example counts only with an output comment, as `go test`
+runs no other.
+`TestMain`, `testdata`, vendored packages and nested modules are left out. A
+selected test that `go test` does not run after all fails, saying so, rather
+than passing. A module outside the `test` selection offers no tests.
 
 `test` on a module is a plain function rather than a check, so that `dagger
 check` does not run the same tests twice.

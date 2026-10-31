@@ -274,6 +274,8 @@ type Gomod {
 
   One scan serves the whole workspace and every tool in it, so for a given mode
   every module produces the same exec and reads its own slice of the result.
+  Test settings passed for discovery make a scan of their own, so a tool whose
+  tests build with other tags, toolchain or cgo runs one more.
   This is the causal data behind every include list here; reach for the named
   fields on a module before this.
   """
