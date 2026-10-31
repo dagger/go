@@ -4,7 +4,7 @@ End-to-end checks for the golangci-lint module.
 The fixtures a lint check needs are the fixtures a test check needs, so these
 run against the repository's shared `testdata/` and `fixtures/` trees, each
 with a configuration file to root a project there. golangci-lint keeps its own
-only where `go`'s batch test must not find them: a module that does not
+only where `go`'s module test helper must not find them: a module that does not
 compile, and projects whose code fails under any configuration but its own.
 """
 type E2e {
@@ -28,6 +28,13 @@ type E2e {
     if (check.pass == false) {
       raise check.error.message ?? "check failed"
     }
+    null
+  }
+
+  # Both engine APIs expose checks on individual collection items. Avoid
+  # collection helpers here: older engines put those under .batch.
+  let lintProjects(tool: GolangciLint!, ws: Workspace!, keys: [String!]!): Void {
+    keys.map { key => run(tool.projects(ws).get(key: key).lint(ws)) }
     null
   }
 
@@ -67,7 +74,7 @@ type E2e {
     assert(below.contains(projectsPath), "subdirectory discovery changed workspace-relative paths")
     let inside = ws.withWorkdir(projectsPath + "/above")
     assert(tool.projects(inside).keys.contains(projectsPath), "ancestor discovery failed")
-    run(tool.projects(inside).batch.lint(inside))
+    lintProjects(tool, inside, tool.projects(inside).keys)
 
     let included = tool.projects(ws, include: [embedPath + "/**"]).keys
     assert(included.length == 1, "project include filter failed")
@@ -124,7 +131,8 @@ type E2e {
       "includeSkipLint hid skipped project",
     )
     run(tool.project(ws, failurePath).lint(ws))
-    run(golangciLint(lint: ["!**"]).projects(ws).batch.lint(ws))
+    let skipped = golangciLint(lint: ["!**"])
+    lintProjects(skipped, ws, skipped.projects(ws).keys)
     null
   }
 
@@ -148,29 +156,28 @@ type E2e {
   }
 
   """
-  The batch lint over the shared fixture projects passes, and a subset lints
-  only its own keys.
+  The shared fixture projects pass, and a collection subset lints only its
+  own keys on both old and new engines.
   """
-  batchCheck(ws: Workspace!): Void @check {
-    run(
-      golangciLint(lint: [
-        embedPath,
-        parentPath,
-        projectsPath,
-        "fixtures/go-module-with-replace",
-        "testdata/go-module-cgo-cxx",
-      ]).projects(ws).batch.lint(ws),
-    )
+  collectionCheck(ws: Workspace!): Void @check {
+    let selected = golangciLint(lint: [
+      embedPath,
+      parentPath,
+      projectsPath,
+      "fixtures/go-module-with-replace",
+      "testdata/go-module-cgo-cxx",
+    ])
+    lintProjects(selected, ws, selected.projects(ws).keys)
 
     # The failing fixture is in the collection but outside the subset.
     let projects = golangciLint.projects(ws)
     assert(projects.keys.contains(failurePath), "failing fixture was not discovered")
-    run(projects.subset(keys: [embedPath, parentPath]).batch.lint(ws))
+    lintProjects(golangciLint, ws, projects.subset(keys: [embedPath, parentPath]).keys)
     null
   }
 
   """
-  A lint diagnostic fails the project's own check and the batch alike.
+  A lint diagnostic propagates through both direct and selected-project calls.
   """
   failureCheck(ws: Workspace!): Void @check {
     let failure = {
@@ -181,12 +188,12 @@ type E2e {
     }
     assert(failure.contains("exit code: 1"), "lint did not report the fixture error: " + failure)
     let allFailure = {
-      run(golangciLint.projects(ws).subset(keys: [failurePath]).batch.lint(ws))
+      lintProjects(golangciLint, ws, golangciLint.projects(ws).subset(keys: [failurePath]).keys)
       "unexpected success"
     } rescue {
       err: Error => err.message
     }
-    assert(allFailure.contains("exit code: 1"), "batch lint swallowed failure: " + allFailure)
+    assert(allFailure.contains("exit code: 1"), "selected-project lint swallowed failure: " + allFailure)
     null
   }
 

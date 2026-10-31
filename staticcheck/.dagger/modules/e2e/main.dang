@@ -3,7 +3,7 @@ End-to-end checks for the Staticcheck module.
 
 Staticcheck's fixtures stay under `staticcheck/testdata/`: several of them fail
 on purpose -- a lint diagnostic, a failing test -- and the repository's shared
-fixture trees are the ones `go`'s batch test runs.
+fixture trees are the ones `go`'s module test helper runs.
 """
 type E2e {
   let testdataPath: String! = "staticcheck/testdata"
@@ -27,6 +27,12 @@ type E2e {
     if (check.pass == false) {
       raise check.error.message ?? "check failed"
     }
+    null
+  }
+
+  # Per-project checks are exposed by both old and new collection engines.
+  let lintProjects(tool: Staticcheck!, ws: Workspace!, keys: [String!]!): Void {
+    keys.map { key => run(tool.projects(ws).get(key: key).lint(ws)) }
     null
   }
 
@@ -58,7 +64,7 @@ type E2e {
     let below = tool.projects(ws.withWorkdir(cleanPath)).keys
     assert(below.length == 1 and below.contains(testdataPath), "discovery inside a project missed its enclosing root")
     let inside = ws.withWorkdir(cleanPath + "/assets")
-    run(tool.projects(inside).batch.lint(inside))
+    lintProjects(tool, inside, tool.projects(inside).keys)
     assert(
       tool.project(ws, cleanPath + "/assets").path == testdataPath,
       "lookup did not resolve the enclosing project",
@@ -77,23 +83,22 @@ type E2e {
   }
 
   """
-  The batch check over the clean fixture projects passes, and a subset checks
-  only its own keys.
+  The clean fixture projects pass, and a collection subset checks only its
+  own keys.
   """
-  batchCheck(ws: Workspace!): Void @check {
-    run(
-      staticcheck(lint: [testdataPath, "!" + failPath, "!" + testFailPath]).projects(ws).batch.lint(ws),
-    )
+  collectionCheck(ws: Workspace!): Void @check {
+    let selected = staticcheck(lint: [testdataPath, "!" + failPath, "!" + testFailPath])
+    lintProjects(selected, ws, selected.projects(ws).keys)
 
     # The failing fixtures are in the collection but outside the subset.
     let projects = staticcheck.projects(ws)
     assert(projects.keys.contains(failPath), "failing fixture was not discovered")
-    run(projects.subset(keys: [testdataPath, configuredPath]).batch.lint(ws))
+    lintProjects(staticcheck, ws, projects.subset(keys: [testdataPath, configuredPath]).keys)
     null
   }
 
   """
-  A diagnostic fails the project's own check and the batch alike, including
+  A diagnostic fails direct and selected-project checks alike, including
   one found in a test file.
   """
   lintFailureCheck(ws: Workspace!): Void @check {
@@ -111,15 +116,13 @@ type E2e {
       err: Error => err.message
     }
     assert(testFailure.contains("exit code"), "Staticcheck did not analyze test files: " + testFailure)
-    let batchFailure = {
-      run(
-        staticcheck.projects(ws).subset(keys: [configuredPath, failPath]).batch.lint(ws),
-      )
+    let selectedFailure = {
+      lintProjects(staticcheck, ws, staticcheck.projects(ws).subset(keys: [configuredPath, failPath]).keys)
       "unexpected success"
     } rescue {
       err: Error => err.message
     }
-    assert(batchFailure.contains("exit code"), "batch lint did not propagate a project failure: " + batchFailure)
+    assert(selectedFailure.contains("exit code"), "selected-project lint did not propagate a project failure: " + selectedFailure)
     null
   }
 
@@ -148,7 +151,8 @@ type E2e {
       "includeSkipped hid excluded project",
     )
     run(excluded.project(ws, failPath).lint(ws))
-    run(staticcheck(lint: ["!**"]).projects(ws).batch.lint(ws))
+    let skipped = staticcheck(lint: ["!**"])
+    lintProjects(skipped, ws, skipped.projects(ws).keys)
     run(
       staticcheck(lint: ["[\"!" + failPath + "\"", "\"!" + testFailPath + "\"]"])
         .project(ws, failPath)

@@ -288,9 +288,16 @@ once per Go module it covers, with that module's toolchain, and golangci-lint
 finds the project's configuration by its own lookup. Projects the `lint`
 setting skips are left out of `projects` unless `includeSkipLint` (for
 staticcheck, `includeSkipped`) is true; `project` still reaches one, and its
-`lint` does nothing. The collection's batch
-`lint` runs once over the selected projects in place of each project's own, as
-for `go`. Both linters name their check `lint`, so `dagger check --lint` runs
+`lint` does nothing. For both linters, artifact discovery runs each project's
+`lint` check. `projects(...).lint(ws)` is an ordinary helper for explicitly
+linting the selected projects; it does not add another artifact check.
+For compatibility with older collection engines, call each selected item with
+`projects(...).get(key: path).lint(ws)` and evaluate the returned check. Older
+engines expose the explicit collection helper as `.batch.lint(ws)` instead of
+`.lint(ws)`; that helper now returns `Void`, so it must not be wrapped as a
+`Check`. Both linter development suites use the per-project API, shared by both engine
+versions.
+Both linters name their check `lint`, so `dagger check --lint` runs
 them together and `--golangci-lint --lint` runs this one; select projects with
 `--golangci-lint-project=PATH`.
 
@@ -465,8 +472,8 @@ does not compile, so neither can live where `go`'s module test helper would find
 
 ## Known problem: only one failure is reported
 
-A batch of three failing projects reports one failure, not three. The lint
-modules aggregate results into a directory and sync it, and the first error
+An explicit collection lint call over three failing projects reports one failure,
+not three. These helpers aggregate results into a directory and sync it, and the first error
 stops every later report; you repair one project, run again, and find the next.
 `go` reads the shared JSON report separately for each test check, so each failed
 test has its own result.
@@ -484,8 +491,8 @@ The Go changes can be checked with:
 dagger check -m .dagger/modules/go-dev
 ```
 
-The lint suites still use the old batch API and need a separate migration for
-PR 14802.
+The Go selection checks require the PR 14802 collection API. The linter suites
+use per-project calls supported by both collection APIs.
 
 The root `dagger.toml` installs `go`'s suite as the entrypoint and each other
 suite under a `<tool>-checks` key, which prefixes its checks. Every module needs
