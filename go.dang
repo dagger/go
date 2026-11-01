@@ -1249,13 +1249,17 @@ type GoModule {
     let selected = discovered.filter { tests => tests.names.length > 0 }
     if (selected.length == 0) { raise "no tests selected in module " + path }
     let empty: [String!]! = []
-    let names = tool.sorted(selected.reduce(empty) { all, tests => all + tests.names }.uniq)
     let narrowed = discovered.any { tests => tests.narrowed }
     let whole = packages.narrowed == false and narrowed == false
     let dirs = if (whole) { ["./..."] } else {
       tool.sorted(selected.map { tests => packageArg(tests.directory) })
     }
-    let run = if (narrowed) { ["-run", "^(" + names.join("|") + ")$"] } else { empty }
+    # Every check of the module evaluates this, so the names are only
+    # gathered and sorted for the narrowed run that needs them.
+    let run = if (narrowed) {
+      let names = tool.sorted(selected.reduce(empty) { all, tests => all + tests.names }.uniq)
+      ["-run", "^(" + names.join("|") + ")$"]
+    } else { empty }
     let executed = testEnv(ws)
       .withWorkdir(path)
       .withEnvVariable("_EXPERIMENTAL_DAGGER_CLI_BIN", "/dev/.dagger/dagger")
