@@ -1633,12 +1633,7 @@ type GoTest {
   Run go tests
   """
   test(ws: Workspace!, selection: GoPackages!): Void @check {
-    let pkg = module.importPath(ws) + (if (directory == ".") { "" } else { "/" + directory })
-    module.runTests(ws, selection).assertPassed(
-      module.packagePath(directory),
-      pkg,
-      name,
-    )
+    module.runTests(ws, selection).assertPassed(directory, module.packagePath(directory), name)
   }
 }
 
@@ -1653,15 +1648,20 @@ type GoTestResults {
   let results: Directory!
   let selections: [GoTestSelection!]!
 
-  let assertPassed(directory: String!, pkg: String!, name: String!): Void {
+  # directory is the package's module-relative directory, as the selections
+  # hold it, and packagePath its workspace path, for messages. Matching on the
+  # directory rather than the import path spares the check its own lookup of
+  # the module's import path, which runTests has already made.
+  let assertPassed(directory: String!, packagePath: String!, name: String!): Void {
+    let selected = selections.filter { tests => tests.directory == directory }
+    if (selected.length == 0) { raise "Go package is outside the test selection: " + packagePath }
+    if (selected[0]!.names.contains(name) == false) { raise "Go test is outside the selection: " + name }
+    let pkg = selected[0]!.pkg
     # Numeric ranks avoid filename limits and collisions for Go identifiers.
     let packageIndex = selections.filter { tests => tests.pkg < pkg }.length
-    let selected = selections.filter { tests => tests.pkg == pkg }
-    if (selected.length == 0) { raise "Go package is outside the test selection: " + pkg }
-    if (selected[0]!.names.contains(name) == false) { raise "Go test is outside the selection: " + name }
     let testIndex = selected[0]!.names.filter { test => test < name }.length
     let failure = results.file(`${packageIndex}` + "/" + `${testIndex}`).contents
-    if (failure != "") { raise "Go tests in " + directory + ": " + failure }
+    if (failure != "") { raise "Go tests in " + packagePath + ": " + failure }
     null
   }
 }
