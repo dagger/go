@@ -255,16 +255,24 @@ type Gomod {
   container: the engine builds and runs it once for the whole workspace.
   """
   let scanner(ws: Workspace!): Container! {
-    # No cache volumes: the scan is an ordinary result, which another engine
-    # can pull from the remote cache.
-    container.from("golang:" + scannerVersion + "-alpine")
-      # The same download retry as withGoCaches.
-      .withEnvVariable("GOPROXY", "https://proxy.golang.org|https://proxy.golang.org|direct")
-      .withoutEntrypoint
-      .withWorkdir("/helpers/go-includes")
-      .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
-      .withExec(["go", "build", "-o", "/usr/local/bin/go-includes", "."])
-      .withMountedDirectory("/ws", ws.directory("/", include: ["**/*.go", "**/go.mod"]))
+    # The helper's build doesn't depend on the workspace, so it runs while the
+    # workspace syncs: the fields of {{ }} run at once. Left in one chain, the
+    # sync would come first, as the chain's argument.
+    let parts = {{
+      # No cache volumes: the scan is an ordinary result, which another engine
+      # can pull from the remote cache.
+      helper: container.from("golang:" + scannerVersion + "-alpine")
+        # The same download retry as withGoCaches.
+        .withEnvVariable("GOPROXY", "https://proxy.golang.org|https://proxy.golang.org|direct")
+        .withoutEntrypoint
+        .withWorkdir("/helpers/go-includes")
+        .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
+        .withExec(["go", "build", "-o", "/usr/local/bin/go-includes", "."])
+        .sync,
+      source: ws.directory("/", include: ["**/*.go", "**/go.mod"]).sync,
+    }}
+    parts.helper
+      .withMountedDirectory("/ws", parts.source)
       .withWorkdir("/ws")
   }
 
@@ -763,15 +771,21 @@ type GoMod {
   let scanned(ws: Workspace!, test: Boolean!, generate: Boolean!): Directory! {
     let testFlags = if (test) { ["--test"] } else { [] }
     let generateFlags = if (generate) { ["--generate"] } else { [] }
-    container
-      .from("golang:" + gomod.scannerVersion + "-alpine")
-      # The same download retry as withGoCaches.
-      .withEnvVariable("GOPROXY", "https://proxy.golang.org|https://proxy.golang.org|direct")
-      .withoutEntrypoint
-      .withWorkdir("/helpers/go-includes")
-      .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
-      .withExec(["go", "build", "-o", "/usr/local/bin/go-includes", "."])
-      .withMountedDirectory("/ws", ws.directory("/", include: ["**/*.go", "**/go.mod"]))
+    # As Gomod.scanner, the helper builds while the workspace syncs.
+    let parts = {{
+      helper: container
+        .from("golang:" + gomod.scannerVersion + "-alpine")
+        # The same download retry as withGoCaches.
+        .withEnvVariable("GOPROXY", "https://proxy.golang.org|https://proxy.golang.org|direct")
+        .withoutEntrypoint
+        .withWorkdir("/helpers/go-includes")
+        .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
+        .withExec(["go", "build", "-o", "/usr/local/bin/go-includes", "."])
+        .sync,
+      source: ws.directory("/", include: ["**/*.go", "**/go.mod"]).sync,
+    }}
+    parts.helper
+      .withMountedDirectory("/ws", parts.source)
       .withWorkdir("/ws")
       .withExec(["go-includes", "--output-dir", "/output"] + testFlags + generateFlags)
       .directory("/output")
