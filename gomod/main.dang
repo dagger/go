@@ -495,6 +495,18 @@ type Gomod {
   }
 
   """
+  Every Dagger module config file in the workspace, at its workspace path.
+
+  A test that serves a Dagger module needs that module's config, which is not
+  a Go file and so is in no module's source. Read here rather than by each
+  caller, the engine shares the one read between every test check in the
+  workspace instead of making it once per check.
+  """
+  daggerConfigs(ws: Workspace!): Directory! {
+    ws.directory("/", include: ["**/dagger-module.toml", "**/dagger.json"])
+  }
+
+  """
   Go version of the image the source scanner is built and run in, and the
   fallback `defaultGoVersion` hands a module that declares no go directive.
 
