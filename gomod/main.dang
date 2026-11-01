@@ -267,7 +267,11 @@ type Gomod {
         .withoutEntrypoint
         .withWorkdir("/helpers/go-includes")
         .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
-        .withExec(["go", "build", "-o", "/usr/local/bin/go-includes", "."])
+        # A fresh engine compiles the standard library for this build, and
+        # inlining is a quarter of that. The helper's scan runs under a tenth
+        # of a second, and the GC setting it runs with makes up what it loses
+        # without inlining (see go-includes/main.go).
+        .withExec(["go", "build", "-gcflags=std=-l", "-o", "/usr/local/bin/go-includes", "."])
         .sync,
       source: ws.directory("/", include: ["**/*.go", "**/go.mod"]).sync,
     }}
@@ -780,7 +784,7 @@ type GoMod {
         .withoutEntrypoint
         .withWorkdir("/helpers/go-includes")
         .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
-        .withExec(["go", "build", "-o", "/usr/local/bin/go-includes", "."])
+        .withExec(["go", "build", "-gcflags=std=-l", "-o", "/usr/local/bin/go-includes", "."])
         .sync,
       source: ws.directory("/", include: ["**/*.go", "**/go.mod"]).sync,
     }}
