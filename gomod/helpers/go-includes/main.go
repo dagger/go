@@ -11,6 +11,7 @@ import (
 	"go/token"
 	"os"
 	"path"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +21,11 @@ import (
 )
 
 func main() {
+	// A scan allocates quickly and exits within a fraction of a second, so at
+	// the default GOGC of 100 the collector runs many times for nothing it
+	// needs to keep memory low. 400 makes a scan of dagger/dagger's tree about
+	// 15% faster for about 45 MB more peak memory.
+	debug.SetGCPercent(400)
 	if err := runAll(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
