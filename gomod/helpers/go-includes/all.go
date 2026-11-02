@@ -23,6 +23,7 @@ func runAll(cliArgs []string) error {
 	flags.Bool("all", false, "compute includes for every module")
 	test := flags.Bool("test", false, "also follow //go:test:include directives")
 	generate := flags.Bool("generate", false, "also follow //go:generate:include directives and go:generate go -C modules")
+	tags := flags.String("tags", "", "comma-separated build tags set for discovery, as -tags sets them")
 	root := flags.String("root", ".", "workspace root to scan")
 	outputDir := flags.String("output-dir", "", "directory to write one file of include patterns per module to")
 	if err := flags.Parse(cliArgs); err != nil {
@@ -36,7 +37,13 @@ func runAll(cliArgs []string) error {
 	if err != nil {
 		return err
 	}
-	return index.writeAllDir(*outputDir, *test, *generate)
+	set := map[string]bool{}
+	for _, tag := range strings.Split(*tags, ",") {
+		if tag = strings.TrimSpace(tag); tag != "" {
+			set[tag] = true
+		}
+	}
+	return index.writeAllDir(*outputDir, *test, *generate, set)
 }
 
 // moduleIncludeFile returns the per-module output filename for a module root.
@@ -68,14 +75,14 @@ func moduleOutputFile(moduleRoot, suffix string) string {
 // so failing the whole pass here would let a single bad module stop every
 // other module's checks. The tools read the reason back and raise it only when
 // something actually asks for that module's sources.
-func (index *localIndex) writeAllDir(dir string, test, generate bool) error {
+func (index *localIndex) writeAllDir(dir string, test, generate bool, tags map[string]bool) error {
 	if err := writeModuleOutput(dir, "_modules_", linesWithTrailer(index.goModules())); err != nil {
 		return err
 	}
 	if err := index.writeHeaderPack(filepath.Join(dir, headerPackFile)); err != nil {
 		return err
 	}
-	if err := index.writeDiscovery(filepath.Join(dir, discoveryFile)); err != nil {
+	if err := index.writeDiscovery(filepath.Join(dir, discoveryFile), tags); err != nil {
 		return err
 	}
 	for _, moduleRoot := range index.moduleRoots {
