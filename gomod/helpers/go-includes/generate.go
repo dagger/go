@@ -2,9 +2,7 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"path"
-	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -13,21 +11,18 @@ import (
 // mistaking go:generate:include annotations for executable directives.
 func (index *localIndex) generateDirectoriesFor(moduleRoot string) ([]string, error) {
 	seen := map[string]bool{}
+	facts := index.goFileFacts()
 	for _, file := range index.goFilesByModule[moduleRoot] {
 		// Go ignores these files, even when selecting their package explicitly.
 		name := path.Base(file)
 		if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(index.root, filepath.FromSlash(file)))
-		if err != nil {
+		if err := facts[file].readErr; err != nil {
 			return nil, err
 		}
-		for line := range strings.SplitSeq(string(data), "\n") {
-			if strings.HasPrefix(line, "//go:generate ") || strings.HasPrefix(line, "//go:generate\t") {
-				seen[path.Dir(file)] = true
-				break
-			}
+		if facts[file].generates {
+			seen[path.Dir(file)] = true
 		}
 	}
 	var dirs []string

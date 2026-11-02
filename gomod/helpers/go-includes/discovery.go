@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bufio"
-	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -18,8 +16,10 @@ import (
 //	module	<root>	<module path>	<go version>
 //	package	<root>	<module-relative directory>	<kinds>
 //
-// There is a module line for every module the scan accepts, followed by a
-// package line for each of its package directories with something to do.
+// There is a module line for every module the scan accepts, then a package
+// line for each of their package directories with something to do, in byte
+// order of the directory's workspace path, so a reader lists packages in that
+// order without sorting them.
 // kinds holds "t" when a _test.go file there declares a test, fuzz or example
 // function, "m" when a non-test file is package main without an ignore build
 // tag, and "g" when a file has a go:generate line. The files are the module's
@@ -44,51 +44,45 @@ var (
 func (index *localIndex) writeDiscovery(outPath string) error {
 	var out strings.Builder
 	var testNames strings.Builder
+	type packageLine struct{ key, line string }
+	var packages []packageLine
 	for _, root := range index.goModules() {
 		modPath := ""
-		goModPath := path.Join(root, "go.mod")
-		if data, err := os.ReadFile(filepath.Join(index.root, filepath.FromSlash(goModPath))); err == nil {
-			if goMod, err := parseGoMod(goModPath, data); err == nil {
-				modPath = goMod.Module.Mod.Path
-			}
+		if goMod, err := index.goMod(root); err == nil {
+			modPath = goMod.Module.Mod.Path
 		}
 		out.WriteString("module\t" + root + "\t" + modPath + "\t" + index.goVersion(root) + "\n")
 		kinds := map[string]string{}
-		files := index.packageFiles(root)
-		fileKindsOf := make([]string, len(files))
-		fileTests := make([][]string, len(files))
-		errs := make([]error, len(files))
-		forEach(len(files), func(i int) {
-			fileKindsOf[i], fileTests[i], errs[i] = fileKinds(filepath.Join(index.root, filepath.FromSlash(files[i])), strings.HasSuffix(files[i], "_test.go"))
-		})
-		for i, file := range files {
+		goFiles := index.goFileFacts()
+		for _, file := range index.packageFiles(root) {
+			facts := goFiles[file]
 			// A file that can't be read marks nothing here: the module's own
 			// scan records why, in its .err, and other modules are unaffected.
-			if errs[i] != nil {
+			if facts.readErr != nil {
 				continue
 			}
 			dir := path.Dir(moduleRelative(root, file))
-			for _, name := range fileTests[i] {
+			for _, name := range facts.tests {
 				testNames.WriteString(path.Dir(file) + "\t" + name + "\n")
 			}
-			for _, c := range fileKindsOf[i] {
+			for _, c := range facts.kinds {
 				if !strings.ContainsRune(kinds[dir], c) {
 					kinds[dir] += string(c)
 				}
 			}
 		}
-		dirs := make([]string, 0, len(kinds))
 		for dir, k := range kinds {
-			if k != "" {
-				dirs = append(dirs, dir)
+			if k == "" {
+				continue
 			}
+			sorted := []byte(k)
+			sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+			packages = append(packages, packageLine{path.Join(root, dir), "package\t" + root + "\t" + dir + "\t" + string(sorted) + "\n"})
 		}
-		sort.Strings(dirs)
-		for _, dir := range dirs {
-			k := []byte(kinds[dir])
-			sort.Slice(k, func(i, j int) bool { return k[i] < k[j] })
-			out.WriteString("package\t" + root + "\t" + dir + "\t" + string(k) + "\n")
-		}
+	}
+	sort.Slice(packages, func(i, j int) bool { return packages[i].key < packages[j].key })
+	for _, p := range packages {
+		out.WriteString(p.line)
 	}
 	if err := os.WriteFile(outPath, []byte(out.String()), 0o644); err != nil {
 		return err
@@ -98,35 +92,23 @@ func (index *localIndex) writeDiscovery(outPath string) error {
 
 // fileKinds is what one Go file marks its directory as: "t", "m" and "g", as
 // discoveryFile describes them, and the test names encountered in source order.
-func fileKinds(file string, test bool) (string, []string, error) {
-	f, err := os.Open(file)
-	if err != nil {
-		return "", nil, err
-	}
-	defer f.Close()
-	r := bufio.NewReader(f)
+// Each pattern is anchored on a literal prefix, so a line without it is
+// passed over before any match is tried.
+func fileKinds(src []byte, test bool) (string, []string) {
 	var tests []string
 	main, ignore, generate := false, false, false
-	for {
-		// Lines of any length: generated files can hold very long ones.
-		line, err := r.ReadString('\n')
-		if err != nil && err != io.EOF {
-			return "", nil, err
-		}
-		if line == "" && err == io.EOF {
-			break
-		}
-		line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+	for line := range strings.SplitSeq(string(src), "\n") {
+		line = strings.TrimSuffix(line, "\r")
 		switch {
-		case test && testFuncLine.MatchString(line):
+		case test && strings.HasPrefix(line, "func ") && testFuncLine.MatchString(line):
 			name, _, _ := strings.Cut(strings.TrimPrefix(line, "func "), "(")
 			tests = append(tests, name)
-		case !test && mainLine.MatchString(line):
+		case !test && strings.HasPrefix(line, "package main") && mainLine.MatchString(line):
 			main = true
-		case !test && ignoreLine.MatchString(line):
+		case !test && strings.HasPrefix(line, "//") && ignoreLine.MatchString(line):
 			ignore = true
 		}
-		if generateLine.MatchString(line) {
+		if strings.HasPrefix(line, "//go:generate") && generateLine.MatchString(line) {
 			generate = true
 		}
 	}
@@ -140,5 +122,5 @@ func fileKinds(file string, test bool) (string, []string, error) {
 	if generate {
 		k += "g"
 	}
-	return k, tests, nil
+	return k, tests
 }

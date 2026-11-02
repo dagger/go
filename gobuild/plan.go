@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"go/parser"
 	"go/token"
+	"iter"
 	"path"
 	"regexp"
 	"slices"
@@ -166,32 +167,34 @@ func parseBlocks(plan string, r roots, archives bool) (map[string]*block, error)
 		content := inHeredoc
 		if inHeredoc {
 			inHeredoc = !strings.HasSuffix(line, "EOF")
-		} else if reHeredoc.MatchString(line) {
+		} else if strings.HasPrefix(line, "cat >") && reHeredoc.MatchString(line) {
 			inHeredoc = true
 		}
 		if linking != "" {
-			if m := reMkdir.FindStringSubmatch(line); m == nil || m[1] == linking {
+			if m := mkdirStep(line); m == nil || m[1] == linking {
 				continue
 			}
 			linking = ""
 		}
-		if m := reLinkCfg.FindStringSubmatch(line); archives && m != nil && !content {
-			linking = m[1]
-			continue
+		if archives && !content && strings.HasPrefix(line, "cat >$WORK/") {
+			if m := reLinkCfg.FindStringSubmatch(line); m != nil {
+				linking = m[1]
+				continue
+			}
 		}
 		// A test binary's main package has its work directory made before
 		// any other's, and its steps (with -cover, a cover run before its
 		// header) come long after: a line working in a block that has no
 		// header yet is that block's, and a header waiting names it.
-		if m := reWorkRef.FindStringSubmatch(line); m != nil && !content {
-			if b, ok := blocks[m[1]]; ok && b.importPath == "" && b != cur {
+		if !content {
+			if b, ok := blocks[firstWorkRef(line)]; ok && b.importPath == "" && b != cur {
 				cur = b
 				if pending != "" {
 					b.importPath, pending = pending, ""
 				}
 			}
 		}
-		if m := reMkdir.FindStringSubmatch(line); m != nil {
+		if m := mkdirStep(line); m != nil {
 			b, ok := blocks[m[1]]
 			if !ok {
 				b = &block{id: m[1], importPath: pending}
@@ -206,15 +209,17 @@ func parseBlocks(plan string, r roots, archives bool) (map[string]*block, error)
 		if cur == nil {
 			continue
 		}
-		if m := reLinkOut.FindStringSubmatch(line); m != nil {
-			if b, ok := blocks[m[1]]; ok {
-				b.out = m[2]
+		if strings.HasPrefix(line, "mv $WORK/") {
+			if m := reLinkOut.FindStringSubmatch(line); m != nil {
+				if b, ok := blocks[m[1]]; ok {
+					b.out = m[2]
+				}
 			}
 		}
 		switch {
 		// The go command's build ID steps, printed as "go tool buildid" or
 		// by the tool's path: nothing here carries an ID to fill in.
-		case reBuildIDStep.MatchString(line),
+		case strings.Contains(line, "buildid -w ") && reBuildIDStep.MatchString(line),
 			strings.HasPrefix(line, "mkdir -p "+planOut),
 			strings.HasPrefix(line, "mv $WORK/"),
 			strings.HasPrefix(line, "rm -rf $WORK/"),
@@ -274,12 +279,12 @@ func parseBlocks(plan string, r roots, archives bool) (map[string]*block, error)
 			cur.isProfile = true
 		}
 		cur.lines = append(cur.lines, line)
-		if !content && reLink.MatchString(line) {
+		if !content && strings.Contains(line, "/link ") && reLink.MatchString(line) {
 			cur.linkAt = len(cur.lines)
 		}
 		// A directory change names where the next commands run, not an
 		// input.
-		if !strings.HasPrefix(line, "cd ") {
+		if !strings.HasPrefix(line, "cd ") && mayNameInput(line, r) {
 			addInputs(cur, r, cwd, line)
 		}
 	}
@@ -324,19 +329,19 @@ func parseBlocks(plan string, r roots, archives bool) (map[string]*block, error)
 		b.name = stableName(b.importPath)
 		seen := map[string]bool{}
 		for _, l := range b.lines {
-			for _, m := range reWorkRef.FindAllStringSubmatch(l, -1) {
-				if m[1] == id || seen[m[1]] {
+			for ref := range workRefs(l) {
+				if ref == id || seen[ref] {
 					continue
 				}
-				seen[m[1]] = true
+				seen[ref] = true
 				// The profile isn't a dependency: every compile reads it,
 				// and its output is mounted into every exec instead, so a
 				// package's dependencies are the packages it imports.
-				if blocks[m[1]].isProfile {
-					b.profile = m[1]
+				if blocks[ref].isProfile {
+					b.profile = ref
 					continue
 				}
-				b.deps = append(b.deps, m[1])
+				b.deps = append(b.deps, ref)
 			}
 		}
 		sort.Strings(b.deps)
@@ -344,6 +349,58 @@ func parseBlocks(plan string, r roots, archives bool) (map[string]*block, error)
 		sort.Strings(b.modFiles)
 	}
 	return blocks, nil
+}
+
+// workRefs are the work directories a plan line names, "bNNN" for each
+// "$WORK/bNNN", in order: reWorkRef's matches, found without a regexp, as
+// the plan's ~31,000 lines for dagger's CLI each need it.
+func workRefs(l string) iter.Seq[string] {
+	return func(yield func(string) bool) {
+		const prefix = "$WORK/b"
+		for {
+			i := strings.Index(l, prefix)
+			if i < 0 {
+				return
+			}
+			start := i + len(prefix) - 1 // the "b"
+			end := start + 1
+			for end < len(l) && l[end] >= '0' && l[end] <= '9' {
+				end++
+			}
+			if end > start+1 && !yield(l[start:end]) {
+				return
+			}
+			l = l[end:]
+		}
+	}
+}
+
+// firstWorkRef is the first of a line's workRefs, or "".
+func firstWorkRef(l string) string {
+	for ref := range workRefs(l) {
+		return ref
+	}
+	return ""
+}
+
+// mkdirStep is reMkdir's match of a line, checked first for the text every
+// match starts with.
+func mkdirStep(l string) []string {
+	if !strings.HasPrefix(l, "mkdir -p $WORK/b") {
+		return nil
+	}
+	return reMkdir.FindStringSubmatch(l)
+}
+
+// mayNameInput reports whether addInputs could find an input in a line: a
+// path it records is under a root once cleaned, or relative ("./", "../").
+// Without quotes or escapes, a line's words are its own text, and cleaning
+// only drops "//", "./" and "../" parts, or a final "/." or "/.." that leaves
+// a prefix of the path: so a line with none of those that names neither root
+// names no input. Most lines, such as an import config's, are like that.
+func mayNameInput(line string, r roots) bool {
+	return strings.ContainsAny(line, `'"\`) || strings.Contains(line, "./") || strings.Contains(line, "//") ||
+		strings.Contains(line, r.Src) || strings.Contains(line, r.Mod)
 }
 
 // moduleRoot is the module directory a path in the module cache is in,
@@ -472,6 +529,11 @@ func addDir(b *block, r roots, p string) {
 // separates them, single quotes keep everything, and double quotes keep
 // everything but a backslash escape.
 func shellWords(line string) []string {
+	// Most lines quote and escape nothing, and their words are what's
+	// between the blanks.
+	if !strings.ContainsAny(line, `'"\`) {
+		return strings.FieldsFunc(line, func(r rune) bool { return r == ' ' || r == '\t' })
+	}
 	var words []string
 	var w strings.Builder
 	inWord := false
@@ -598,7 +660,7 @@ func (b *block) script(blocks map[string]*block, conc string) string {
 			continue
 		}
 		link := b.isLink && i == b.linkAt-1
-		if !link {
+		if !link && strings.Contains(l, "-buildid") {
 			l = reBuildID.ReplaceAllString(l, "")
 		}
 		// The go command leaves -c out when it would be 1, so the value is
@@ -696,6 +758,7 @@ func cdNeeded(lines []string) map[int]bool {
 			last = i
 		case last >= 0 && usesDir(l):
 			needed[last] = true
+			last = -1
 		}
 	}
 	return needed
@@ -704,8 +767,13 @@ func cdNeeded(lines []string) map[int]bool {
 // usesDir reports whether a plan line names a path relative to the
 // directory it runs in: "./x" or "../x", or a relative -o output.
 func usesDir(l string) bool {
-	if reRelFile.MatchString(l) {
+	// Each case needs "./" or "-o" in the line, which most lines, such as
+	// an import config's, have neither of.
+	if strings.Contains(l, "./") && reRelFile.MatchString(l) {
 		return true
+	}
+	if !strings.Contains(l, "../") && !strings.Contains(l, "-o") {
+		return false
 	}
 	words := shellWords(l)
 	for i, w := range words {
