@@ -741,6 +741,7 @@ func (r *Agent) Notify(ctx context.Context, subscriber *Agent, opts ...AgentNoti
 	}
 	return &Agent{
 		query: selectNode(q.Root(), id, "Agent"),
+		id:    &id,
 	}, nil
 }
 
@@ -791,6 +792,7 @@ func (r *Agent) Pause(ctx context.Context, opts ...AgentPauseOpts) (*Agent, erro
 	}
 	return &Agent{
 		query: selectNode(q.Root(), id, "Agent"),
+		id:    &id,
 	}, nil
 }
 
@@ -814,6 +816,7 @@ func (r *Agent) Reseed(ctx context.Context, conversation *LLM) (*Agent, error) {
 	}
 	return &Agent{
 		query: selectNode(q.Root(), id, "Agent"),
+		id:    &id,
 	}, nil
 }
 
@@ -833,6 +836,7 @@ func (r *Agent) Resume(ctx context.Context) (*Agent, error) {
 	}
 	return &Agent{
 		query: selectNode(q.Root(), id, "Agent"),
+		id:    &id,
 	}, nil
 }
 
@@ -889,6 +893,7 @@ func (r *Agent) Send(ctx context.Context, message string, opts ...AgentSendOpts)
 	}
 	return &AgentMessage{
 		query: selectNode(q.Root(), id, "AgentMessage"),
+		id:    &id,
 	}, nil
 }
 
@@ -949,6 +954,7 @@ func (r *Agent) Stop(ctx context.Context, opts ...AgentStopOpts) (*Agent, error)
 	}
 	return &Agent{
 		query: selectNode(q.Root(), id, "Agent"),
+		id:    &id,
 	}, nil
 }
 
@@ -966,6 +972,7 @@ func (r *Agent) Wait(ctx context.Context) (*Agent, error) {
 	}
 	return &Agent{
 		query: selectNode(q.Root(), id, "Agent"),
+		id:    &id,
 	}, nil
 }
 
@@ -1870,134 +1877,7 @@ func (r *ArtifactPath) AsNode() Node {
 	}
 }
 
-type ArtifactResult struct {
-	query *querybuilder.Selection
-	// refetchID is set when this object is built through a field marked
-	// @reevaluate: it fetches its ID on every use, so each use evaluates that
-	// field again.
-	refetchID bool
-
-	id *ID
-}
-
-func (r *ArtifactResult) WithGraphQLQuery(q *querybuilder.Selection) *ArtifactResult {
-	return &ArtifactResult{
-		query: q,
-		// The query's origin is unknown: it may go through a field that
-		// must be reevaluated.
-		refetchID: true,
-	}
-}
-
-// The artifact that was evaluated.
-func (r *ArtifactResult) Artifact() *Artifact {
-	q := r.query.Select("artifact")
-
-	return &Artifact{
-		query:     q,
-		refetchID: r.refetchID,
-	}
-}
-
-// The evaluation failure, if any.
-func (r *ArtifactResult) Error(ctx context.Context) (*Error, error) {
-	q := r.query.Select("error")
-
-	q = q.Select("id")
-	var objectID *ID
-	if err := q.Bind(&objectID).Execute(ctx); err != nil {
-		return nil, err
-	}
-	if objectID == nil {
-		return nil, nil
-	}
-	return &Error{
-		query: selectNode(q.Root(), *objectID, "Error"),
-	}, nil
-}
-
-// A unique identifier for this ArtifactResult.
-func (r *ArtifactResult) ID(ctx context.Context) (ID, error) {
-	if r.id != nil {
-		return *r.id, nil
-	}
-	q := r.query.Select("id")
-
-	var response ID
-
-	q = q.Bind(&response)
-	if r.refetchID {
-		return response, q.Execute(ctx)
-	}
-	return memoizedID(ctx, r.query, func() (ID, error) {
-		err := q.Execute(ctx)
-		return response, err
-	})
-}
-
-// XXX_GraphQLType is an internal function. It returns the native GraphQL type name
-func (r *ArtifactResult) XXX_GraphQLType() string {
-	return "ArtifactResult"
-}
-
-// XXX_GraphQLIDType is an internal function. It returns the native GraphQL type name for the ID of this object
-func (r *ArtifactResult) XXX_GraphQLIDType() string {
-	return "ID"
-}
-
-// XXX_GraphQLID is an internal function. It returns the underlying type ID
-func (r *ArtifactResult) XXX_GraphQLID(ctx context.Context) (string, error) {
-	id, err := r.ID(ctx)
-	if err != nil {
-		return "", err
-	}
-	return string(id), nil
-}
-
-func (r *ArtifactResult) MarshalJSON() ([]byte, error) {
-	id, err := r.ID(marshalCtx)
-	if err != nil {
-		return nil, err
-	}
-	return json.Marshal(id)
-}
-func (r *ArtifactResult) UnmarshalJSON(bs []byte) error {
-	var id string
-	err := json.Unmarshal(bs, &id)
-	if err != nil {
-		return err
-	}
-	*r = ArtifactResult{query: selectNode(dag.QueryBuilder(), id, "ArtifactResult")}
-	return nil
-}
-
-// The evaluated value, or null when evaluation failed.
-func (r *ArtifactResult) Value(ctx context.Context) (Node, error) {
-	q := r.query.Select("value")
-
-	q = q.Select("id")
-	var objectID *ID
-	if err := q.Bind(&objectID).Execute(ctx); err != nil {
-		return nil, err
-	}
-	if objectID == nil {
-		return nil, nil
-	}
-	return &NodeClient{
-		query: selectNode(q.Root(), *objectID, "Node"),
-	}, nil
-}
-
-// AsNode returns this ArtifactResult as a Node.
-// This is a local type conversion — no GraphQL call.
-func (r *ArtifactResult) AsNode() Node {
-	return &NodeClient{
-		query:     r.query,
-		refetchID: r.refetchID,
-	}
-}
-
-// An immutable selection of workspace artifacts. Listed types, dimensions, and keys use OR; chained filters use AND. Empty alternatives match nothing; unknown names match nothing but module load failures. Filters never change addresses or dimension identifiers. Module keys match a module's configured or kebab-case name. A module that failed to load has no schema, so its load failure stands in for whatever it would hold: a filter keeps it when the module could hold something the filter selects, and an exclusion drops it only by its own address, such as <module>/** or ?module=<module>.
+// A selection of workspace artifacts and their immutable collection view. Collection key filters replace collection references with subsets. Static filters change only membership. Listed types, dimensions, and keys use OR; chained filters use AND. Empty alternatives match nothing; unknown names match nothing but module load failures. Filters never change addresses or dimension identifiers. Module keys match a module's configured or kebab-case name. A module that failed to load has no schema, so its load failure stands in for whatever it would hold: a filter keeps it when the module could hold something the filter selects, and an exclusion drops it only by its own address, such as <module>/** or ?module=<module>.
 type Artifacts struct {
 	query *querybuilder.Selection
 	// refetchID is set when this object is built through a field marked
@@ -2279,7 +2159,7 @@ func (r *Artifacts) Dimensions(ctx context.Context) ([]string, error) {
 	return response, q.Execute(ctx)
 }
 
-// Keep artifacts with any listed key in this dimension.
+// Keep artifacts with any listed key in this dimension. Replace collection references with matching subsets. Skip absent keys and leave the source view unchanged.
 func (r *Artifacts) FilterDimensionKeys(dimension string, keys []string) *Artifacts {
 	q := r.query.Select("filterDimensionKeys")
 	q = q.Arg("dimension", dimension)
@@ -2486,7 +2366,7 @@ func (r *Artifacts) UnmarshalJSON(bs []byte) error {
 	return nil
 }
 
-// Enumerate complete artifacts without evaluating their values.
+// List artifact descriptions with their collection view. Discover collection keys without evaluating leaf values.
 func (r *Artifacts) Items(ctx context.Context) ([]Artifact, error) {
 	q := r.query.Select("items")
 
@@ -2665,78 +2545,7 @@ func (r *Artifacts) URI(ctx context.Context) (string, error) {
 	return response, q.Execute(ctx)
 }
 
-// ArtifactsValuesOpts contains options for Artifacts.Values
-type ArtifactsValuesOpts struct {
-	// Cancel remaining work after the first failure.
-	FailFast bool
-	// Field arguments applied to each artifact, as a JSON object.
-	//
-	// Default: "{}"
-	Arguments JSON
-	// Evaluate at most this many artifacts at once on this engine; the rest wait. Checks that scale out to cloud engines are not counted. 0 means no limit.
-	MaxConcurrency int
-}
-
-// Evaluate the selection in parallel, retaining each result and error.
-func (r *Artifacts) Values(ctx context.Context, opts ...ArtifactsValuesOpts) ([]ArtifactResult, error) {
-	q := r.query.Select("values")
-	for i := len(opts) - 1; i >= 0; i-- {
-		// `failFast` optional argument
-		if !querybuilder.IsZeroValue(opts[i].FailFast) {
-			q = q.Arg("failFast", opts[i].FailFast)
-		}
-		// `arguments` optional argument
-		if !querybuilder.IsZeroValue(opts[i].Arguments) {
-			q = q.Arg("arguments", opts[i].Arguments)
-		}
-		// `maxConcurrency` optional argument
-		if !querybuilder.IsZeroValue(opts[i].MaxConcurrency) {
-			q = q.Arg("maxConcurrency", opts[i].MaxConcurrency)
-		}
-	}
-
-	q = q.Select("id")
-
-	type values struct {
-		Id ID
-	}
-
-	convert := func(fields []values) []ArtifactResult {
-		out := []ArtifactResult{}
-
-		for i := range fields {
-			val := ArtifactResult{id: &fields[i].Id}
-			val.query = selectNode(q.Root(), fields[i].Id, "ArtifactResult")
-			out = append(out, val)
-		}
-
-		return out
-	}
-	var response []values
-
-	q = q.Bind(&response)
-
-	err := q.Execute(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	return convert(response), nil
-}
-
-// Combine two selections, keeping each workspace address once. Different addresses remain distinct even if they return the same object.
-func (r *Artifacts) WithArtifacts(artifacts *Artifacts) *Artifacts {
-	assertNotNil("artifacts", artifacts)
-	q := r.query.Select("withArtifacts")
-	q = q.Arg("artifacts", artifacts)
-
-	return &Artifacts{
-		query:     q,
-		refetchID: r.refetchID,
-	}
-}
-
-// Remove artifacts selected by a DAG address.
+// Remove artifacts selected by a DAG address. Retain the collection view.
 func (r *Artifacts) WithoutURI(uri string) *Artifacts {
 	q := r.query.Select("withoutUri")
 	q = q.Arg("uri", uri)
@@ -3096,6 +2905,7 @@ func (r *Changeset) Sync(ctx context.Context) (*Changeset, error) {
 	}
 	return &Changeset{
 		query: selectNode(q.Root(), id, "Changeset"),
+		id:    &id,
 	}, nil
 }
 
@@ -3649,23 +3459,6 @@ func (r *CollectionTypeDef) WithGraphQLQuery(q *querybuilder.Selection) *Collect
 		// must be reevaluated.
 		refetchID: true,
 	}
-}
-
-// The type of batch operations, or null when there are none.
-func (r *CollectionTypeDef) BatchType(ctx context.Context) (*TypeDef, error) {
-	q := r.query.Select("batchType")
-
-	q = q.Select("id")
-	var objectID *ID
-	if err := q.Bind(&objectID).Execute(ctx); err != nil {
-		return nil, err
-	}
-	if objectID == nil {
-		return nil, nil
-	}
-	return &TypeDef{
-		query: selectNode(q.Root(), *objectID, "TypeDef"),
-	}, nil
 }
 
 // A unique identifier for this CollectionTypeDef.
@@ -4897,6 +4690,7 @@ func (r *Container) Sync(ctx context.Context) (*Container, error) {
 	}
 	return &Container{
 		query: selectNode(q.Root(), id, "Container"),
+		id:    &id,
 	}, nil
 }
 
@@ -5696,6 +5490,32 @@ func (r *Container) WithMountedFile(path string, source *File, opts ...Container
 	}
 	q = q.Arg("path", path)
 	q = q.Arg("source", source)
+
+	return &Container{
+		query:     q,
+		refetchID: r.refetchID,
+	}
+}
+
+// ContainerWithMountedFilesOpts contains options for Container.WithMountedFiles
+type ContainerWithMountedFilesOpts struct {
+	// Replace "${VAR}" or "$VAR" in the value of path according to the current environment variables defined in the container (e.g. "/$VAR/lib").
+	Expand bool
+}
+
+// Retrieves this container plus the given files mounted read-only in a directory at the given path.
+//
+// Each file appears under the base name of its path. The directory holds nothing else, and nothing can be written to it.
+func (r *Container) WithMountedFiles(path string, sources []*File, opts ...ContainerWithMountedFilesOpts) *Container {
+	q := r.query.Select("withMountedFiles")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `expand` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Expand) {
+			q = q.Arg("expand", opts[i].Expand)
+		}
+	}
+	q = q.Arg("path", path)
+	q = q.Arg("sources", sources)
 
 	return &Container{
 		query:     q,
@@ -7416,6 +7236,7 @@ func (r *Directory) Sync(ctx context.Context) (*Directory, error) {
 	}
 	return &Directory{
 		query: selectNode(q.Root(), id, "Directory"),
+		id:    &id,
 	}, nil
 }
 
@@ -9221,6 +9042,34 @@ func (r *File) Export(ctx context.Context, path string, opts ...FileExportOpts) 
 	return response, q.Execute(ctx)
 }
 
+// FileExtractOpts contains options for File.Extract
+type FileExtractOpts struct {
+	// Remove this many leading elements from each entry's path, as tar --strip-components does.
+	//
+	// Entries with no more elements than this are skipped.
+	StripComponents int
+}
+
+// Extracts this archive file into a directory.
+//
+// The format is detected from the file's contents: zip, or tar, either uncompressed or compressed with gzip, bzip2, xz or zstd.
+//
+// An entry whose path would leave the directory is an error.
+func (r *File) Extract(opts ...FileExtractOpts) *Directory {
+	q := r.query.Select("extract")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `stripComponents` optional argument
+		if !querybuilder.IsZeroValue(opts[i].StripComponents) {
+			q = q.Arg("stripComponents", opts[i].StripComponents)
+		}
+	}
+
+	return &Directory{
+		query:     q,
+		refetchID: r.refetchID,
+	}
+}
+
 // A unique identifier for this File.
 func (r *File) ID(ctx context.Context) (ID, error) {
 	if r.id != nil {
@@ -9431,6 +9280,7 @@ func (r *File) Sync(ctx context.Context) (*File, error) {
 	}
 	return &File{
 		query: selectNode(q.Root(), id, "File"),
+		id:    &id,
 	}, nil
 }
 
@@ -14106,6 +13956,7 @@ func (r *LLM) Spawn(ctx context.Context, opts ...LLMSpawnOpts) (*Agent, error) {
 	}
 	return &Agent{
 		query: selectNode(q.Root(), id, "Agent"),
+		id:    &id,
 	}, nil
 }
 
@@ -14141,6 +13992,7 @@ func (r *LLM) Sync(ctx context.Context) (*LLM, error) {
 	}
 	return &LLM{
 		query: selectNode(q.Root(), id, "LLM"),
+		id:    &id,
 	}, nil
 }
 
@@ -16098,6 +15950,7 @@ func (r *Module) Sync(ctx context.Context) (*Module, error) {
 	}
 	return &Module{
 		query: selectNode(q.Root(), id, "Module"),
+		id:    &id,
 	}, nil
 }
 
@@ -16807,6 +16660,7 @@ func (r *ModuleSource) Sync(ctx context.Context) (*ModuleSource, error) {
 	}
 	return &ModuleSource{
 		query: selectNode(q.Root(), id, "ModuleSource"),
+		id:    &id,
 	}, nil
 }
 
@@ -19497,6 +19351,7 @@ func (r *Service) Start(ctx context.Context) (*Service, error) {
 	}
 	return &Service{
 		query: selectNode(q.Root(), id, "Service"),
+		id:    &id,
 	}, nil
 }
 
@@ -19522,6 +19377,7 @@ func (r *Service) Stop(ctx context.Context, opts ...ServiceStopOpts) (*Service, 
 	}
 	return &Service{
 		query: selectNode(q.Root(), id, "Service"),
+		id:    &id,
 	}, nil
 }
 
@@ -19535,6 +19391,7 @@ func (r *Service) Sync(ctx context.Context) (*Service, error) {
 	}
 	return &Service{
 		query: selectNode(q.Root(), id, "Service"),
+		id:    &id,
 	}, nil
 }
 
@@ -20083,6 +19940,7 @@ func (r *Terminal) Sync(ctx context.Context) (*Terminal, error) {
 	}
 	return &Terminal{
 		query: selectNode(q.Root(), id, "Terminal"),
+		id:    &id,
 	}, nil
 }
 
@@ -23837,6 +23695,7 @@ func (r *SyncerClient) Sync(ctx context.Context) (Syncer, error) {
 	}
 	return &SyncerClient{
 		query: selectNode(q.Root(), id, "Syncer"),
+		id:    &id,
 	}, nil
 }
 
@@ -25909,32 +25768,53 @@ func WrapClient(c graphql.Client) graphql.Client {
 	return errorWrappedClient{c}
 }
 
-// dag is this package's own connection, used only by the generated
-// UnmarshalJSON methods above to build a query root when deserializing an
-// object from its ID. It lives here, self-contained, rather than reusing
-// the connect-layer package's dag (internal/dagger.dag), because this
-// package can't import that one without creating a cycle. It talks to the
-// same underlying engine session either way, since both read it from the
-// same environment variables.
-var dag *Query
+// The decoder and connect layer share a lazy transport. Importing bindings,
+// constructing handles, and decoding IDs must not require a Dagger session.
+var dag = NewQuery(ModuleGraphQLClient())
 
-func init() {
-	dag = NewQuery(getClientParams())
+var defaultModuleClient moduleClient
+
+// ModuleGraphQLClient returns the module session's shared transport. Session
+// configuration is read on the first request, not during package initialization.
+func ModuleGraphQLClient() graphql.Client {
+	return &defaultModuleClient
 }
 
-func getClientParams() graphql.Client {
+type moduleClient struct {
+	mu     sync.Mutex
+	client graphql.Client
+}
+
+func (c *moduleClient) MakeRequest(ctx context.Context, req *graphql.Request, resp *graphql.Response) error {
+	c.mu.Lock()
+	client := c.client
+	if client == nil {
+		var err error
+		client, err = getClientParams()
+		if err != nil {
+			c.mu.Unlock()
+			// Do not cache missing configuration: a session may be attached later.
+			return err
+		}
+		c.client = client
+	}
+	c.mu.Unlock()
+	return client.MakeRequest(ctx, req, resp)
+}
+
+func getClientParams() (graphql.Client, error) {
 	portStr, ok := os.LookupEnv("DAGGER_SESSION_PORT")
 	if !ok {
-		panic("DAGGER_SESSION_PORT is not set")
+		return nil, fmt.Errorf("DAGGER_SESSION_PORT is not set; run this call in a Dagger session")
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		panic(fmt.Errorf("DAGGER_SESSION_PORT %q is invalid: %w", portStr, err))
+		return nil, fmt.Errorf("DAGGER_SESSION_PORT %q is invalid: %w", portStr, err)
 	}
 
 	sessionToken := os.Getenv("DAGGER_SESSION_TOKEN")
 	if sessionToken == "" {
-		panic("DAGGER_SESSION_TOKEN is not set")
+		return nil, fmt.Errorf("DAGGER_SESSION_TOKEN is not set; run this call in a Dagger session")
 	}
 
 	host := fmt.Sprintf("127.0.0.1:%d", port)
@@ -25957,7 +25837,7 @@ func getClientParams() graphql.Client {
 			return dialTransport.RoundTrip(r)
 		}),
 	}
-	return graphql.NewClient(fmt.Sprintf("http://%s/query", host), httpClient)
+	return graphql.NewClient(fmt.Sprintf("http://%s/query", host), httpClient), nil
 }
 
 func fallbackSpanContext(ctx context.Context) context.Context {

@@ -102,13 +102,14 @@ func TestMain(m *testing.M) {}
 func Testify(t *testing.T) {}
 func TestWrong(n int) {}
 `,
-		"z_test.go":          "//go:build never\n\npackage root\nimport \"testing\"\nfunc Test中文(t *testing.T) {}\nfunc TestZ(t *testing.T) {}\n",
-		"sub/a_test.go":      "package sub\nimport \"testing\"\nfunc TestZ(t *testing.T) {}\n",
-		"sub/main.go":        "package main\nfunc main() {}\n",
-		"testdata/a_test.go": "package ignored\nimport \"testing\"\nfunc TestIgnored(t *testing.T) {}\n",
-		"_ignored/a_test.go": "package ignored\nimport \"testing\"\nfunc TestIgnored(t *testing.T) {}\n",
-		"nested/go.mod":      "module example.com/nested\n\ngo 1.26.1\n",
-		"nested/a_test.go":   "package nested\nimport \"testing\"\nfunc TestNested(t *testing.T) {}\n",
+		"z_test.go":                        "//go:build never\n\npackage root\nimport \"testing\"\nfunc Test中文(t *testing.T) {}\nfunc TestZ(t *testing.T) {}\n",
+		"sub/a_test.go":                    "package sub\nimport \"testing\"\nfunc TestZ(t *testing.T) {}\n",
+		"sub/main.go":                      "package main\nfunc main() {}\n",
+		"testdata/a_test.go":               "package ignored\nimport \"testing\"\nfunc TestIgnored(t *testing.T) {}\n",
+		"vendor/example.com/lib/a_test.go": "package lib\nimport \"testing\"\nfunc TestVendored(t *testing.T) {}\n",
+		"_ignored/a_test.go":               "package ignored\nimport \"testing\"\nfunc TestIgnored(t *testing.T) {}\n",
+		"nested/go.mod":                    "module example.com/nested\n\ngo 1.26.1\n",
+		"nested/a_test.go":                 "package nested\nimport \"testing\"\nfunc TestNested(t *testing.T) {}\n",
 	})
 	output := t.TempDir()
 	if err := runAll([]string{"--all", "--root", root, "--output-dir", output}); err != nil {
@@ -121,6 +122,23 @@ func TestWrong(n int) {}
 	want := ".\tTestZ\n.\tFuzzé\n.\tExample\nsub\tTestZ\n.\tTest中文\n.\tTestZ\nnested\tTestNested\n"
 	if string(data) != want {
 		t.Fatalf("test index lost file/source order or module boundaries:\n got: %q\nwant: %q", data, want)
+	}
+}
+
+func TestGoIgnoresVendoredPackages(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{"vendor/example.com/lib/a_test.go", true},
+		{"pkg/vendor/lib/a_test.go", true},
+		{"vendor/a_test.go", false},
+		{"pkg/vendor/a_test.go", false},
+		{"vendored/a_test.go", false},
+	} {
+		if got := goIgnores(tc.path); got != tc.want {
+			t.Errorf("goIgnores(%q) = %v, want %v", tc.path, got, tc.want)
+		}
 	}
 }
 

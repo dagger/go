@@ -171,9 +171,10 @@ type StaticcheckProjects @collection {
   }
 
   """
-  Run Staticcheck in the selected projects.
+  Run Staticcheck in the selected projects explicitly.
+  Artifact checks run on individual projects.
   """
-  lint(ws: Workspace!): Void @check {
+  lint(ws: Workspace!): Void {
     let projects = paths.map { p => project(p) }.filter { proj => proj.skipLint == false }
     projects.reduce(directory) { layers, proj => proj.lintLayers(ws, layers) }.sync
     null
