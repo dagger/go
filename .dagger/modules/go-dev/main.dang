@@ -248,9 +248,10 @@ type GoDev {
 
     # Names come from the source: tests, fuzz targets and examples count;
     # TestMain, a lowercase suffix and the wrong signature do not; testdata is
-    # left out; a nested module's tests are its own package's; build
-    # constraints are not evaluated; a name repeated in another package is
-    # that package's own key; and the order is stable.
+    # left out; a nested module's tests are its own package's; a file whose
+    # build constraint needs a tag goflags doesn't set is left out, and a
+    # package with only such files is not offered; a name repeated in another
+    # package is that package's own key; and the order is stable.
     let rooted = directory
       .withNewFile("go.mod", "module example.com/root\n\ngo 1.26.1\n")
       .withNewFile("a_test.go", ```go
@@ -266,6 +267,7 @@ type GoDev {
       ``` + "\n")
       .withNewFile("constrained_test.go", "//go:build never\n\npackage root\nimport \"testing\"\nfunc TestConstrained(t *testing.T) {}\n")
       .withNewFile("sub/b_test.go", "package sub\nimport \"testing\"\nfunc TestBeta(t *testing.T) {}\nfunc TestAlpha(t *testing.T) {}\n")
+      .withNewFile("tagged/e_test.go", "//go:build never\n\npackage tagged\nimport \"testing\"\nfunc TestTagged(t *testing.T) {}\n")
       .withNewFile("examples/c_test.go", "package examples\nfunc Example() {}\n")
       .withNewFile("helpers/helpers_test.go", "package helpers\n")
       .withNewFile("testdata/c_test.go", "package c\nimport \"testing\"\nfunc TestIgnored(t *testing.T) {}\n")
@@ -279,8 +281,19 @@ type GoDev {
     )
     let rootNames = found.get(key: ".").tests(rooted).keys
     assert(
-      rootNames == ["TestAlpha", "FuzzAlpha", "ExampleAlpha", "TestConstrained"],
+      rootNames == ["TestAlpha", "FuzzAlpha", "ExampleAlpha"],
       "static test discovery found: " + rootNames.join(", "),
+    )
+    let tagged = go(version: "1.26.1", goflags: "-race -tags=never")
+    let taggedFound = tagged.packages(rooted)
+    assert(
+      taggedFound.keys == [".", "examples", "nested", "sub", "tagged"],
+      "discovery with the never tag found: " + taggedFound.keys.join(", "),
+    )
+    let taggedNames = taggedFound.get(key: ".").tests(rooted).keys
+    assert(
+      taggedNames == ["TestAlpha", "FuzzAlpha", "ExampleAlpha", "TestConstrained"],
+      "test discovery with the never tag found: " + taggedNames.join(", "),
     )
     let subNames = found.get(key: "sub").tests(rooted).keys
     assert(subNames == ["TestBeta", "TestAlpha"], "static test discovery in sub found: " + subNames.join(", "))

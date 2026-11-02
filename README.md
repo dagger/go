@@ -135,9 +135,13 @@ execs, not one `go test ./...` per module.
 Test names come from searching the package's `_test.go` files for
 `func TestXxx(t *testing.T)`, `func FuzzXxx(f *testing.F)` and
 `func ExampleXxx()`, so listing them runs no container. `TestMain`, `testdata`
-and nested modules are left out. Build constraints are not evaluated: a test
-excluded by one is still listed, and selecting it runs nothing. A module
-outside the `test` selection offers no tests.
+and nested modules are left out, as is a file whose build constraint needs a
+tag that `goflags` doesn't set, through `-tags`, `-race`, `-msan` or `-asan`:
+a package whose tests are all behind an `e2e` tag offers no tests, rather
+than one that fails because build constraints exclude every file. Platform,
+cgo, Go release and `GOEXPERIMENT` tags are not decided, so a file for another
+platform is still listed. A module outside the `test` selection offers no
+tests.
 
 `test` on a module is a plain function rather than a check, so that `dagger
 check` does not run the same tests twice.
@@ -158,11 +162,12 @@ Names can collide, as `cmd/foo` and `tools/foo` both build `foo`: the batch
 `binary` does not mind.
 
 A directory is a `main` package when one of its own non-test `.go` files says
-`package main`, so listing them runs no container. Files with an `ignore` build
-tag, usually `go generate` scripts, are left out, as are `testdata`, nested
-modules and names starting with `.` or `_`. Other build constraints are not
-evaluated: a package whose files are all for another platform is listed, and
-building it fails.
+`package main`, so listing them runs no container. Files whose build
+constraint needs a tag `goflags` doesn't set are left out, as test files are:
+an `ignore` tag, usually on `go generate` scripts, or one like `mage`. So are
+`testdata`, nested modules and names starting with `.` or `_`. Platform build
+constraints are not decided: a package whose files are all for another
+platform is listed, and building it for the engine's platform fails.
 
 The `build` setting selects `main` packages with the [Scoping](#scoping) rules.
 A pattern matches a package's directory within its module, in every module, or

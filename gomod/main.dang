@@ -281,11 +281,19 @@ type Gomod {
     ws: Workspace!,
     test: Boolean! = false,
     generate: Boolean! = false,
+    """
+    Build tags set for package discovery, as -tags sets them. A Go file whose
+    build constraint needs a tag not set here, and that no platform or Go
+    release sets, marks nothing in the discovery files. Only those differ:
+    with no tags, the scan is the same exec every tool shares.
+    """
+    tags: [String!]! = [],
   ): Directory! {
     let testFlags = if (test) { ["--test"] } else { [] }
     let generateFlags = if (generate) { ["--generate"] } else { [] }
+    let tagFlags = if (tags.length == 0) { [] } else { ["--tags", tags.join(",")] }
     scanner(ws)
-      .withExec(["go-includes", "--all", "--output-dir", "/output"] + testFlags + generateFlags)
+      .withExec(["go-includes", "--all", "--output-dir", "/output"] + testFlags + generateFlags + tagFlags)
       .directory("/output")
   }
 

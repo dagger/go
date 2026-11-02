@@ -45,7 +45,8 @@ type Go {
     """
     buildFlags: [String!]! = [],
     """
-    GOFLAGS for every Go container, e.g. "-tags=extended".
+    GOFLAGS for every Go container, e.g. "-tags=extended". Its -tags, -race,
+    -msan and -asan also decide which constrained files discovery reads.
     """
     goflags: String = null,
     """
@@ -168,7 +169,24 @@ type Go {
   # module, then a "package" line per package directory with something to do.
   # Reading it replaces a search, glob or field read per result.
   let discoveryLines(ws: Workspace!): [String!]! {
-    lib.scan(ws).file("_discovery_").contents.split("\n").filter { line => line != "" }
+    lib.scan(ws, tags: buildTags).file("_discovery_").contents.split("\n").filter { line => line != "" }
+  }
+
+  # The build tags goflags sets, which decide the files discovery reads: the
+  # last -tags list, as go's flag parsing keeps the last, and race, msan or asan
+  # for the flag of that name.
+  let buildTags: [String!]! {
+    let empty: [String!]! = []
+    let flags = (goflags ?? "")
+      .split(" ")
+      .filter { flag => flag != "" }
+      .map { flag => if (flag.hasPrefix("--")) { flag.trimPrefix("-") } else { flag } }
+    let listed = flags
+      .filter { flag => flag.hasPrefix("-tags=") }
+      .takeLast(1)
+      .reduce(empty) { tags, flag => tags + flag.trimPrefix("-tags=").split(",") }
+    let instrumented = ["race", "msan", "asan"].filter { tag => flags.contains("-" + tag) }
+    (listed + instrumented).filter { tag => tag != "" }.uniq
   }
 
   # Field n of a tab-separated discovery line; field 0 is its kind.
@@ -391,6 +409,7 @@ type Go {
       buildPatterns: build,
       buildFlags: buildFlags,
       goflags: goflags,
+      buildTags: buildTags,
       mountPath: mount,
     )
   }
@@ -695,6 +714,11 @@ type GoModule {
   let goflags: String
 
   """
+  The build tags goflags sets, which decide the files package discovery reads.
+  """
+  let buildTags: [String!]!
+
+  """
   Where the workspace is mounted in Go containers.
   """
   mountPath: String!
@@ -849,7 +873,7 @@ type GoModule {
 
   # The scan's package discovery: see Go.discoveryLines.
   let discoveryLines(ws: Workspace!): [String!]! {
-    lib.scan(ws).file("_discovery_").contents.split("\n").filter { line => line != "" }
+    lib.scan(ws, tags: buildTags).file("_discovery_").contents.split("\n").filter { line => line != "" }
   }
 
   # Field n of this module's discovery line: 2 for its module path, 3 for its
@@ -901,7 +925,8 @@ type GoModule {
 
   # The shared scan already reads every Go file to discover packages. Read
   # its test-name index instead of searching every module again per package.
-  # Names retain file and source order; build constraints are not evaluated.
+  # Names retain file and source order. A file whose build constraint needs a
+  # tag goflags doesn't set is left out, so its tests are not listed.
   let testNames(ws: Workspace!, dir: String!): [String!]! {
     let empty: [String!]! = []
     if (skipTest) {
@@ -909,7 +934,7 @@ type GoModule {
     } else {
       let prefix = packagePath(dir) + "\t"
       lib
-        .scan(ws)
+        .scan(ws, tags: buildTags)
         .file("_testnames_")
         .contents
         .split("\n")
@@ -1141,9 +1166,10 @@ type GoModule {
 
   # Main packages are found by searching the source, like test names, so
   # listing them runs no container. A directory is one when one of its own
-  # non-test files says "package main" without an ignore build tag, which is
-  # how go:generate scripts are kept out of the build. Other build constraints
-  # are not evaluated: the build reports what the search got wrong.
+  # non-test files says "package main" and its build constraint can hold: an
+  # ignore tag, which is how go:generate scripts are kept out of the build, or
+  # any other tag goflags doesn't set, leaves the file out. Platform tags are
+  # not decided, since a binary may be built for any platform.
   let binaryPackages(ws: Workspace!): [String!]! {
     discoveryLines(ws)
       .filter { line =>
@@ -1232,7 +1258,7 @@ type GoModule {
       image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
       from: if (baseImage == null) { null } else { baseImage.withoutEntrypoint },
       source: source(ws),
-      headers: lib.scan(ws).sync.file("_headers_.gohdr"),
+      headers: lib.scan(ws, tags: buildTags).sync.file("_headers_.gohdr"),
       mountPath: mountPath,
       workdir: path,
       pkg: packageArg(pkg),
@@ -1314,7 +1340,7 @@ type GoModule {
         image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
         from: if (baseImage == null) { null } else { baseImage.withoutEntrypoint },
         source: source(ws, test: true),
-        headers: lib.scan(ws).sync.file("_headers_.gohdr"),
+        headers: lib.scan(ws, tags: buildTags).sync.file("_headers_.gohdr"),
         mountPath: mountPath,
         workdir: path,
         pkg: packageArg(rel),
@@ -1351,7 +1377,7 @@ type GoModule {
       image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
       from: if (baseImage == null) { null } else { baseImage.withoutEntrypoint },
       source: source(ws, test: true),
-      headers: lib.scan(ws).sync.file("_headers_.gohdr"),
+      headers: lib.scan(ws, tags: buildTags).sync.file("_headers_.gohdr"),
       mountPath: mountPath,
       workdir: path,
       flags: buildFlags,

@@ -83,7 +83,7 @@ func TestFileKindsFindsUnicodeTestNames(t *testing.T) {
 		"y_test.go": "package x\n\nimport \"testing\"\n\nfunc Fuzzé(ф *testing.F) {}\n",
 	})
 	for _, name := range []string{"x_test.go", "y_test.go"} {
-		k, _, err := fileKinds(filepath.Join(root, name), true)
+		k, _, err := fileKinds(filepath.Join(root, name), true, nil)
 		if err != nil || k != "t" {
 			t.Errorf("%s: kinds %q, err %v; want a test", name, k, err)
 		}
@@ -102,7 +102,7 @@ func TestMain(m *testing.M) {}
 func Testify(t *testing.T) {}
 func TestWrong(n int) {}
 `,
-		"z_test.go":          "//go:build never\n\npackage root\nimport \"testing\"\nfunc Test中文(t *testing.T) {}\nfunc TestZ(t *testing.T) {}\n",
+		"z_test.go":          "package root\nimport \"testing\"\nfunc Test中文(t *testing.T) {}\nfunc TestZ(t *testing.T) {}\n",
 		"sub/a_test.go":      "package sub\nimport \"testing\"\nfunc TestZ(t *testing.T) {}\n",
 		"sub/main.go":        "package main\nfunc main() {}\n",
 		"testdata/a_test.go": "package ignored\nimport \"testing\"\nfunc TestIgnored(t *testing.T) {}\n",
@@ -124,12 +124,56 @@ func TestWrong(n int) {}
 	}
 }
 
+// Discovery drops a file only when no target could build it: a tag GOFLAGS
+// doesn't set rules it out, while a platform, release or experiment tag might
+// hold and leaves it in. A directory whose files are all ruled out has no
+// package line, so go test is never run on it to fail.
+func TestDiscoveryEvaluatesBuildConstraints(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"go.mod":             "module example.com/root\n\ngo 1.26.1\n",
+		"mage/build.go":      "//go:build mage\n\npackage main\n\n//go:generate echo\nfunc Build() {}\n",
+		"mage/build_test.go": "//go:build mage\n\npackage main\nimport \"testing\"\nfunc TestMage(t *testing.T) {}\n",
+		"e2e/e2e_test.go":    "//go:build e2e && ci\n\npackage e2e\nimport \"testing\"\nfunc TestE2E(t *testing.T) {}\n",
+		"gen/gen.go":         "//go:build ignore\n\npackage main\n\n//go:generate echo\nfunc main() {}\n",
+		"legacy/legacy.go":   "// +build e2e\n\npackage main\n\nfunc main() {}\n",
+		"legacy/both.go":     "//go:build e2e\n// +build ignore\n\npackage main\n",
+		"unit/unit_test.go":  "//go:build !e2e\n\npackage unit\nimport \"testing\"\nfunc TestUnit(t *testing.T) {}\n",
+		"plat/plat.go":       "//go:build (windows || plan9) && !cgo && goexperiment.foo\n\npackage main\n\nfunc main() {}\n",
+		"release/release.go": "//go:build go1.99 && unix\n\npackage main\n\nfunc main() {}\n",
+		"late/late.go":       "package main\n\n//go:build never\nfunc main() {}\n",
+	})
+	discover := func(args ...string) string {
+		t.Helper()
+		output := t.TempDir()
+		if err := runAll(append([]string{"--all", "--root", root, "--output-dir", output}, args...)); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(filepath.Join(output, discoveryFile))
+		if err != nil {
+			t.Fatal(err)
+		}
+		names, err := os.ReadFile(filepath.Join(output, testNamesFile))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.SplitN(string(data), "\n", 2)[1] + "--\n" + string(names)
+	}
+	untagged := "package\t.\tlate\tm\npackage\t.\tplat\tm\npackage\t.\trelease\tm\npackage\t.\tunit\tt\n--\nunit\tTestUnit\n"
+	if got := discover(); got != untagged {
+		t.Errorf("without tags:\n got: %q\nwant: %q", got, untagged)
+	}
+	tagged := "package\t.\te2e\tt\npackage\t.\tlate\tm\npackage\t.\tlegacy\tm\npackage\t.\tmage\tgmt\npackage\t.\tplat\tm\npackage\t.\trelease\tm\n--\ne2e\tTestE2E\nmage\tTestMage\n"
+	if got := discover("--tags", "e2e, ci,mage"); got != tagged {
+		t.Errorf("with e2e, ci and mage:\n got: %q\nwant: %q", got, tagged)
+	}
+}
+
 // Generated files can hold lines longer than any scanner buffer.
 func TestFileKindsReadsLongLines(t *testing.T) {
 	root := writeTree(t, map[string]string{
 		"gen.go": "package main\n\nvar x = \"" + strings.Repeat("a", 17<<20) + "\"\n\nfunc main() {}\n",
 	})
-	k, _, err := fileKinds(filepath.Join(root, "gen.go"), false)
+	k, _, err := fileKinds(filepath.Join(root, "gen.go"), false, nil)
 	if err != nil || k != "m" {
 		t.Errorf("kinds %q, err %v; want a main package", k, err)
 	}
