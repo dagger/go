@@ -255,16 +255,28 @@ type Gomod {
   container: the engine builds and runs it once for the whole workspace.
   """
   let scanner(ws: Workspace!): Container! {
-    # No cache volumes: the scan is an ordinary result, which another engine
-    # can pull from the remote cache.
-    container.from("golang:" + scannerVersion + "-alpine")
-      # The same download retry as withGoCaches.
-      .withEnvVariable("GOPROXY", "https://proxy.golang.org|https://proxy.golang.org|direct")
-      .withoutEntrypoint
-      .withWorkdir("/helpers/go-includes")
-      .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
-      .withExec(["go", "build", "-o", "/usr/local/bin/go-includes", "."])
-      .withMountedDirectory("/ws", ws.directory("/", include: ["**/*.go", "**/go.mod"]))
+    # The helper's build doesn't depend on the workspace, so it runs while the
+    # workspace syncs: the fields of {{ }} run at once. Left in one chain, the
+    # sync would come first, as the chain's argument.
+    let parts = {{
+      # No cache volumes: the scan is an ordinary result, which another engine
+      # can pull from the remote cache.
+      helper: container.from("golang:" + scannerVersion + "-alpine")
+        # The same download retry as withGoCaches.
+        .withEnvVariable("GOPROXY", "https://proxy.golang.org|https://proxy.golang.org|direct")
+        .withoutEntrypoint
+        .withWorkdir("/helpers/go-includes")
+        .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
+        # A fresh engine compiles the standard library for this build, and
+        # skipping inlining there cuts the build by about a quarter. The scan
+        # loses about 25 ms without inlining, and the GC setting it runs with
+        # wins that back (see go-includes/main.go).
+        .withExec(["go", "build", "-gcflags=std=-l", "-o", "/usr/local/bin/go-includes", "."])
+        .sync,
+      source: ws.directory("/", include: ["**/*.go", "**/go.mod"]).sync,
+    }}
+    parts.helper
+      .withMountedDirectory("/ws", parts.source)
       .withWorkdir("/ws")
   }
 
@@ -274,6 +286,8 @@ type Gomod {
 
   One scan serves the whole workspace and every tool in it, so for a given mode
   every module produces the same exec and reads its own slice of the result.
+  Test settings passed for discovery make a scan of their own, so a tool whose
+  tests build with other tags, toolchain or cgo runs one more.
   This is the causal data behind every include list here; reach for the named
   fields on a module before this.
   """
@@ -281,11 +295,29 @@ type Gomod {
     ws: Workspace!,
     test: Boolean! = false,
     generate: Boolean! = false,
+    """
+    GOFLAGS go test runs with. Discovery lists only the tests go test builds,
+    so it needs their build tags.
+    """
+    goflags: String! = "",
+    """
+    The Go toolchain go test runs with, when not each module's go.mod version.
+    """
+    goVersion: String! = "",
+    """
+    Whether go test builds with cgo.
+    """
+    cgo: Boolean! = false,
   ): Directory! {
     let testFlags = if (test) { ["--test"] } else { [] }
     let generateFlags = if (generate) { ["--generate"] } else { [] }
+    let goflagsFlags = if (goflags == "") { [] } else { ["--goflags", goflags] }
+    let versionFlags = if (goVersion == "") { [] } else { ["--go-version", goVersion] }
+    let cgoFlags = if (cgo) { ["--cgo"] } else { [] }
     scanner(ws)
-      .withExec(["go-includes", "--all", "--output-dir", "/output"] + testFlags + generateFlags)
+      .withExec(
+        ["go-includes", "--output-dir", "/output"] + testFlags + generateFlags + goflagsFlags + versionFlags + cgoFlags,
+      )
       .directory("/output")
   }
 
@@ -460,6 +492,18 @@ type Gomod {
       .withEnvVariable("CGO_ENABLED", "0")
       .withExec(["go", "build", "-o", "/usr/local/bin/go-test-report", "."])
       .file("/usr/local/bin/go-test-report")
+  }
+
+  """
+  Every Dagger module config file in the workspace, at its workspace path.
+
+  A test that serves a Dagger module needs that module's config, which is not
+  a Go file and so is in no module's source. Read here rather than by each
+  caller, the engine shares the one read between every test check in the
+  workspace instead of making it once per check.
+  """
+  daggerConfigs(ws: Workspace!): Directory! {
+    ws.directory("/", include: ["**/dagger-module.toml", "**/dagger.json"])
   }
 
   """
@@ -743,17 +787,23 @@ type GoMod {
   let scanned(ws: Workspace!, test: Boolean!, generate: Boolean!): Directory! {
     let testFlags = if (test) { ["--test"] } else { [] }
     let generateFlags = if (generate) { ["--generate"] } else { [] }
-    container
-      .from("golang:" + gomod.scannerVersion + "-alpine")
-      # The same download retry as withGoCaches.
-      .withEnvVariable("GOPROXY", "https://proxy.golang.org|https://proxy.golang.org|direct")
-      .withoutEntrypoint
-      .withWorkdir("/helpers/go-includes")
-      .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
-      .withExec(["go", "build", "-o", "/usr/local/bin/go-includes", "."])
-      .withMountedDirectory("/ws", ws.directory("/", include: ["**/*.go", "**/go.mod"]))
+    # As Gomod.scanner, the helper builds while the workspace syncs.
+    let parts = {{
+      helper: container
+        .from("golang:" + gomod.scannerVersion + "-alpine")
+        # The same download retry as withGoCaches.
+        .withEnvVariable("GOPROXY", "https://proxy.golang.org|https://proxy.golang.org|direct")
+        .withoutEntrypoint
+        .withWorkdir("/helpers/go-includes")
+        .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
+        .withExec(["go", "build", "-gcflags=std=-l", "-o", "/usr/local/bin/go-includes", "."])
+        .sync,
+      source: ws.directory("/", include: ["**/*.go", "**/go.mod"]).sync,
+    }}
+    parts.helper
+      .withMountedDirectory("/ws", parts.source)
       .withWorkdir("/ws")
-      .withExec(["go-includes", "--all", "--output-dir", "/output"] + testFlags + generateFlags)
+      .withExec(["go-includes", "--output-dir", "/output"] + testFlags + generateFlags)
       .directory("/output")
   }
 

@@ -244,7 +244,7 @@ type GoDev {
     let tool = go(version: "1.27.3")
     let packages = tool.modules(ws).get(key: modPath).packages(ws)
     assert(containsPath(packages.keys, modPath), "package discovery missed " + modPath)
-    let tests = packages.get(key: modPath).tests(ws)
+    let tests = packages.get(key: modPath).tests
     let missing = [
       "TestFixtureFromTestdata",
       "TestGoTestIncludeAnnotation",
@@ -271,11 +271,12 @@ type GoDev {
     let skipped = go(version: "1.27.3", test: ["!" + modPath]).modules(ws).get(key: modPath).packages(ws).keys
     assert(containsPath(skipped, modPath) == false, "a skipped module offered its test package")
 
-    # Names come from the source: tests, fuzz targets and examples count;
-    # TestMain, a lowercase suffix and the wrong signature do not; testdata is
-    # left out; a nested module's tests are its own package's; build
-    # constraints are not evaluated; a name repeated in another package is
-    # that package's own key; and the order is stable.
+    # Names come from the source: tests, fuzz targets and examples with an
+    # output comment count; TestMain, a lowercase suffix, the wrong signature
+    # and an example go test would not run do not; testdata is left out; a
+    # nested module's tests are its own package's; a file build constraints
+    # exclude adds nothing; a name repeated in another package is that
+    # package's own key; and the order is stable.
     let rooted = directory
       .withNewFile("go.mod", "module example.com/root\n\ngo 1.27.3\n")
       .withNewFile("a_test.go", ```go
@@ -286,12 +287,15 @@ type GoDev {
         func Testify(t *testing.T) {}
         func TestHelper(n int) {}
         func FuzzAlpha(f *testing.F) {}
-        func ExampleAlpha() {}
+        func ExampleAlpha() {
+          // Output:
+        }
+        func ExampleUnrun() {}
         func Examplefoo() {}
       ``` + "\n")
       .withNewFile("constrained_test.go", "//go:build never\n\npackage root\nimport \"testing\"\nfunc TestConstrained(t *testing.T) {}\n")
       .withNewFile("sub/b_test.go", "package sub\nimport \"testing\"\nfunc TestBeta(t *testing.T) {}\nfunc TestAlpha(t *testing.T) {}\n")
-      .withNewFile("examples/c_test.go", "package examples\nfunc Example() {}\n")
+      .withNewFile("examples/c_test.go", "package examples\nfunc Example() {\n\t// Output:\n}\n")
       .withNewFile("helpers/helpers_test.go", "package helpers\n")
       .withNewFile("testdata/c_test.go", "package c\nimport \"testing\"\nfunc TestIgnored(t *testing.T) {}\n")
       .withNewFile("nested/go.mod", "module example.com/nested\n\ngo 1.27.3\n")
@@ -302,16 +306,16 @@ type GoDev {
       found.keys == [".", "examples", "sub"],
       "static package discovery found: " + found.keys.join(", "),
     )
-    let rootNames = found.get(key: ".").tests(rooted).keys
+    let rootNames = found.get(key: ".").tests.keys
     assert(
-      rootNames == ["TestAlpha", "FuzzAlpha", "ExampleAlpha", "TestConstrained"],
+      rootNames == ["TestAlpha", "FuzzAlpha", "ExampleAlpha"],
       "static test discovery found: " + rootNames.join(", "),
     )
-    let subNames = found.get(key: "sub").tests(rooted).keys
+    let subNames = found.get(key: "sub").tests.keys
     assert(subNames == ["TestBeta", "TestAlpha"], "static test discovery in sub found: " + subNames.join(", "))
-    let exampleNames = found.get(key: "examples").tests(rooted).keys
+    let exampleNames = found.get(key: "examples").tests.keys
     assert(exampleNames == ["Example"], "an examples-only package found: " + exampleNames.join(", "))
-    let nestedNames = go(version: "1.27.3").modules(rooted).get(key: "nested").packages(rooted).get(key: "nested").tests(rooted).keys
+    let nestedNames = go(version: "1.27.3").modules(rooted).get(key: "nested").packages(rooted).get(key: "nested").tests.keys
     assert(nestedNames == ["TestNested"], "the nested module's package found: " + nestedNames.join(", "))
 
     # The same name in two packages runs only where it was selected, and a
@@ -323,10 +327,10 @@ type GoDev {
       .asWorkspace
     let sharedTool = go(version: "1.27.3")
     let sharedPackages = sharedTool.modules(shared).get(key: ".").packages(shared)
-    sharedPackages.get(key: ".").tests(shared).subset(keys: ["TestShared"]).test(shared)
+    sharedPackages.get(key: ".").tests.subset(keys: ["TestShared"]).test(shared)
     let failed = {
       run(
-        sharedPackages.get(key: "sub").tests(shared).get(key: "TestShared").test(
+        sharedPackages.get(key: "sub").tests.get(key: "TestShared").test(
           shared,
           selection: sharedTool.modules(shared).get(key: ".").packages(shared).subset(keys: ["sub"]),
         ),
@@ -672,7 +676,7 @@ type GoDev {
     }.filter { failure => failure != "" }
     # Other shapes fail on purpose, so the test-file embed runs on its own.
     let tested = {
-      tool.modules(ws).get(key: ".").packages(ws).get(key: "lib").tests(ws).test(ws)
+      tool.modules(ws).get(key: ".").packages(ws).get(key: "lib").tests.test(ws)
       ""
     } rescue {
       err: Error => "lib tests (Go " + version + "): " + err.message
@@ -880,7 +884,7 @@ type GoDev {
       .withExec(["generic"])
       .stdout
     assert(out == "42\n", "the binary printed: " + out)
-    packages.get(key: "box").tests(ws).test(ws)
+    packages.get(key: "box").tests.test(ws)
     null
   }
 
@@ -2085,8 +2089,9 @@ type GoDev {
 
   selectedFailureCheck(ws: Workspace!): Void @check {
     let fixture = selectionFixture.withNewFile("m1/p1/tests_test.go", "package p1\nimport \"testing\"\nfunc TestFoo(t *testing.T) { t.Fatal(\"selected failure\") }\nfunc TestBar(t *testing.T) {}\n")
+    # A test go test never builds is no check, even when selected by name.
     let constrained = fixture.withNewFile("m1/p1/constrained_test.go", "//go:build never\n\npackage p1\nimport \"testing\"\nfunc TestConstrained(t *testing.T) {}\n")
-    selectedCheck(ws, constrained, selectionArgs + ["--go-test=TestConstrained"], passed: 8, failed: 1, messages: ["selected failure"])
+    selectedCheck(ws, constrained, selectionArgs + ["--go-test=TestConstrained"], passed: 7, failed: 1, messages: ["selected failure"])
   }
 
   selectedBuildFailureCheck(ws: Workspace!): Void @check {
@@ -2181,6 +2186,100 @@ type GoDev {
       .withWorkdir("/src")
       .withExec(["go", "test", "./..."])
       .sync
+    null
+  }
+
+  """
+  Test discovery lists only what go test runs: tests in files that build for
+  the engine's platform with the test container's Go version, cgo and GOFLAGS
+  build tags, and examples with an output comment. A custom base supplies its
+  own toolchain, cgo and GOFLAGS.
+  """
+  buildConstraintsCheck: Void @check {
+    let fixture = directory
+      .withNewFile("c/go.mod", "module example.com/c\n\ngo 1.22\n")
+      .withNewFile("c/c_test.go", "package c\nimport \"testing\"\nfunc TestBuilt(t *testing.T) {}\nfunc ExampleUnchecked() {}\n")
+      .withNewFile("c/cgo_test.go", "//go:build cgo\n\npackage c\nimport \"testing\"\nfunc TestCgo(t *testing.T) {}\n")
+      .withNewFile("c/never_test.go", "//go:build never\n\npackage c\nimport \"testing\"\nfunc TestNever(t *testing.T) {}\n")
+      .withNewFile("c/newer_test.go", "//go:build go1.23\n\npackage c\nimport \"testing\"\nfunc TestNewerGo(t *testing.T) {}\n")
+      .withNewFile("c/norace_test.go", "//go:build !race\n\npackage c\nimport \"testing\"\nfunc TestNoRace(t *testing.T) {}\n")
+      .withNewFile("c/other_windows_test.go", "package c\nimport \"testing\"\nfunc TestOtherPlatform(t *testing.T) {}\n")
+      .withNewFile("c/race_test.go", "//go:build race\n\npackage c\nimport \"testing\"\nfunc TestRace(t *testing.T) {}\n")
+      .withNewFile("c/tagged_test.go", "//go:build integration\n\npackage c\nimport \"testing\"\nfunc TestTagged(t *testing.T) {}\n")
+      .asWorkspace
+    let plain = go.module(fixture, "c").packages(fixture)
+    assert(
+      plain.get(key: "c").tests.keys == ["TestBuilt", "TestNoRace"],
+      "discovery listed tests go test does not run",
+    )
+    let tagged = go(version: "1.26.1", goflags: "-count=1\t-tags=integration").module(fixture, "c").packages(fixture)
+    assert(
+      tagged.get(key: "c").tests.keys == ["TestBuilt", "TestNewerGo", "TestNoRace", "TestTagged"],
+      "discovery did not follow the configured Go version and goflags",
+    )
+    let based = go(base: cgoCxxBase.withEnvVariable("GOFLAGS", "-count=1\n-tags=integration")).module(fixture, "c").packages(fixture)
+    assert(
+      based.get(key: "c").tests.keys == ["TestBuilt", "TestCgo", "TestNewerGo", "TestNoRace", "TestTagged"],
+      "discovery did not follow the custom base's toolchain, cgo and GOFLAGS",
+    )
+    let raced = go(base: cgoCxxBase, goflags: "-race").module(fixture, "c").packages(fixture)
+    assert(
+      raced.get(key: "c").tests.keys == ["TestBuilt", "TestCgo", "TestNewerGo", "TestRace"],
+      "discovery did not follow -race's build tag",
+    )
+    null
+  }
+
+  """
+  Indexed discovery keeps explicit operations on omitted modules working, and
+  lists each package's tests in file and source order.
+  """
+  catalogueIndexCheck(ws: Workspace!): Void @check {
+    let tool = go(version: "1.26.1")
+    let root = "testdata/go-module-with-testdata"
+    let packages = tool.module(ws, root).packages(ws)
+    let indexed = packages.get(key: root).tests.keys
+    assert(
+      indexed == [
+        "TestGoEmbedAssets",
+        "TestFixtureFromTestdata",
+        "TestGoTestIncludeAnnotation",
+        "TestDaggerSessionAvailableFromGoTest",
+      ],
+      "indexed test names are not the package's tests in file and source order",
+    )
+    assert(
+      tool.module(ws, emptyFixturePath).hasGenerateDirectives(ws) == false,
+      "an explicitly named module with no Go files did not remain reachable",
+    )
+    assert(
+      tool.module(ws, unreadableFixturePath).hasGenerateDirectives(ws) == false,
+      "an explicitly named unreadable module did not remain reachable",
+    )
+    let skipped = directory
+      .withNewFile("go.mod", "module example.com/skipped\n\ngo 1.26.1\n")
+      .withNewFile("main.go", "package main\nfunc main() {}\n")
+      .withNewFile("main_test.go", "package main\nimport \"testing\"\nfunc TestPresent(t *testing.T) {}\n")
+      .asWorkspace
+    let buildOnly = go(version: "1.26.1", test: ["!**"]).module(skipped, ".").packages(skipped)
+    assert(buildOnly.keys == ["."], "skipping tests removed a selected build package")
+    assert(
+      buildOnly.get(key: ".").tests.keys.length == 0,
+      "a build-only package offered skipped test names",
+    )
+    # A module's own directory sorts first among its package paths, though
+    # "-tools" sorts before "." as a module-relative directory.
+    let dashed = directory
+      .withNewFile("m/go.mod", "module example.com/m\n\ngo 1.26.1\n")
+      .withNewFile("m/m_test.go", "package m\nimport \"testing\"\nfunc TestRoot(t *testing.T) {}\n")
+      .withNewFile("m/-tools/t_test.go", "package tools\nimport \"testing\"\nfunc TestTools(t *testing.T) {}\n")
+      .asWorkspace
+    let dashedPackages = tool.module(dashed, "m").packages(dashed)
+    assert(dashedPackages.keys == ["m", "m/-tools"], "a module's packages were not listed in path order")
+    assert(
+      dashedPackages.get(key: "m/-tools").tests.keys == ["TestTools"],
+      "a package after the module's own directory lost its tests",
+    )
     null
   }
 }

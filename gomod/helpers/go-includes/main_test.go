@@ -86,14 +86,13 @@ var embedded embed.FS
 }
 
 func TestIncludeHelpers(t *testing.T) {
-	ws := &workspace{moduleSet: map[string]bool{
+	moduleSet := map[string]bool{
 		".":       true,
 		"pkg/mod": true,
-	}}
-	if got, ok := ws.containingModuleDir("pkg/mod/subdir"); !ok || got != "pkg/mod" {
-		t.Fatalf("workspace.containingModuleDir got %q, %v", got, ok)
 	}
-
+	if got, ok := containingModuleDir(moduleSet, "pkg/mod/subdir"); !ok || got != "pkg/mod" {
+		t.Fatalf("containingModuleDir got %q, %v", got, ok)
+	}
 }
 
 func TestIsLocalReplace(t *testing.T) {
@@ -127,7 +126,7 @@ func TestIsLocalReplace(t *testing.T) {
 }
 
 func TestIncludeBasePreservesNestedModuleBoundaries(t *testing.T) {
-	got := (targetModule{moduleRoot: "pkg"}).includeBase()
+	got := includeBasePatterns("pkg")
 	want := []string{
 		"pkg/**/*.go",
 		"pkg/**/*.c",
@@ -151,7 +150,7 @@ func TestIncludeBasePreservesNestedModuleBoundaries(t *testing.T) {
 		"pkg/**/default.pgo",
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("includeBase mismatch:\n got: %#v\nwant: %#v", got, want)
+		t.Fatalf("includeBasePatterns mismatch:\n got: %#v\nwant: %#v", got, want)
 	}
 }
 
@@ -194,16 +193,6 @@ func TestInvalidQuotedDirectiveArg(t *testing.T) {
 	}).includePatterns()
 	if err == nil {
 		t.Fatal("expected error")
-	}
-}
-
-func TestRelativeCLIPathRejected(t *testing.T) {
-	_, _, _, err := newTargetModuleFromArgs(t.Context(), []string{"--output", "/tmp/out", "relative/module"})
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "workspace path must be absolute: relative/module") {
-		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -460,7 +449,7 @@ func TestScanRecordsFailurePerModuleAndCarriesOn(t *testing.T) {
 		"unparseable/u.go":   "package unparseable\n\nimport {{{\n",
 	})
 	output := t.TempDir()
-	if err := runAll([]string{"--all", "--root", root, "--output-dir", output}); err != nil {
+	if err := runAll([]string{"--root", root, "--output-dir", output}); err != nil {
 		t.Fatalf("one bad module failed the whole scan: %v", err)
 	}
 
@@ -550,7 +539,7 @@ func TestScanListsOnlyRealGoModules(t *testing.T) {
 
 	// The list is written out for the module layer to filter discovery by.
 	output := t.TempDir()
-	if err := runAll([]string{"--all", "--root", root, "--output-dir", output}); err != nil {
+	if err := runAll([]string{"--root", root, "--output-dir", output}); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(output, "_modules_"))
@@ -593,7 +582,7 @@ func TestModuleGoVersion(t *testing.T) {
 	}
 
 	output := t.TempDir()
-	if err := runAll([]string{"--all", "--root", root, "--output-dir", output}); err != nil {
+	if err := runAll([]string{"--root", root, "--output-dir", output}); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(output, "patch.goversion"))

@@ -164,16 +164,63 @@ type Go {
   let lib: Gomod! { gomod(includeExtraFiles: includeExtraFiles) }
 
   # The scan's package discovery, which gomod's scanner writes in its one pass
-  # over every Go file (go-includes, discovery.go): a "module" line per Go
-  # module, then a "package" line per package directory with something to do.
-  # Reading it replaces a search, glob or field read per result.
-  let discoveryLines(ws: Workspace!): [String!]! {
-    lib.scan(ws).file("_discovery_").contents.split("\n").filter { line => line != "" }
+  # over every Go file (go-includes, discovery.go): a small index of the
+  # modules, pointing at one catalogue file per module. Reading it replaces a
+  # search, glob or field read per result.
+  let discoveryIndex(ws: Workspace!): JSONValue! {
+    discoveryScan(ws).file("_discovery_index_.json").asJSON
   }
 
-  # Field n of a tab-separated discovery line; field 0 is its kind.
-  let lineField(line: String!, n: Int!): String! {
-    line.split("\t").takeFirst(n + 1).takeLast(1).join("")
+  # The scan, discovering the tests go test builds as the test containers are
+  # configured. With no settings to pass, it is the one scan every module and
+  # tool shares. The default containers have no C compiler, so no cgo.
+  let discoveryScan(ws: Workspace!): Directory! {
+    if (base == null) {
+      lib.scan(ws, goflags: goflags ?? "", goVersion: version ?? "")
+    } else {
+      let env = baseGoEnv
+      lib.scan(ws, goflags: env.GOFLAGS, goVersion: env.GOVERSION, cgo: env.CGO_ENABLED == "1")
+    }
+  }
+
+  # A custom base brings its own toolchain, C compiler and GOFLAGS, so ask its
+  # go, with goflags over the image's GOFLAGS.
+  let baseGoEnv: {{GOVERSION: String!, CGO_ENABLED: String!, GOFLAGS: String!}}! {
+    let probed = if (goflags == null) { base! } else { base!.withEnvVariable("GOFLAGS", goflags!) }
+    let env = probed.withoutEntrypoint.withExec(["go", "env", "-json", "GOVERSION", "CGO_ENABLED", "GOFLAGS"]).stdout
+    JSON.decode(env) :: {{GOVERSION: String!, CGO_ENABLED: String!, GOFLAGS: String!}}!
+  }
+
+  let moduleRoots(ws: Workspace!): [String!]! {
+    JSON.decode(`${discoveryIndex(ws).field(path: ["roots"]).contents}`) :: [String!]!
+  }
+
+  let moduleDiscovery(ws: Workspace!, root: String!): JSONValue! {
+    let ordinal = JSON.decode(`${discoveryIndex(ws).field(path: ["modules", root]).contents}`) :: Int!
+    discoveryScan(ws).file("_discovery_modules_/" + `${ordinal}` + ".json").asJSON
+  }
+
+  # A module's "module" line, then a "package" line per package directory
+  # with something to do.
+  let moduleDiscoveryLines(ws: Workspace!, root: String!): [String!]! {
+    let empty: [String!]! = []
+    if (moduleRoots(ws).contains(root)) {
+      JSON.decode(`${moduleDiscovery(ws, root).field(path: ["lines"]).contents}`) :: [String!]!
+    } else {
+      # Named modules remain reachable even when discovery omits them.
+      empty
+    }
+  }
+
+  # A module's package directories, each with its test names in file and
+  # source order.
+  let modulePackageRecords(ws: Workspace!, root: String!): [{{directory: String!, tests: [String!]!}}!]! {
+    let empty: [{{directory: String!, tests: [String!]!}}!]! = []
+    if (moduleRoots(ws).contains(root)) {
+      JSON.decode(`${moduleDiscovery(ws, root).field(path: ["packages"]).contents}`) :: [{{directory: String!, tests: [String!]!}}!]!
+    } else {
+      empty
+    }
   }
 
   # Whether a package line's kinds hold one kind: "t", "m" or "g".
@@ -190,12 +237,7 @@ type Go {
   # the module the working directory is inside.
   let moduleRootsHere(ws: Workspace!): [String!]! {
     let cwd = ws.cwd.trimPrefix("/").trimSuffix("/")
-    let roots = discoveryLines(ws).filter { line => line.hasPrefix("module\t") }.map { line =>
-      lineField(
-        line,
-        1,
-      )
-    }
+    let roots = moduleRoots(ws)
     if (cwd == "" or cwd == ".") {
       roots
     } else {
@@ -218,9 +260,7 @@ type Go {
 
   # The root of the Go module holding a workspace path: the innermost one.
   let moduleRootOf(ws: Workspace!, pkgPath: String!): String! {
-    let roots = discoveryLines(ws)
-      .filter { line => line.hasPrefix("module\t") }
-      .map { line => lineField(line, 1) }
+    let roots = moduleRoots(ws)
       .filter { root => root == "." or pkgPath == root or pkgPath.hasPrefix(root + "/") }
     if (roots.length == 0) {
       raise "no Go module found containing path: " + pkgPath
@@ -307,10 +347,9 @@ type Go {
     }
     # Split once per line: each field taken is work for every package line,
     # which counts on every build.
-    discoveryLines(ws)
+    moduleDiscoveryLines(ws, modulePath)
       .filter { line => line.hasPrefix("package\t") }
       .map { line => line.split("\t") }
-      .filter { fields => fields[1]! == modulePath }
       .filter { fields =>
         let root = fields[1]!
         let dir = fields[2]!
@@ -457,12 +496,11 @@ type GoPackages @collection {
   entries: [GoPackageSelection!]!
 
   package(path: String!): GoPackage! @get {
-    let selected = entries.filter { entry => entry.directory == path }
     GoPackage(
       path: path,
       mountPath: mountPath,
       tool: tool,
-      selectedTests: if (selected.length == 0) { null } else { selected[0]!.tests },
+      tests: entries.filter { entry => entry.directory == path }[0]!.tests,
     )
   }
 
@@ -533,8 +571,6 @@ type GoPackage {
 
   let tool: Go!
 
-  let selectedTests: GoTests
-
   let module(ws: Workspace!): GoModule! {
     tool.packageModule(ws, path, mountPath)
   }
@@ -542,15 +578,7 @@ type GoPackage {
   """
   Tests in this package, keyed by name.
   """
-  tests(ws: Workspace!): GoTests! {
-    if (selectedTests != null) {
-      selectedTests!
-    } else {
-      let mod = module(ws)
-      let dir = mod.relativeDir(path)
-      GoTests(names: mod.testNames(ws, dir), directory: dir, module: mod)
-    }
-  }
+  tests: GoTests!
 
   """
   This package's binary for the engine's platform. It must be a main package.
@@ -689,18 +717,42 @@ type GoModule {
   Packages owned by this module. Nested Go modules have their own collection.
   """
   packages(ws: Workspace!): GoPackages! {
-    # In byte order already: discovery lists packages by workspace path.
+    # In byte order already: discovery lists a module's packages by workspace path.
     let paths = tool.packageKeys(ws, path)
+    let empty: [String!]! = []
+    let records = if (skipTest) {
+      # Build and generate can still offer packages in a module whose tests
+      # are skipped; none of their test names need to be fetched.
+      paths.map { pkg => {{directory: pkg, tests: empty}} }
+    } else {
+      # Both lists are in byte order. Select with a linear merge, avoiding a
+      # search through every package record for each selected path.
+      let next = 0
+      let selected = tool.modulePackageRecords(ws, path).filter { pkg =>
+        if (next < paths.length and pkg.directory == paths[next]!) {
+          next = next + 1
+          true
+        } else {
+          false
+        }
+      }
+      if (next != paths.length) { raise "package catalogue does not contain every selected path" }
+      selected
+    }
     GoPackages(
       paths: paths,
       mountPath: mountPath,
       tool: tool,
       module: self,
-      entries: paths.map { pkg =>
-        let dir = relativeDir(pkg)
+      entries: records.map { pkg =>
+        let dir = relativeDir(pkg.directory)
         GoPackageSelection(
-          directory: pkg,
-          tests: GoTests(names: testNames(ws, dir), directory: dir, module: self),
+          directory: pkg.directory,
+          tests: GoTests(
+            names: pkg.tests.uniq,
+            directory: dir,
+            module: self,
+          ),
         )
       },
     )
@@ -903,9 +955,9 @@ type GoModule {
     if (declared == "") { null } else { declared }
   }
 
-  # The scan's package discovery: see Go.discoveryLines.
+  # This module's discovery lines: see Go.moduleDiscoveryLines.
   let discoveryLines(ws: Workspace!): [String!]! {
-    lib.scan(ws).file("_discovery_").contents.split("\n").filter { line => line != "" }
+    tool.moduleDiscoveryLines(ws, path)
   }
 
   # Field n of this module's discovery line: 2 for its module path, 3 for its
@@ -952,26 +1004,6 @@ type GoModule {
       pkgPath
     } else {
       pkgPath.trimPrefix(path + "/")
-    }
-  }
-
-  # The shared scan already reads every Go file to discover packages. Read
-  # its test-name index instead of searching every module again per package.
-  # Names retain file and source order; build constraints are not evaluated.
-  let testNames(ws: Workspace!, dir: String!): [String!]! {
-    let empty: [String!]! = []
-    if (skipTest) {
-      empty
-    } else {
-      let prefix = packagePath(dir) + "\t"
-      lib
-        .scan(ws)
-        .file("_testnames_")
-        .contents
-        .split("\n")
-        .filter { line => line.hasPrefix(prefix) }
-        .map { line => line.trimPrefix(prefix) }
-        .uniq
     }
   }
 
@@ -1153,10 +1185,7 @@ type GoModule {
       # not a Go file and so is not in the source mount. Without it the serve
       # fails with "does not contain a dagger config file" even though the
       # module's Go code is right there.
-      .withDirectory(
-        ".",
-        ws.directory("/", include: ["**/dagger-module.toml", "**/dagger.json"]),
-      )
+      .withDirectory(".", gomod.daggerConfigs(ws))
       # Nested Dagger clients find the workspace boundary by walking up to .git.
       .withNewFile(".git/HEAD", "ref: refs/heads/main\n")
   }
@@ -1217,13 +1246,17 @@ type GoModule {
     let selected = discovered.filter { tests => tests.names.length > 0 }
     if (selected.length == 0) { raise "no tests selected in module " + path }
     let empty: [String!]! = []
-    let names = tool.sorted(selected.reduce(empty) { all, tests => all + tests.names }.uniq)
     let narrowed = discovered.any { tests => tests.narrowed }
     let whole = packages.narrowed == false and narrowed == false
     let dirs = if (whole) { ["./..."] } else {
       tool.sorted(selected.map { tests => packageArg(tests.directory) })
     }
-    let run = if (narrowed) { ["-run", "^(" + names.join("|") + ")$"] } else { empty }
+    # Every check of the module evaluates this, so the names are only
+    # gathered and sorted for the narrowed run that needs them.
+    let run = if (narrowed) {
+      let names = tool.sorted(selected.reduce(empty) { all, tests => all + tests.names }.uniq)
+      ["-run", "^(" + names.join("|") + ")$"]
+    } else { empty }
     let executed = testEnv(ws)
       .withWorkdir(path)
       .withEnvVariable("_EXPERIMENTAL_DAGGER_CLI_BIN", "/dev/.dagger/dagger")
@@ -1597,12 +1630,7 @@ type GoTest {
   Run go tests
   """
   test(ws: Workspace!, selection: GoPackages!): Void @check {
-    let pkg = module.importPath(ws) + (if (directory == ".") { "" } else { "/" + directory })
-    module.runTests(ws, selection).assertPassed(
-      module.packagePath(directory),
-      pkg,
-      name,
-    )
+    module.runTests(ws, selection).assertPassed(directory, module.packagePath(directory), name)
   }
 }
 
@@ -1617,15 +1645,20 @@ type GoTestResults {
   let results: Directory!
   let selections: [GoTestSelection!]!
 
-  let assertPassed(directory: String!, pkg: String!, name: String!): Void {
+  # directory is the package's module-relative directory, as the selections
+  # hold it, and packagePath its workspace path, for messages. Matching on the
+  # directory rather than the import path spares the check its own lookup of
+  # the module's import path, which runTests has already made.
+  let assertPassed(directory: String!, packagePath: String!, name: String!): Void {
+    let selected = selections.filter { tests => tests.directory == directory }
+    if (selected.length == 0) { raise "Go package is outside the test selection: " + packagePath }
+    if (selected[0]!.names.contains(name) == false) { raise "Go test is outside the selection: " + name }
+    let pkg = selected[0]!.pkg
     # Numeric ranks avoid filename limits and collisions for Go identifiers.
     let packageIndex = selections.filter { tests => tests.pkg < pkg }.length
-    let selected = selections.filter { tests => tests.pkg == pkg }
-    if (selected.length == 0) { raise "Go package is outside the test selection: " + pkg }
-    if (selected[0]!.names.contains(name) == false) { raise "Go test is outside the selection: " + name }
     let testIndex = selected[0]!.names.filter { test => test < name }.length
     let failure = results.file(`${packageIndex}` + "/" + `${testIndex}`).contents
-    if (failure != "") { raise "Go tests in " + directory + ": " + failure }
+    if (failure != "") { raise "Go tests in " + packagePath + ": " + failure }
     null
   }
 }
