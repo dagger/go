@@ -203,3 +203,18 @@ func TestPlanDirsOfTestdata(t *testing.T) {
 		t.Errorf("planDirsOf(every package).src = %q, want %q", got, want)
 	}
 }
+
+// A package in a directory a go.mod replaces a module with is followed by the
+// replaced module's import paths, whatever module path its own go.mod
+// declares, as the go command accepts.
+func TestPlanDirsOfReplace(t *testing.T) {
+	src := parseSourceImports(newTarget("linux\namd64\n0\ngo1.27.3\n", nil), "mod . example.com/app\n"+
+		"mod fork example.com/fork\n"+
+		"repl fork example.com/original\n"+
+		".\tmain.go\t-\texample.com/original/pkg\n"+
+		"fork/pkg\tpkg.go\t-\t\n"+
+		"fork/other\tother.go\t-\t\n")
+	if got, want := planDirsOf(src, ".", nil, nil).src, []string{".", "fork/pkg"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("planDirsOf(.).src = %q, want %q", got, want)
+	}
+}

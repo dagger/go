@@ -48,6 +48,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -904,10 +905,11 @@ func planContent(rel string) string {
 	return ""
 }
 
-// leadingComments is a file's leading run of blank lines and // comments, the
-// part of a file that isn't Go where go/build reads its build constraints.
+// leadingComments is a file's comments before its first text that isn't a
+// comment, line or block, which is as far as go/build reads a file that
+// isn't Go for its build constraints.
 func leadingComments(src []byte) []byte {
-	end := 0
+	end, inBlock := 0, false
 	for end < len(src) {
 		next := bytes.IndexByte(src[end:], '\n')
 		if next < 0 {
@@ -916,8 +918,23 @@ func leadingComments(src []byte) []byte {
 			next++
 		}
 		line := bytes.TrimSpace(src[end : end+next])
-		if len(line) > 0 && !bytes.HasPrefix(line, []byte("//")) {
-			break
+		for len(line) > 0 {
+			if inBlock {
+				i := bytes.Index(line, []byte("*/"))
+				if i < 0 {
+					break
+				}
+				inBlock, line = false, bytes.TrimSpace(line[i+2:])
+				continue
+			}
+			if bytes.HasPrefix(line, []byte("//")) {
+				break
+			}
+			if bytes.HasPrefix(line, []byte("/*")) {
+				inBlock, line = true, bytes.TrimSpace(line[2:])
+				continue
+			}
+			return src[:end]
 		}
 		end += next
 	}
@@ -945,7 +962,8 @@ func importLine(rel string, src []byte) string {
 // importsOfPack prints what a pack's Go files import, for following the
 // imports of a build from its main package: a line per Go file (importLine),
 // but tests, or with tests, its tests too; and a line "mod <dir> <module
-// path>" per go.mod, from its module directive. Testdata directories are
+// path>" per go.mod, from its module directive, and a line "repl <dir>
+// <module path>" per directory replacing a module in it. Testdata directories are
 // listed too: a build may name a package there, though no pattern matches
 // one.
 func importsOfPack(pack string, tests bool) error {
@@ -995,6 +1013,9 @@ func importsOfPack(pack string, tests bool) error {
 					break
 				}
 			}
+			for _, r := range replaceDirs(string(data[:size])) {
+				mods = append(mods, "repl "+filepath.ToSlash(filepath.Clean(filepath.Join(dir, r[1])))+" "+r[0])
+			}
 			continue
 		}
 		if !strings.HasSuffix(rel, ".go") || (!tests && strings.HasSuffix(rel, "_test.go")) {
@@ -1012,6 +1033,44 @@ func importsOfPack(pack string, tests bool) error {
 	}
 	_, err = os.Stdout.WriteString(b.String())
 	return err
+}
+
+// replaceDirs is a go.mod's replacements of a module by a directory: each
+// replaced module path and the directory, relative to the go.mod's.
+func replaceDirs(gomod string) [][2]string {
+	var out [][2]string
+	block := false
+	for _, l := range strings.Split(gomod, "\n") {
+		if i := strings.Index(l, "//"); i >= 0 {
+			l = l[:i]
+		}
+		f := strings.Fields(l)
+		switch {
+		case len(f) == 0:
+			continue
+		case block && f[0] == ")":
+			block = false
+			continue
+		case block:
+		case f[0] == "replace" && len(f) == 2 && f[1] == "(":
+			block = true
+			continue
+		case f[0] == "replace":
+			f = f[1:]
+		default:
+			continue
+		}
+		// old [version] => new [version]: a directory has no version.
+		arrow := slices.Index(f, "=>")
+		if arrow < 1 || arrow != len(f)-2 {
+			continue
+		}
+		if repl := strings.Trim(f[arrow+1], "\""); repl == "." || repl == ".." ||
+			strings.HasPrefix(repl, "./") || strings.HasPrefix(repl, "../") {
+			out = append(out, [2]string{strings.Trim(f[0], "\""), repl})
+		}
+	}
+	return out
 }
 
 // fileImports is a Go file's import paths but "C"; nothing for a file that

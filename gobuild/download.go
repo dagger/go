@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -370,7 +371,10 @@ func planDirsOf(src sourceImports, pkgDir string, byPath map[string][]sumEntry, 
 // directory, both relative to the source.
 type sourceImports struct {
 	mods []sourceModule
-	pkgs map[string][]string
+	// repls is each directory of the source that a go.mod replaces a module
+	// with, by the module's path.
+	repls []sourceModule
+	pkgs  map[string][]string
 	// all is each package's imports whatever its files' build constraints.
 	all map[string][]string
 }
@@ -384,6 +388,8 @@ func parseSourceImports(t target, out string) sourceImports {
 	for _, line := range strings.Split(out, "\n") {
 		if f := strings.Fields(line); len(f) == 3 && f[0] == "mod" {
 			src.mods = append(src.mods, sourceModule{dir: f[1], path: f[2]})
+		} else if len(f) == 3 && f[0] == "repl" {
+			src.repls = append(src.repls, sourceModule{dir: f[1], path: f[2]})
 		}
 	}
 	// The longest module path first, so a nested module wins.
@@ -406,10 +412,12 @@ func (src sourceImports) dirOf(ip string) (string, bool) {
 }
 
 // dirsOf is every source directory that may hold the package with import
-// path ip, by any module of the source whose path is a prefix of it.
+// path ip, by any module of the source whose path is a prefix of it, or any
+// directory a go.mod replaces such a module with, whatever module path its
+// own go.mod declares.
 func (src sourceImports) dirsOf(ip string) []string {
 	var dirs []string
-	for _, m := range src.mods {
+	for _, m := range slices.Concat(src.mods, src.repls) {
 		if ip != m.path && !strings.HasPrefix(ip, m.path+"/") {
 			continue
 		}
