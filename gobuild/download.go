@@ -131,10 +131,21 @@ func downloads(ctx context.Context, start *dagger.Directory, public, private *da
 	if err != nil {
 		return nil, err
 	}
+	// A go.sum also records the go.mod of every version the module graph
+	// ever looked at; with graph pruning, the plan loads few of them, and
+	// fetches those itself. Only the zips are what a build reads.
+	var zips []sumEntry
+	for _, e := range sums {
+		if e.zip != "" {
+			zips = append(zips, e)
+		}
+	}
+	sums = zips
 	dirs := make([]*dagger.Directory, len(sums))
 	errs := make([]error, len(sums))
 	var wg sync.WaitGroup
-	gate := make(chan struct{}, 16)
+	// Downloads wait on the network more than the CPU.
+	gate := make(chan struct{}, 32)
 	for i, e := range sums {
 		wg.Add(1)
 		go func() {

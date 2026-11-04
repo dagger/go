@@ -691,6 +691,10 @@ fi
 		WithEnvVariable("GOCACHE", "/gobuild/cache").
 		WithExec([]string{"go", "build", "-o", toolsDir + "/", "cmd/pack"}, bare).
 		Directory(toolsDir)
+	// A build that compiles the runtime needs pack, and waits for it there:
+	// it's built alongside the plan instead. An error shows again where it's
+	// used.
+	go b.tools.Sync(ctx)
 	return b, nil
 }
 
