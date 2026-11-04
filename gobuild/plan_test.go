@@ -2,8 +2,8 @@ package main
 
 import (
 	"reflect"
-	"sort"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
 )

@@ -192,7 +192,7 @@ func TestHdrToolPackmod(t *testing.T) {
 func TestHdrToolImportsReplace(t *testing.T) {
 	dir := buildHdrTool(t)
 	files := map[string]string{
-		"go.work":    "go 1.22\n\nuse ./app\n\nreplace example.com/worked => ./workfork\n",
+		"go.work": "go 1.22\n\nuse ./app\n\nreplace example.com/worked => ./workfork\n",
 		"app/go.mod": "module example.com/app\n\ngo 1.22\n\n" +
 			"replace example.com/original => ../fork // a fork\n\n" +
 			"replace (\n\texample.com/sub v1.0.0 => ./sub\n\texample.com/versioned => example.com/other v1.2.3\n)\n",

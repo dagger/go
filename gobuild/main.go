@@ -528,8 +528,8 @@ const modCacheDir = "/gobuild/modcache"
 type build struct {
 	// base is the caller's container without its mounts, so no cache volume
 	// shadows the module sources mounted per package.
-	base  *dagger.Container
-	src   *dagger.Directory
+	base *dagger.Container
+	src  *dagger.Directory
 	// mods is the module cache the go command made before any download,
 	// such as a toolchain it switched to, or all of it, downloaded per
 	// project, when it switched.
@@ -542,7 +542,7 @@ type build struct {
 	zips map[string]*dagger.File
 	// sums is the checksum of each downloaded module, by its directory name
 	// in the module cache.
-	sums  map[string]string
+	sums map[string]string
 	// planSrc and planMods list, a line each, the directories of the source
 	// and of the module cache whose Go files a plan unpacks (planDirs); nil
 	// for every one.
