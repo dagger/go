@@ -143,20 +143,18 @@ one bounded result file, so total report size is independent of `File.contents`
 limits. Failure messages retain the last 32 KiB of each diagnostic stream and
 mark truncated output; the full report remains in the shared execution container.
 
-The helper reads the filtered package and test collections. A partial selection
-uses explicit package arguments and an anchored `-run` pattern. Packages without
-a selected test are omitted. With no keys removed, the command runs `./...`
-without `-run`. A test name in two packages selects both; `--go-package` narrows
-that selection.
+The helper reads the filtered package and test collections. The command names
+only the packages that hold a selected test, so the module's other packages do
+not run. A partial selection adds an anchored `-run` pattern; with no keys
+removed there is none. A test name in two packages selects both; `--go-package`
+narrows that selection.
 
 A failed test fails its own check. A package that fails to build fails its selected
 tests. Failed `TestMain` setup or teardown and failures from undiscovered tests
-also fail that package's selected checks. Failures in packages without selected
-test checks fail all checks sharing that module's command. A selected test that
-did not run fails, saying so: one in a package that passed without it, or one
-after the failure that stopped its package, as `-failfast` does. Test failure
-messages include subtest output. Otherwise, passing tests in other packages
-still pass.
+also fail that package's selected checks. A selected test that did not run
+fails, saying so: one in a package that passed without it, or one after the
+failure that stopped its package, as `-failfast` does. Test failure messages
+include subtest output. Otherwise, passing tests in other packages still pass.
 Logs and test spans belong to the check that starts the shared command; other
 checks share its result.
 

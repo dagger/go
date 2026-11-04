@@ -2170,30 +2170,18 @@ type GoDev {
     )
   }
 
+  # Only packages holding selected tests run, so a failing package without
+  # any does not fail the module's tests.
   selectedUncheckedBuildCheck(ws: Workspace!): Void @check {
     let fixture = reportingFixture.withNewFile("reporting/broken/broken.go", "package p1\nvar broken = undefinedSymbol\n")
-    selectedCheck(
-      ws,
-      fixture,
-      ["--go-module=reporting"],
-      passed: 0,
-      failed: 2,
-      messages: ["failures in packages without selected test checks: example.com/reporting/broken"],
-    )
+    selectedCheck(ws, fixture, ["--go-module=reporting"], passed: 2)
   }
 
   selectedUncheckedTeardownCheck(ws: Workspace!): Void @check {
     let fixture = reportingFixture
       .withNewFile("reporting/broken/broken.go", "package p1\n")
       .withNewFile("reporting/broken/main_test.go", teardownSource)
-    selectedCheck(
-      ws,
-      fixture,
-      ["--go-module=reporting"],
-      passed: 0,
-      failed: 2,
-      messages: ["failures in packages without selected test checks: example.com/reporting/broken", "teardown failure"],
-    )
+    selectedCheck(ws, fixture, ["--go-module=reporting"], passed: 2)
   }
 
   selectedVendorCheck(ws: Workspace!): Void @check {

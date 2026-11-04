@@ -136,21 +136,8 @@ func summarize(report io.Reader, selections []selection, exitCode int, stderr io
 	if _, err := io.Copy(&stderrTail, stderr); err != nil {
 		return nil, fmt.Errorf("read test stderr: %w", err)
 	}
-	var unchecked []string
-	for pkg, p := range packages {
-		if p.failed && len(p.tests) == 0 {
-			unchecked = append(unchecked, pkg)
-		}
-	}
-	sort.Strings(unchecked)
 	globalFailure := ""
-	if len(unchecked) > 0 {
-		var output tail
-		for _, pkg := range unchecked {
-			output.add(packages[pkg].log.String())
-		}
-		globalFailure = "failures in packages without selected test checks: " + strings.Join(unchecked, ", ") + "\n" + output.String() + stderrTail.String()
-	} else if exitCode != 0 && !anyFailure {
+	if exitCode != 0 && !anyFailure {
 		globalFailure = fmt.Sprintf("shared test command failed (go test exit %d)\n%s", exitCode, stderrTail.String())
 	}
 	results := make(map[check]string)
