@@ -131,6 +131,58 @@ func TestHdrToolUnpackPlanDirs(t *testing.T) {
 	}
 }
 
+// gohdr packmod packs a downloaded module as a plan reads it: Go files as
+// their headers, C and assembly as their leading comments, the module's
+// metadata whole, and any other file empty.
+func TestHdrToolPackmod(t *testing.T) {
+	dir := buildHdrTool(t)
+	root := filepath.Join(dir, "mc")
+	files := map[string]string{
+		"cache/download/example.com/m/@v/v1.0.0.mod": "module example.com/m\n",
+		"example.com/m@v1.0.0/go.mod":                "module example.com/m\n",
+		"example.com/m@v1.0.0/m.go":                  "package m\n\nimport \"fmt\"\n\nfunc F() { fmt.Println() }\n",
+		"example.com/m@v1.0.0/m_amd64.s":             "//go:build !purego\n\n#include \"textflag.h\"\nTEXT x(SB)\n",
+		"example.com/m@v1.0.0/api.json":              "{\"big\": true}\n",
+		"example.com/m@v1.0.0/m_test.go":             "package m\n",
+	}
+	for name, data := range files {
+		p := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pack := filepath.Join(dir, "m.gohdr")
+	if out, err := exec.Command(filepath.Join(dir, "gohdr"), "packmod", root, pack, "example.com/m@v1.0.0", "cache/download/example.com/m/@v/v1.0.0.mod").CombinedOutput(); err != nil {
+		t.Fatalf("packmod: %v\n%s", err, out)
+	}
+	out := filepath.Join(dir, "out")
+	if b, err := exec.Command(filepath.Join(dir, "gohdr"), "unpack", pack, out, os.DevNull).CombinedOutput(); err != nil {
+		t.Fatalf("unpack: %v\n%s", err, b)
+	}
+	for name, want := range map[string]string{
+		"cache/download/example.com/m/@v/v1.0.0.mod": "module example.com/m\n",
+		"example.com/m@v1.0.0/go.mod":                "module example.com/m\n",
+		"example.com/m@v1.0.0/m.go":                  "package m\n\nimport \"fmt\"\n",
+		"example.com/m@v1.0.0/m_amd64.s":             "//go:build !purego\n\n",
+		"example.com/m@v1.0.0/api.json":              "",
+	} {
+		got, err := os.ReadFile(filepath.Join(out, name))
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		if string(got) != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(out, "example.com/m@v1.0.0/m_test.go")); err == nil {
+		t.Errorf("the test file was packed")
+	}
+}
+
 func TestLiteralPatterns(t *testing.T) {
 	got := literalPatterns([]string{"a.go/x.go", "b.go/[x]*?^.go", "!c.go/d.go", `e.go/f\g.go`})
 	want := []string{"a.go/x.go", `b.go/\[x\]\*\?\^.go`, `\!c.go/d.go`, `e.go/f\\g.go`}

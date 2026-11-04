@@ -807,7 +807,7 @@ func fileSHA256(file string, generated bool) (string, error) {
 // the files at rels under root, the module cache, each directory walked. A
 // Go file is its header (goHeader), as the plan reads of the source; a test
 // file and a testdata directory, which no build reads, are left out; any
-// other file is whole, as a //go:embed or a C include may name it.
+// other file is what a plan reads of it (planContent).
 func packmod(root, out string, rels []string) error {
 	var files []string
 	for _, rel := range rels {
@@ -858,13 +858,16 @@ func packmod(root, out string, rels []string) error {
 				return err
 			}
 			data = []byte(target)
-		} else {
+		} else if keep := planContent(rel); keep != "" {
 			if data, err = os.ReadFile(p); err != nil {
 				return err
 			}
-			if strings.HasSuffix(rel, ".go") {
+			switch keep {
+			case "header":
 				data = goHeader(rel, data)
 				imports = append(imports, importLine(rel, data))
+			case "constraints":
+				data = leadingComments(data)
 			}
 		}
 		fmt.Fprintf(w, "%s\n%o\n%d\n", rel, uint32(mode), len(data))
@@ -878,6 +881,47 @@ func packmod(root, out string, rels []string) error {
 		return err
 	}
 	return os.WriteFile(out+".imports", []byte(strings.Join(imports, "")), 0o644)
+}
+
+// planContent is what a plan reads of a downloaded module's file at rel:
+// "header" for a Go file; "constraints", the leading comments where go/build
+// finds build constraints, for another file it builds, C or assembly; "whole"
+// for the module's metadata and the files the go command reads as such; and
+// nothing of any other file, whose existence alone a //go:embed pattern
+// matches. A module's other files, such as an API's JSON descriptions, can
+// be most of its size.
+func planContent(rel string) string {
+	switch base := filepath.Base(rel); {
+	case strings.HasPrefix(rel, "cache/"), base == "go.mod", base == "go.sum", base == "go.work", base == "go.work.sum", base == "modules.txt":
+		return "whole"
+	case strings.HasSuffix(base, ".go"):
+		return "header"
+	}
+	switch filepath.Ext(rel) {
+	case ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".m", ".s", ".S", ".sx", ".f", ".F", ".for", ".f90", ".swig", ".swigcxx":
+		return "constraints"
+	}
+	return ""
+}
+
+// leadingComments is a file's leading run of blank lines and // comments, the
+// part of a file that isn't Go where go/build reads its build constraints.
+func leadingComments(src []byte) []byte {
+	end := 0
+	for end < len(src) {
+		next := bytes.IndexByte(src[end:], '\n')
+		if next < 0 {
+			next = len(src) - end
+		} else {
+			next++
+		}
+		line := bytes.TrimSpace(src[end : end+next])
+		if len(line) > 0 && !bytes.HasPrefix(line, []byte("//")) {
+			break
+		}
+		end += next
+	}
+	return src[:end]
 }
 
 // importLine is a Go file's line in an imports list: its directory, its
