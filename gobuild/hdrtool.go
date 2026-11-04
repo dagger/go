@@ -3,6 +3,7 @@ package main
 import (
 	"sync"
 
+	"dagger.io/dagger/core"
 	"dagger/gobuild/internal/dagger"
 )
 
@@ -19,7 +20,7 @@ import (
 var hdrTool = sync.OnceValue(func() *dagger.File {
 	// A standalone tool, so it is built with a pinned toolchain, statically,
 	// and runs in whatever image the module builds with.
-	return dag.Container().From(toolImage).
+	return core.NewContainer().From(toolImage).
 		WithEnvVariable("CGO_ENABLED", "0").
 		WithNewFile("/gohdr-src/go.mod", "module gohdr\n\ngo 1.26\n").
 		WithNewFile("/gohdr-src/main.go", hdrToolSrc).

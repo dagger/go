@@ -75,5 +75,4 @@ name = "gobuild"
 
 [sdks.go.scopes."gobuild".settings]
 dangEntrypoint = true
-globalClient = true
 unifiedClients = true

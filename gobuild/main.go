@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 
+	"dagger.io/dagger/core"
 	"dagger/gobuild/internal/dagger"
 )
 
@@ -87,7 +88,7 @@ func (m *Gobuild) Binary(
 	if err != nil {
 		return nil, err
 	}
-	out := dag.Directory().WithFile(output, linked.file)
+	out := core.NewDirectory().WithFile(output, linked.file)
 	if blocks[linkID(blocks)].exportsHeader() {
 		// cgo writes the header only for a package that exports something,
 		// and go build installs it only if it was written.
@@ -238,7 +239,7 @@ func (m *Gobuild) Archives(
 		WithMountedFile("/gobuild/gohdr", hdrTool()).
 		WithMountedDirectory(b.roots.Mod, b.mods).
 		WithMountedDirectory(b.roots.Src, b.src)
-	out := dag.Directory()
+	out := core.NewDirectory()
 	var entries strings.Builder
 	var archives []*dagger.File
 	for _, bl := range order {
@@ -487,7 +488,7 @@ func newBuild(ctx context.Context, ctr *dagger.Container, image string, from *da
 	go planSource(source).ID(ctx)
 	var err error
 	if image != "" {
-		from = dag.Container().From(image)
+		from = core.NewContainer().From(image)
 	}
 	if from != nil {
 		if ctr, err = canonical(ctx, ctr, from); err != nil {
@@ -630,7 +631,7 @@ fi
 // copy of a large source costs more than the listing, which reruns when the
 // source changes anyway and costs one exec then.
 func (b *build) sourceSizes(ctx context.Context) (map[string]int64, error) {
-	out, err := dag.Container().From(toolImage).
+	out, err := core.NewContainer().From(toolImage).
 		WithMountedFile("/gobuild/gohdr", hdrTool(), dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
 		WithMountedDirectory("/gobuild/src", b.src, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true}).
 		WithExec([]string{"/gobuild/gohdr", "sizes", "/gobuild/src"}, bare).
