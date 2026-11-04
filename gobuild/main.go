@@ -190,7 +190,7 @@ func (m *Gobuild) Archives(
 	dependencies bool,
 ) (*dagger.Directory, error) {
 	cwd := path.Join(mountPath, workdir)
-	b, err := newBuild(ctx, base, image, from, source, headers, mountPath, cwd, flags)
+	b, err := newBuild(ctx, base, image, from, source, headers, "", true, mountPath, cwd, flags)
 	if err != nil {
 		return nil, err
 	}
@@ -343,7 +343,7 @@ func run(ctx context.Context, base *dagger.Container, image string, from *dagger
 		// checks: the per-package build doesn't replay it.
 		flags = append([]string{"-vet=off"}, flags...)
 	}
-	b, err := newBuild(ctx, base, image, from, source, headers, mountPath, cwd, flags)
+	b, err := newBuild(ctx, base, image, from, source, headers, path.Join(workdir, pkg), test, mountPath, cwd, flags)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -503,7 +503,11 @@ type build struct {
 	roots roots
 }
 
-func newBuild(ctx context.Context, ctr *dagger.Container, image string, from *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, cwd string, flags []string) (*build, error) {
+// newBuild prepares a build of the source; pkgDir is the directory of the
+// package it builds, relative to the source, or "" for every package of the
+// module, and tests whether it builds tests: they decide which modules the
+// build downloads.
+func newBuild(ctx context.Context, ctr *dagger.Container, image string, from *dagger.Container, source *dagger.Directory, headers *dagger.File, pkgDir string, tests bool, mountPath, cwd string, flags []string) (*build, error) {
 	// The plan's view of the source is a filtered copy, as slow on a large
 	// source as the rest of this setup, which it doesn't depend on: it's
 	// made alongside it. An error shows again where the plan mounts it.
@@ -698,16 +702,21 @@ fi
 		if d.privatePatterns, err = firstEnv(ctx, caller, "GOPRIVATE", "GONOPROXY"); err != nil {
 			return nil, err
 		}
-		// What the source imports seeds which modules the build may read.
-		seed, err := public.
+		// What the source's packages import: the build follows them from
+		// the package it builds to the modules it downloads.
+		mode := "build"
+		if tests {
+			mode = "tests"
+		}
+		listed, err := public.
 			WithMountedFile("/gobuild/gohdr", hdrTool(), dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
 			WithMountedFile("/gobuild/src.hdr", headers, dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
-			WithExec([]string{"/gobuild/gohdr", "imports", "/gobuild/src.hdr"}, bare).
+			WithExec([]string{"/gobuild/gohdr", "imports", "/gobuild/src.hdr", mode}, bare).
 			Stdout(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("source imports: %w", err)
 		}
-		if b.packs, b.zips, err = d.discover(ctx, strings.Fields(seed)); err != nil {
+		if b.packs, b.zips, err = d.discover(ctx, parseSourceImports(listed), pkgDir); err != nil {
 			return nil, fmt.Errorf("go mod download: %w", err)
 		}
 		b.fetch = d.lazyZip

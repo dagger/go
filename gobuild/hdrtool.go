@@ -783,10 +783,12 @@ func writePackageImports(path string, imports map[string]map[string]bool) error 
 	return os.WriteFile(path, []byte(b.String()), 0o644)
 }
 
-// importsOfPack prints the import paths of a pack's Go files but its tests,
-// one per line, sorted: what a build of its packages may import, whatever
-// its build constraints select.
-func importsOfPack(pack string) error {
+// importsOfPack prints what a pack's packages import, for following the
+// imports of a build from its main package: a line "pkg <dir> <imports...>"
+// per package directory, of its Go files but its tests, or with tests, its
+// tests too; and a line "mod <dir> <module path>" per go.mod, from its module
+// directive. Testdata directories are left out.
+func importsOfPack(pack string, tests bool) error {
 	in, err := os.Open(pack)
 	if err != nil {
 		return err
@@ -800,7 +802,8 @@ func importsOfPack(pack string) error {
 	if magic, err := line(); err != nil || magic != "gohdr 1" {
 		return fmt.Errorf("not a gohdr pack")
 	}
-	imports := map[string]bool{}
+	imports := map[string]map[string]bool{}
+	var mods []string
 	for {
 		rel, err := line()
 		if err == io.EOF && rel == "" {
@@ -824,13 +827,53 @@ func importsOfPack(pack string) error {
 		if _, err := io.ReadFull(r, data); err != nil {
 			return err
 		}
-		if strings.HasSuffix(rel, ".go") && !strings.HasSuffix(rel, "_test.go") && !strings.Contains("/"+rel, "/testdata/") {
-			for _, ip := range fileImports(rel, data[:size]) {
-				imports[ip] = true
+		if strings.Contains("/"+rel, "/testdata/") {
+			continue
+		}
+		dir := filepath.ToSlash(filepath.Dir(rel))
+		if filepath.Base(rel) == "go.mod" {
+			for _, l := range strings.Split(string(data[:size]), "\n") {
+				if f := strings.Fields(l); len(f) >= 2 && f[0] == "module" {
+					mods = append(mods, "mod "+dir+" "+strings.Trim(f[1], "\""))
+					break
+				}
 			}
+			continue
+		}
+		if !strings.HasSuffix(rel, ".go") || (!tests && strings.HasSuffix(rel, "_test.go")) {
+			continue
+		}
+		if imports[dir] == nil {
+			imports[dir] = map[string]bool{}
+		}
+		for _, ip := range fileImports(rel, data[:size]) {
+			imports[dir][ip] = true
 		}
 	}
-	return writeImports("/dev/stdout", imports)
+	dirs := make([]string, 0, len(imports))
+	for dir := range imports {
+		dirs = append(dirs, dir)
+	}
+	sort.Strings(dirs)
+	sort.Strings(mods)
+	var b strings.Builder
+	for _, m := range mods {
+		b.WriteString(m + "\n")
+	}
+	for _, dir := range dirs {
+		list := make([]string, 0, len(imports[dir]))
+		for ip := range imports[dir] {
+			list = append(list, ip)
+		}
+		sort.Strings(list)
+		b.WriteString("pkg " + dir)
+		for _, ip := range list {
+			b.WriteString(" " + ip)
+		}
+		b.WriteString("\n")
+	}
+	_, err = os.Stdout.WriteString(b.String())
+	return err
 }
 
 // fileImports is a Go file's import paths but "C"; nothing for a file that
@@ -847,20 +890,6 @@ func fileImports(name string, src []byte) []string {
 		}
 	}
 	return out
-}
-
-// writeImports writes import paths to path, one per line, sorted.
-func writeImports(path string, imports map[string]bool) error {
-	list := make([]string, 0, len(imports))
-	for ip := range imports {
-		list = append(list, ip)
-	}
-	sort.Strings(list)
-	var b strings.Builder
-	for _, ip := range list {
-		b.WriteString(ip + "\n")
-	}
-	return os.WriteFile(path, []byte(b.String()), 0o644)
 }
 
 // headerEnd follows a header's go:embed lines, as the go module's scan writes
@@ -908,8 +937,8 @@ func main() {
 	args := os.Args[1:]
 	var err error
 	switch {
-	case len(args) == 2 && args[0] == "imports":
-		err = importsOfPack(args[1])
+	case len(args) == 3 && args[0] == "imports":
+		err = importsOfPack(args[1], args[2] == "tests")
 	case len(args) >= 3 && args[0] == "packmod":
 		err = packmod(args[1], args[2], args[3:])
 	case len(args) == 4 && args[0] == "unpack":

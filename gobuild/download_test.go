@@ -91,3 +91,28 @@ func TestProviders(t *testing.T) {
 		}
 	}
 }
+
+func TestSourceImports(t *testing.T) {
+	src := parseSourceImports("mod . example.com/root\n" +
+		"mod tools example.com/root/tools\n" +
+		"pkg . example.com/root/lib fmt\n" +
+		"pkg lib github.com/dep/x\n" +
+		"pkg tools/cmd example.com/root/tools/inner\n" +
+		"pkg tools/inner golang.org/x/sys/unix\n")
+	for ip, want := range map[string]string{
+		"example.com/root":             ".",
+		"example.com/root/lib":         "lib",
+		"example.com/root/tools/cmd":   "tools/cmd",
+		"example.com/root/tools/inner": "tools/inner",
+		"example.com/root/missing":     "",
+		"github.com/dep/x":             "",
+	} {
+		dir, ok := src.dirOf(ip)
+		if !ok {
+			dir = ""
+		}
+		if dir != want {
+			t.Errorf("dirOf(%q) = %q, want %q", ip, dir, want)
+		}
+	}
+}

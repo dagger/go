@@ -135,14 +135,16 @@ type downloader struct {
 // discover downloads the modules a build of the source may read, as the go
 // command's loader finds them, and returns a directory of their plan packs
 // and their zips by module cache directory name. It follows packages: from
-// the source's imports, seed, each imported package's module is downloaded,
+// the package in the source's directory pkgDir, or with none, every package
+// of the source, through the source's own packages, each imported package's
+// module is downloaded,
 // and its pack lists the package's own imports, which it follows in turn,
 // until no new package turns up: what the build's packages import, whatever
 // their build constraints select, but not the rest of their modules, nor
 // any test's. Only modules whose zip a go.sum names are candidates; a module
 // the plan reads that discover missed, such as one a replace renames, the
 // plan fetches itself, and the build downloads its zip on its own (lazyZip).
-func (d *downloader) discover(ctx context.Context, seed []string) (*dagger.Directory, map[string]*dagger.File, error) {
+func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDir string) (*dagger.Directory, map[string]*dagger.File, error) {
 	byPath := map[string][]sumEntry{}
 	for _, e := range d.sums {
 		if e.zip != "" {
@@ -161,6 +163,7 @@ func (d *downloader) discover(ctx context.Context, seed []string) (*dagger.Direc
 		mu       sync.Mutex
 		modules  = map[string]*module{}
 		seenPkgs = map[string]bool{}
+		seenDirs = map[string]bool{}
 		wg       sync.WaitGroup
 		// Downloads wait on the network more than the CPU.
 		gate = make(chan struct{}, 32)
@@ -206,8 +209,23 @@ func (d *downloader) discover(ctx context.Context, seed []string) (*dagger.Direc
 		return m
 	}
 	var follow func(ips []string)
+	var followSource func(dir string)
+	followSource = func(dir string) {
+		mu.Lock()
+		if seenDirs[dir] {
+			mu.Unlock()
+			return
+		}
+		seenDirs[dir] = true
+		mu.Unlock()
+		follow(src.pkgs[dir])
+	}
 	follow = func(ips []string) {
 		for _, ip := range ips {
+			if dir, ok := src.dirOf(ip); ok {
+				followSource(dir)
+				continue
+			}
 			mu.Lock()
 			if seenPkgs[ip] {
 				mu.Unlock()
@@ -231,7 +249,13 @@ func (d *downloader) discover(ctx context.Context, seed []string) (*dagger.Direc
 			}
 		}
 	}
-	follow(seed)
+	if _, ok := src.pkgs[path.Clean(pkgDir)]; pkgDir != "" && ok {
+		followSource(path.Clean(pkgDir))
+	} else {
+		for dir := range src.pkgs {
+			followSource(dir)
+		}
+	}
 	wg.Wait()
 	names := make([]string, 0, len(modules))
 	for name, m := range modules {
@@ -255,6 +279,46 @@ func (d *downloader) discover(ctx context.Context, seed []string) (*dagger.Direc
 	// hundreds of them would stack a layer each, past what a mount takes.
 	dir, err := core.NewDirectory().WithFiles(".", packs).Sync(ctx)
 	return dir, zips, err
+}
+
+// sourceImports is what the source's packages import, from "gohdr imports":
+// its modules' paths by their directories, and each package's imports by its
+// directory, both relative to the source.
+type sourceImports struct {
+	mods []sourceModule
+	pkgs map[string][]string
+}
+
+type sourceModule struct{ dir, path string }
+
+func parseSourceImports(out string) sourceImports {
+	src := sourceImports{pkgs: map[string][]string{}}
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		switch {
+		case len(f) == 3 && f[0] == "mod":
+			src.mods = append(src.mods, sourceModule{dir: f[1], path: f[2]})
+		case len(f) >= 2 && f[0] == "pkg":
+			src.pkgs[f[1]] = f[2:]
+		}
+	}
+	// The longest module path first, so a nested module wins.
+	sort.Slice(src.mods, func(i, j int) bool { return len(src.mods[i].path) > len(src.mods[j].path) })
+	return src
+}
+
+// dirOf is the source directory of the package with import path ip, when a
+// module of the source provides it.
+func (src sourceImports) dirOf(ip string) (string, bool) {
+	for _, m := range src.mods {
+		if ip != m.path && !strings.HasPrefix(ip, m.path+"/") {
+			continue
+		}
+		dir := path.Join(m.dir, strings.TrimPrefix(strings.TrimPrefix(ip, m.path), "/"))
+		_, ok := src.pkgs[dir]
+		return dir, ok
+	}
+	return "", false
 }
 
 // lazyZip is the zip of the module version with the module cache directory
