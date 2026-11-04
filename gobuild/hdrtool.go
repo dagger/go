@@ -57,72 +57,137 @@ import (
 // unpack writes out the pack at src under dst, and writes to list, one per
 // line, the pack's Go files in a directory named like a Go file, at any
 // depth.
-func unpack(src, dst, list string) (err error) {
-	in, err := os.Open(src)
+func unpack(src, dst, list string) error {
+	files, listed, err := readPack(src, dst)
 	if err != nil {
 		return err
 	}
-	defer in.Close()
-	var listed strings.Builder
-	defer func() {
-		if werr := os.WriteFile(list, []byte(listed.String()), 0o644); werr != nil && err == nil {
-			err = werr
+	if err := writeFiles(files); err != nil {
+		return err
+	}
+	return os.WriteFile(list, []byte(listed), 0o644)
+}
+
+// unpackAll unpacks every .gohdr pack in dir under dst, all in one process
+// and at once.
+func unpackAll(dir, dst string) error {
+	packs, err := filepath.Glob(filepath.Join(dir, "*.gohdr"))
+	if err != nil {
+		return err
+	}
+	var files []packFile
+	for _, p := range packs {
+		f, _, err := readPack(p, dst)
+		if err != nil {
+			return fmt.Errorf("%s: %w", filepath.Base(p), err)
 		}
-	}()
+		files = append(files, f...)
+	}
+	return writeFiles(files)
+}
+
+// packFile is a file of a pack, at its path under where it's unpacked.
+type packFile struct {
+	path string
+	mode fs.FileMode
+	data []byte
+}
+
+// readPack reads the pack at src, its files at their paths under dst, and
+// lists, one per line, its Go files in a directory named like a Go file.
+func readPack(src, dst string) ([]packFile, string, error) {
+	in, err := os.Open(src)
+	if err != nil {
+		return nil, "", err
+	}
+	defer in.Close()
+	var files []packFile
+	var listed strings.Builder
 	r := bufio.NewReader(in)
 	line := func() (string, error) {
 		s, err := r.ReadString('\n')
 		return strings.TrimSuffix(s, "\n"), err
 	}
 	if magic, err := line(); err != nil || magic != "gohdr 1" {
-		return fmt.Errorf("not a gohdr pack")
+		return nil, "", fmt.Errorf("not a gohdr pack")
 	}
 	for {
 		rel, err := line()
 		if err == io.EOF && rel == "" {
-			return nil
+			return files, listed.String(), nil
 		}
 		if err != nil {
-			return err
+			return nil, "", err
 		}
 		modeStr, err := line()
 		if err != nil {
-			return err
+			return nil, "", err
 		}
 		sizeStr, err := line()
 		if err != nil {
-			return err
+			return nil, "", err
 		}
 		mode, err := strconv.ParseUint(modeStr, 8, 32)
 		if err != nil {
-			return err
+			return nil, "", err
 		}
 		size, err := strconv.Atoi(sizeStr)
 		if err != nil {
-			return err
+			return nil, "", err
 		}
 		data := make([]byte, size+1)
 		if _, err := io.ReadFull(r, data); err != nil {
-			return err
+			return nil, "", err
 		}
 		if dir := filepath.Dir(rel); strings.HasSuffix(rel, ".go") &&
 			(strings.HasSuffix(dir, ".go") || strings.Contains(dir, ".go/")) {
 			listed.WriteString(rel + "\n")
 		}
-		p := filepath.Join(dst, rel)
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			return err
-		}
-		if fs.FileMode(mode)&fs.ModeSymlink != 0 {
-			if err := os.Symlink(string(data[:size]), p); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := os.WriteFile(p, data[:size], fs.FileMode(mode)); err != nil {
-			return err
-		}
+		files = append(files, packFile{filepath.Join(dst, rel), fs.FileMode(mode), data[:size]})
 	}
+}
+
+// writeFiles writes files, several at once: a plan unpacks thousands of
+// small files, each a wait on the file system more than work for the CPU,
+// which one at a time took most of the plan's time.
+func writeFiles(files []packFile) error {
+	var dirs sync.Map
+	jobs := make(chan packFile)
+	var once sync.Once
+	var first error
+	var wg sync.WaitGroup
+	for range min(32, 2*runtime.NumCPU()) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for f := range jobs {
+				if err := writeFile(f, &dirs); err != nil {
+					once.Do(func() { first = err })
+				}
+			}
+		}()
+	}
+	for _, f := range files {
+		jobs <- f
+	}
+	close(jobs)
+	wg.Wait()
+	return first
+}
+
+// writeFile writes f, making its directory, once, if no other write did.
+func writeFile(f packFile, dirs *sync.Map) error {
+	dir := filepath.Dir(f.path)
+	if _, ok := dirs.Load(dir); !ok {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		dirs.Store(dir, true)
+	}
+	if f.mode&fs.ModeSymlink != 0 {
+		return os.Symlink(string(f.data), f.path)
+	}
+	return os.WriteFile(f.path, f.data, f.mode)
 }
 
 // sizes prints a line "<size> <path>" for each Go file under dir, the path
@@ -673,21 +738,6 @@ func fileSHA256(file string, generated bool) (string, error) {
 	}
 	h.Write(data[last:])
 	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-// unpackAll unpacks every .gohdr pack in dir under dst, in one process
-// rather than one per pack.
-func unpackAll(dir, dst string) error {
-	packs, err := filepath.Glob(filepath.Join(dir, "*.gohdr"))
-	if err != nil {
-		return err
-	}
-	for _, p := range packs {
-		if err := unpack(p, dst, os.DevNull); err != nil {
-			return fmt.Errorf("%s: %w", filepath.Base(p), err)
-		}
-	}
-	return nil
 }
 
 // packmod writes to out a pack of what a plan reads of a downloaded module:
