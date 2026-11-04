@@ -407,11 +407,7 @@ func (b *build) walk(ctx context.Context, blocks map[string]*block, weights map[
 	for _, bl := range blocks {
 		bl.addCFlags(cc)
 	}
-	sums, err := moduleSums(ctx, b.base, b.mods)
-	if err != nil {
-		return nil, fmt.Errorf("module checksums: %w", err)
-	}
-	mods := &modules{root: b.roots.Mod, all: b.mods, sums: sums}
+	mods := &modules{root: b.roots.Mod, all: b.mods, sums: b.sums}
 	if err := mods.expandLoose(ctx, blocks); err != nil {
 		return nil, err
 	}
@@ -431,6 +427,7 @@ func (b *build) walk(ctx context.Context, blocks map[string]*block, weights map[
 		}
 	}
 	// A PGO profile is preprocessed first: every compile reads it.
+	var err error
 	for _, bl := range blocks {
 		if bl.isProfile {
 			if w.profile, err = b.profileStep(ctx, bl, blocks, mods); err != nil {
@@ -477,6 +474,9 @@ type build struct {
 	base  *dagger.Container
 	src   *dagger.Directory
 	mods  *dagger.Directory
+	// sums is the checksum of each downloaded module in mods, by its
+	// directory name in the module cache.
+	sums  map[string]string
 	tools *dagger.Directory
 	roots roots
 }
@@ -490,7 +490,14 @@ func newBuild(ctx context.Context, ctr *dagger.Container, image string, from *da
 	if image != "" {
 		from = core.NewContainer().From(image)
 	}
+	// The caller's own container downloads a private module, with its
+	// credentials; a public one downloads in the toolchain alone.
+	caller := ctr
+	public := ctr
 	if from != nil {
+		if public, err = withEnvOnly(ctx, ctr, from, func(name string) bool { return slices.Contains(downloadEnv, name) }); err != nil {
+			return nil, err
+		}
 		if ctr, err = canonical(ctx, ctr, from); err != nil {
 			return nil, err
 		}
@@ -515,6 +522,13 @@ func newBuild(ctx context.Context, ctr *dagger.Container, image string, from *da
 	for _, m := range mounts {
 		if caches[m] {
 			ctr = ctr.WithoutMount(m)
+		}
+	}
+	if callerMounts, err := caller.Mounts(ctx); err == nil {
+		for _, m := range callerMounts {
+			if caches[m] {
+				caller = caller.WithoutMount(m)
+			}
 		}
 	}
 	gomodcache, err := ctr.EnvVariable(ctx, "GOMODCACHE")
@@ -546,11 +560,15 @@ func newBuild(ctx context.Context, ctr *dagger.Container, image string, from *da
 		return nil, err
 	}
 	b := &build{base: base, src: source, roots: roots{Src: mountPath, Mod: gomodcache, Cwd: cwd}}
-	// The module cache, downloaded from every go.mod and go.sum in the
-	// source: the root's, and those a local replace or go.work points at,
-	// or the alternate go.mod a -modfile flag names, with its go.sum.
+	// The module cache is made from the build's go.sums: the main module's,
+	// those of a go.work's modules and its go.work.sum, or the alternate
+	// go.mod a -modfile flag names, with its go.sum. The go command lists
+	// them, from every go.mod and go.sum in the source, and does what it
+	// does before any download, such as switching to the toolchain the
+	// go.mod asks for, which it downloads as a module.
 	include := []string{"**/go.mod", "**/go.sum", "go.work", "go.work.sum", "**/vendor/modules.txt"}
 	download := []string{"go", "mod", "download"}
+	list := []string{"go", "list", "-m", "-f", "{{.GoMod}}"}
 	// The go.mod the build reads its go directive from: the alternate one,
 	// or with none, the module's own, which the script asks go for.
 	goMod := ""
@@ -558,6 +576,7 @@ func newBuild(ctx context.Context, ctr *dagger.Container, image string, from *da
 		// An empty -modfile in the call means the module's own go.mod,
 		// whatever GOFLAGS, which the download runs with, names.
 		download = append(download, "-modfile=")
+		list = append(list, "-modfile=")
 	} else if ok {
 		if !path.IsAbs(mf) {
 			mf = path.Join(cwd, mf)
@@ -565,6 +584,7 @@ func newBuild(ctx context.Context, ctr *dagger.Container, image string, from *da
 		rel := strings.TrimPrefix(strings.TrimPrefix(mf, mountPath), "/")
 		include = append(include, rel, strings.TrimSuffix(rel, ".mod")+".sum")
 		download = append(download, "-modfile="+mf)
+		list = append(list, "-modfile="+mf)
 		goMod = mf
 	}
 	// The cache directory is made first: a module with no dependencies
@@ -572,6 +592,10 @@ func newBuild(ctx context.Context, ctr *dagger.Container, image string, from *da
 	quoted := make([]string, len(download))
 	for i, a := range download {
 		quoted[i] = shQuote(a)
+	}
+	listed := make([]string, len(list))
+	for i, a := range list {
+		listed[i] = shQuote(a)
 	}
 	// In vendor mode the go command reads dependencies from the vendor
 	// directory and never the module cache, and a vendored dependency need
@@ -586,11 +610,11 @@ func newBuild(ctx context.Context, ctr *dagger.Container, image string, from *da
 	// file read from the module cache is keyed by its path in it too: then
 	// a module's download is the same input in every project. A module
 	// cache the base comes with, filled for offline builds, is its start.
-	start := ""
+	seed := ""
 	if path.Clean(gomodcache) != modCacheDir {
-		start = "\n[ ! -d " + shQuote(gomodcache) + " ] || [ " + shQuote(gomodcache) + " -ef " + modCacheDir + " ] || cp -a " + shQuote(gomodcache) + "/. " + modCacheDir + "/"
+		seed = "\n[ ! -d " + shQuote(gomodcache) + " ] || [ " + shQuote(gomodcache) + " -ef " + modCacheDir + " ] || cp -a " + shQuote(gomodcache) + "/. " + modCacheDir + "/"
 	}
-	script := "set -e\nmkdir -p " + modCacheDir + start +
+	script := "set -e\nmkdir -p " + modCacheDir + seed +
 		"\nexport GOMODCACHE=" + modCacheDir + "\nmode=" + shQuote(mode) + "\nsrc=" + shQuote(mountPath) + "\ngomod=" + shQuote(goMod) + `
 if [ -z "$mode" ] && [ -n "$(find "$src" -path '*/vendor/modules.txt' | head -n 1)" ]; then
 	work=$(go env GOWORK)
@@ -606,14 +630,58 @@ if [ -z "$mode" ] && [ -n "$(find "$src" -path '*/vendor/modules.txt' | head -n 
 		[ "${minor:-0}" -ge "$min" ] && mode=vendor
 	fi
 fi
-[ "$mode" = vendor ] || ` + strings.Join(quoted, " ")
-	b.mods, err = base.
+: > /gobuild/sums
+[ "$mode" = vendor ] || {
+	gomods=$(` + strings.Join(listed, " ") + `)
+	if [ "$(go env GOVERSION)" != "$(GOTOOLCHAIN=local go env GOVERSION)" ]; then
+		# The go.mod asked for a newer Go, which the go command switched to:
+		# that toolchain downloads, in the project, as it always has.
+		` + strings.Join(quoted, " ") + `
+		touch /gobuild/switched
+	else
+		work=$(go env GOWORK)
+		for f in $gomods; do [ ! -f "${f%.mod}.sum" ] || cat "${f%.mod}.sum" >> /gobuild/sums; done
+		if [ -n "$work" ] && [ "$work" != off ] && [ -f "$work.sum" ]; then cat "$work.sum" >> /gobuild/sums; fi
+	fi
+}`
+	first, err := base.
 		WithMountedDirectory(mountPath, source.Filter(dagger.DirectoryFilterOpts{Include: include})).
 		WithWorkdir(cwd).
 		WithExec([]string{"sh", "-c", script}, bare).
-		Directory(modCacheDir).Sync(ctx)
+		Sync(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("go mod download: %w", err)
+	}
+	sumFile, err := first.File("/gobuild/sums").Contents(ctx)
+	if err != nil {
+		return nil, err
+	}
+	start := first.Directory(modCacheDir)
+	// What the go command downloaded before any module, such as a
+	// toolchain, is recorded in the module cache it starts from.
+	startSums := make(chan map[string]string, 1)
+	go func() {
+		sums, err := moduleSums(ctx, base, start)
+		if err != nil {
+			sums = nil
+		}
+		startSums <- sums
+	}()
+	entries := parseGoSums([]string{sumFile})
+	if switched, _ := first.Directory("/gobuild").Glob(ctx, "switched"); len(switched) > 0 {
+		entries = nil
+		b.mods = start
+	} else if b.mods, err = downloads(ctx, start, public, caller, gomodcache, entries); err != nil {
+		return nil, fmt.Errorf("go mod download: %w", err)
+	}
+	b.sums = map[string]string{}
+	for k, v := range <-startSums {
+		b.sums[k] = v
+	}
+	for _, e := range entries {
+		if e.zip != "" {
+			b.sums[escapeModule(e.path)+"@"+escapeModule(e.version)] = e.zip
+		}
 	}
 	// Built for the machine the execs run on, by the build's own toolchain.
 	b.tools = base.
