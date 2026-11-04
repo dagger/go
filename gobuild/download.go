@@ -149,20 +149,26 @@ func downloads(ctx context.Context, start *dagger.Directory, public, private *da
 		}()
 	}
 	wg.Wait()
-	out := start
+	// One exec copies them into one module cache: merged one by one, they
+	// would stack a layer each, hundreds deep, past what a mount takes.
+	ctr := public.WithMountedDirectory("/gobuild/start", start, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
 	for i, d := range dirs {
 		if errs[i] != nil {
 			return nil, fmt.Errorf("%s@%s: %w", sums[i].path, sums[i].version, errs[i])
 		}
-		out = out.WithDirectory(".", d)
+		ctr = ctr.WithMountedDirectory(fmt.Sprintf("/gobuild/in/%d", i), d, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
 	}
-	return out.Sync(ctx)
+	return ctr.
+		WithExec([]string{"sh", "-c", "set -e; mkdir -p " + modCacheDir + "; cp -a /gobuild/start/. " + modCacheDir + "/; " +
+			"[ ! -d /gobuild/in ] || for d in /gobuild/in/*; do cp -a \"$d\"/. " + modCacheDir + "/; done"}, bare).
+		Directory(modCacheDir).Sync(ctx)
 }
 
 // downloadModule downloads one module version into an empty module cache and
-// returns it: its zip, checked against the go.sum checksum, extracted, with
-// its go.mod and info, or only its go.mod and info when the go.sum names no
-// zip. A module cache the toolchain image comes with, filled for offline
+// returns it: its zip, checked against the go.sum checksum, with its go.mod
+// and info, or only its go.mod and info when the go.sum names no zip. It is
+// left unextracted: a build reads each module extracted on its own (modules),
+// and the plan extracts what it reads from the zips, as the go command does. A module cache the toolchain image comes with, filled for offline
 // builds, is read first. Its key is the module version and its checksums, so
 // every project that reads it shares it.
 func downloadModule(ctx context.Context, ctr *dagger.Container, gomodcache string, e sumEntry) (*dagger.Directory, error) {
@@ -183,6 +189,7 @@ func downloadModule(ctx context.Context, ctr *dagger.Container, gomodcache strin
 		// Not part of the module version: the go command's locks, and its
 		// record of the queries that found it.
 		"\nfind " + modCacheDir + " -name '*.lock' -delete\nrm -rf " + modCacheDir + "/cache/download/sumdb " + modCacheDir + "/cache/vcs" +
+		"\nfind " + modCacheDir + " -mindepth 1 -maxdepth 1 ! -name cache -exec rm -rf {} +" +
 		// The go.mod's checksum is in the key too, as a comment: the plan
 		// verifies the go.mod against it, so a download is the same input
 		// only for the same pair of checksums.
