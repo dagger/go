@@ -21,7 +21,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 
 	"dagger.io/dagger/core"
 	"dagger/gobuild/internal/dagger"
@@ -900,30 +899,13 @@ func weighSource(blocks map[string]*block, weights map[string]int64, sizes map[s
 
 // canonical is from with ctr's environment and nothing else of ctr's.
 func canonical(ctx context.Context, ctr *dagger.Container, from *dagger.Container) (*dagger.Container, error) {
-	vars, err := ctr.EnvVariables(ctx)
+	names, values, err := envOf(ctx, ctr)
 	if err != nil {
 		return nil, err
 	}
-	names := make([]string, len(vars))
-	values := make([]string, len(vars))
-	errs := make([]error, len(vars))
-	var wg sync.WaitGroup
-	for i, v := range vars {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if names[i], errs[i] = v.Name(ctx); errs[i] == nil {
-				values[i], errs[i] = v.Value(ctx)
-			}
-		}()
-	}
-	wg.Wait()
 	out := from
-	for i := range vars {
-		if errs[i] != nil {
-			return nil, errs[i]
-		}
-		out = out.WithEnvVariable(names[i], values[i])
+	for i, name := range names {
+		out = out.WithEnvVariable(name, values[i])
 	}
 	return out, nil
 }

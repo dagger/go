@@ -11,8 +11,10 @@ import (
 	"sync"
 	"unicode"
 
+	sdk "dagger.io/dagger"
 	"dagger.io/dagger/core"
 	"dagger/gobuild/internal/dagger"
+	"github.com/dagger/querybuilder"
 )
 
 // A build's module cache is assembled from one download per module version,
@@ -574,30 +576,30 @@ func withEnvOnly(ctx context.Context, ctr, from *dagger.Container, keep func(nam
 	return out, nil
 }
 
-// envOf is ctr's environment, as names and values in its order.
+// envOf is ctr's environment, as names and values in its order, read in one
+// request. The generated API lists a container's variables by ID only, and
+// reading each one's name and value through it takes two requests more per
+// variable.
 func envOf(ctx context.Context, ctr *dagger.Container) ([]string, []string, error) {
-	vars, err := ctr.EnvVariables(ctx)
+	id, err := ctr.ID(ctx)
 	if err != nil {
+		return nil, nil, err
+	}
+	var vars []struct {
+		Name  string `json:"name"`
+		Value string `json:"value"`
+	}
+	if err := querybuilder.Query().Client(sdk.DefaultGraphQLClient()).
+		Select("node").Arg("id", id).InlineFragment("Container").
+		Select("envVariables").SelectMultiple("name", "value").
+		Bind(&vars).
+		Execute(ctx); err != nil {
 		return nil, nil, err
 	}
 	names := make([]string, len(vars))
 	values := make([]string, len(vars))
-	errs := make([]error, len(vars))
-	var wg sync.WaitGroup
 	for i, v := range vars {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if names[i], errs[i] = v.Name(ctx); errs[i] == nil {
-				values[i], errs[i] = v.Value(ctx)
-			}
-		}()
-	}
-	wg.Wait()
-	for _, err := range errs {
-		if err != nil {
-			return nil, nil, err
-		}
+		names[i], values[i] = v.Name, v.Value
 	}
 	return names, values, nil
 }
