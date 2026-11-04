@@ -1,5 +1,5 @@
 name = "gobuild"
-engineVersion = "v1.0.0-beta.22"
+engineVersion = "v1.0.0-beta.24"
 
 [runtime]
   source = "go"
