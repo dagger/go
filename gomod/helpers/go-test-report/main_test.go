@@ -105,6 +105,22 @@ func TestSelectedTestThatNeverRan(t *testing.T) {
 	}
 }
 
+// With -failfast, go test starts no further package once one fails, and a
+// package it never started has no events at all. Its selected tests did not run.
+func TestPackageNeverStarted(t *testing.T) {
+	selected := []selection{{"example.com/p", []string{"TestBad"}}, {"example.com/q", []string{"TestLater"}}}
+	got, err := summarize(report(
+		event{Action: "fail", Package: "example.com/p", Test: "TestBad"},
+		event{Action: "fail", Package: "example.com/p"},
+	), selected, 1, strings.NewReader(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message := got[check{"example.com/q", "TestLater"}]; !strings.Contains(message, "TestLater did not run: go test stopped before starting example.com/q, after a failure") {
+		t.Errorf("TestLater: %q, want it reported as not run", message)
+	}
+}
+
 func TestLargeReportAndBoundedDiagnostics(t *testing.T) {
 	// Over 128 MiB in total, with bounded reader and per-check memory.
 	chunk, err := json.Marshal(event{Action: "output", Package: "example.com/p", Test: "TestBig/child", Output: strings.Repeat("x", 4096)})

@@ -2100,14 +2100,16 @@ type GoDev {
 
   # -failfast stops m1/p1 at TestFoo, so TestBar there never runs and fails.
   # The helper's unit tests check its message: the report may show the shared
-  # run's test spans for TestBar's check instead of its error.
+  # run's test spans for TestBar's check instead of its error. m1/p2 is left
+  # out: go test starts no further package after a failure, so whether it runs
+  # depends on whether it started before m1/p1 failed.
   selectedFailfastCheck(ws: Workspace!): Void @check {
     let fixture = selectionFixture.withNewFile("m1/p1/tests_test.go", "package p1\nimport \"testing\"\nfunc TestFoo(t *testing.T) { t.Fatal(\"selected failure\") }\nfunc TestBar(t *testing.T) {}\n")
     selectedCheck(
       ws,
       fixture,
-      selectionArgs,
-      passed: 6,
+      selectionArgs.filter { arg => arg != "--go-package=m1/p2" },
+      passed: 4,
       failed: 2,
       messages: ["selected failure"],
       goflags: "-failfast",
