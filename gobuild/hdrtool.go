@@ -907,7 +907,8 @@ func planContent(rel string) string {
 
 // leadingComments is a file's comments before its first text that isn't a
 // comment, line or block, which is as far as go/build reads a file that
-// isn't Go for its build constraints.
+// isn't Go for its build constraints. A block comment closed on the line
+// of that text stays closed.
 func leadingComments(src []byte) []byte {
 	end, inBlock := 0, false
 	for end < len(src) {
@@ -917,24 +918,29 @@ func leadingComments(src []byte) []byte {
 		} else {
 			next++
 		}
-		line := bytes.TrimSpace(src[end : end+next])
-		for len(line) > 0 {
-			if inBlock {
-				i := bytes.Index(line, []byte("*/"))
-				if i < 0 {
+		line := src[end : end+next]
+		for i := 0; ; {
+			for i < len(line) && (line[i] == ' ' || line[i] == '\t' || line[i] == '\r' || line[i] == '\n') {
+				i++
+			}
+			rest := line[i:]
+			switch {
+			case len(rest) == 0:
+			case inBlock:
+				j := bytes.Index(rest, []byte("*/"))
+				if j < 0 {
 					break
 				}
-				inBlock, line = false, bytes.TrimSpace(line[i+2:])
+				inBlock, i = false, i+j+2
 				continue
-			}
-			if bytes.HasPrefix(line, []byte("//")) {
-				break
-			}
-			if bytes.HasPrefix(line, []byte("/*")) {
-				inBlock, line = true, bytes.TrimSpace(line[2:])
+			case bytes.HasPrefix(rest, []byte("//")):
+			case bytes.HasPrefix(rest, []byte("/*")):
+				inBlock, i = true, i+2
 				continue
+			default:
+				return src[:end+i]
 			}
-			return src[:end]
+			break
 		}
 		end += next
 	}
@@ -963,7 +969,8 @@ func importLine(rel string, src []byte) string {
 // imports of a build from its main package: a line per Go file (importLine),
 // but tests, or with tests, its tests too; and a line "mod <dir> <module
 // path>" per go.mod, from its module directive, and a line "repl <dir>
-// <module path>" per directory replacing a module in it. Testdata directories are
+// <module path>" per directory replacing a module in a go.mod or go.work.
+// Testdata directories are
 // listed too: a build may name a package there, though no pattern matches
 // one.
 func importsOfPack(pack string, tests bool) error {
@@ -1006,7 +1013,7 @@ func importsOfPack(pack string, tests bool) error {
 			return err
 		}
 		dir := filepath.ToSlash(filepath.Dir(rel))
-		if filepath.Base(rel) == "go.mod" {
+		if base := filepath.Base(rel); base == "go.mod" || base == "go.work" {
 			for _, l := range strings.Split(string(data[:size]), "\n") {
 				if f := strings.Fields(l); len(f) >= 2 && f[0] == "module" {
 					mods = append(mods, "mod "+dir+" "+strings.Trim(f[1], "\""))

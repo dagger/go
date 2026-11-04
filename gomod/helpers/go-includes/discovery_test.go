@@ -454,3 +454,27 @@ func TestHeaderPackHoldsEmbeddable(t *testing.T) {
 		t.Errorf("the test file symlink is not in the pack as one:\n%s", pack)
 	}
 }
+
+// The header pack holds a go.work whole, as it holds go.mod files: the plan
+// follows its replacements to the source's directories.
+func TestHeaderPackHoldsGoWork(t *testing.T) {
+	work := "go 1.25\n\nuse ./app\n\nreplace example.com/original => ./fork\n"
+	root := writeTree(t, map[string]string{
+		"go.work":      work,
+		"app/go.mod":   "module example.com/app\n\ngo 1.25\n",
+		"app/main.go":  "package main\n\nimport _ \"example.com/original\"\n\nfunc main() {}\n",
+		"fork/go.mod":  "module example.com/fork\n\ngo 1.25\n",
+		"fork/fork.go": "package fork\n",
+	})
+	output := t.TempDir()
+	if err := runAll([]string{"--root", root, "--output-dir", output}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(output, headerPackFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf("go.work\n644\n%d\n%s\n", len(work), work); !strings.Contains(string(data), want) {
+		t.Errorf("the header pack doesn't hold go.work whole:\n%s", data)
+	}
+}

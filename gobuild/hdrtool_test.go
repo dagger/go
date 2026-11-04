@@ -143,6 +143,7 @@ func TestHdrToolPackmod(t *testing.T) {
 		"example.com/m@v1.0.0/m.go":                  "package m\n\nimport \"fmt\"\n\nfunc F() { fmt.Println() }\n",
 		"example.com/m@v1.0.0/m_amd64.s":             "//go:build !purego\n\n#include \"textflag.h\"\nTEXT x(SB)\n",
 		"example.com/m@v1.0.0/unused.c":              "/* Copyright notice\n   continued */\n//go:build ignore\n\nint unused;\n",
+		"example.com/m@v1.0.0/closed.c":              "//go:build ignore\n\n/* Explanation\n*/ int unused;\n",
 		"example.com/m@v1.0.0/api.json":              "{\"big\": true}\n",
 		"example.com/m@v1.0.0/m_test.go":             "package m\n",
 	}
@@ -169,6 +170,7 @@ func TestHdrToolPackmod(t *testing.T) {
 		"example.com/m@v1.0.0/m.go":                  "package m\n\nimport \"fmt\"\n",
 		"example.com/m@v1.0.0/m_amd64.s":             "//go:build !purego\n\n",
 		"example.com/m@v1.0.0/unused.c":              "/* Copyright notice\n   continued */\n//go:build ignore\n\n",
+		"example.com/m@v1.0.0/closed.c":              "//go:build ignore\n\n/* Explanation\n*/ ",
 		"example.com/m@v1.0.0/api.json":              "",
 	} {
 		got, err := os.ReadFile(filepath.Join(out, name))
@@ -190,6 +192,7 @@ func TestHdrToolPackmod(t *testing.T) {
 func TestHdrToolImportsReplace(t *testing.T) {
 	dir := buildHdrTool(t)
 	files := map[string]string{
+		"go.work":    "go 1.22\n\nuse ./app\n\nreplace example.com/worked => ./workfork\n",
 		"app/go.mod": "module example.com/app\n\ngo 1.22\n\n" +
 			"replace example.com/original => ../fork // a fork\n\n" +
 			"replace (\n\texample.com/sub v1.0.0 => ./sub\n\texample.com/versioned => example.com/other v1.2.3\n)\n",
@@ -197,7 +200,7 @@ func TestHdrToolImportsReplace(t *testing.T) {
 	}
 	var pack bytes.Buffer
 	pack.WriteString("gohdr 1\n")
-	for _, f := range []string{"app/go.mod", "app/main.go"} {
+	for _, f := range []string{"app/go.mod", "app/main.go", "go.work"} {
 		fmt.Fprintf(&pack, "%s\n644\n%d\n%s\n", f, len(files[f]), files[f])
 	}
 	packPath := filepath.Join(dir, "src.hdr")
@@ -208,7 +211,7 @@ func TestHdrToolImportsReplace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("imports: %v", err)
 	}
-	for _, want := range []string{"mod app example.com/app\n", "repl fork example.com/original\n", "repl app/sub example.com/sub\n"} {
+	for _, want := range []string{"mod app example.com/app\n", "repl fork example.com/original\n", "repl app/sub example.com/sub\n", "repl workfork example.com/worked\n"} {
 		if !strings.Contains(string(out), want) {
 			t.Errorf("imports output lacks %q:\n%s", want, out)
 		}
