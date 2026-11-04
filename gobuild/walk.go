@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"dagger.io/dagger/core"
 	"dagger/gobuild/internal/dagger"
 )
 
@@ -285,7 +286,7 @@ func fileTree(dir *dagger.Directory, files []string) *dagger.Directory {
 		dirs = append(dirs, d)
 	}
 	sort.Strings(dirs)
-	tree := dag.Directory()
+	tree := core.NewDirectory()
 	for _, d := range dirs {
 		tree = tree.WithFiles(d, byDir[d])
 	}
