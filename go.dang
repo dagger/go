@@ -1247,10 +1247,10 @@ type GoModule {
     if (selected.length == 0) { raise "no tests selected in module " + path }
     let empty: [String!]! = []
     let narrowed = discovered.any { tests => tests.narrowed }
-    let whole = packages.narrowed == false and narrowed == false
-    let dirs = if (whole) { ["./..."] } else {
-      tool.sorted(selected.map { tests => packageArg(tests.directory) })
-    }
+    # Only packages holding selected tests run: "./..." would also run the
+    # module's other packages, and one of them failing would fail every check.
+    # Discovery's order is stable, so the command is too without a sort.
+    let dirs = selected.map { tests => packageArg(tests.directory) }
     # Every check of the module evaluates this, so the names are only
     # gathered and sorted for the narrowed run that needs them.
     let run = if (narrowed) {

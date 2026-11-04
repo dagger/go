@@ -43,8 +43,6 @@ func TestSummarizeAttribution(t *testing.T) {
 			{Action: "pass", Package: "example.com/p", Test: "TestBad"},
 			{Action: "fail", Package: "example.com/p"},
 		}, map[check]string{{"example.com/p", "TestOK"}: "outside a selected test check", {"example.com/p", "TestBad"}: "outside a selected test check", {"example.com/q", "TestOther"}: ""}},
-		{"package without checks", []event{{Action: "fail", Package: "example.com/unchecked"}},
-			map[check]string{{"example.com/p", "TestOK"}: "without selected test checks", {"example.com/q", "TestOther"}: "without selected test checks"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := summarize(report(append(append([]event{}, base...), tc.events...)...), selected, 1, strings.NewReader(""))
