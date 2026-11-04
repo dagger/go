@@ -171,9 +171,9 @@ func summarize(report io.Reader, selections []selection, exitCode int, stderr io
 					// declaring it, or TestMain never called m.Run.
 					failure = fmt.Sprintf("%s did not run: go test passed %s without it\n%s", name, s.Pkg, p.log.String())
 				case !t.observed && p.failed && p.namedFailure:
-					// -failfast stops the package at a represented failure, so later
-					// tests have no events. That failure does not make them fail.
-					// Tests that started but did not finish still fail below.
+					// -failfast stopped the package at a represented failure before
+					// this test started, or the test binary left it out.
+					failure = fmt.Sprintf("%s did not run: go test failed %s without running it\n%s", name, s.Pkg, p.log.String())
 				default:
 					failure = fmt.Sprintf("no successful result for %s (go test exit %d)\n%s%s", name, exitCode, p.log.String(), stderrTail.String())
 				}

@@ -152,8 +152,11 @@ that selection.
 A failed test fails its own check. A package that fails to build fails its selected
 tests. Failed `TestMain` setup or teardown and failures from undiscovered tests
 also fail that package's selected checks. Failures in packages without selected
-test checks fail all checks sharing that module's command. Test failure messages
-include subtest output. Otherwise, passing tests in other packages still pass.
+test checks fail all checks sharing that module's command. A selected test that
+did not run fails, saying so: one in a package that passed without it, or one
+after the failure that stopped its package, as `-failfast` does. Test failure
+messages include subtest output. Otherwise, passing tests in other packages
+still pass.
 Logs and test spans belong to the check that starts the shared command; other
 checks share its result.
 

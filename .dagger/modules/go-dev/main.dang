@@ -2028,14 +2028,18 @@ type GoDev {
     failed: Int! = 0,
     messages: [String!]! = [],
     alias: String! = "go",
+    goflags: String! = "",
   ): Void {
+    let settings = if (goflags == "") { "" } else {
+      "[modules." + alias + ".settings]\ngoflags = \"" + goflags + "\"\n"
+    }
     let result = container
       .from("alpine:3.23")
       .withEnvVariable("NO_COLOR", "1")
       .withDirectory("/source", ws.directory("/"))
       .withDirectory("/work", fixture)
       .withNewFile("/work/.git/HEAD", "ref: refs/heads/main\n")
-      .withNewFile("/work/dagger.toml", "[modules." + alias + "]\nsource = \"/source\"\n")
+      .withNewFile("/work/dagger.toml", "[modules." + alias + "]\nsource = \"/source\"\n" + settings)
       .withWorkdir("/work")
       .withExec(
         ["/dev/.dagger/dagger", "--progress=report", "check", "--generated=false"] + args,
@@ -2103,6 +2107,22 @@ type GoDev {
     # A test go test never builds is no check, even when selected by name.
     let constrained = fixture.withNewFile("m1/p1/constrained_test.go", "//go:build never\n\npackage p1\nimport \"testing\"\nfunc TestConstrained(t *testing.T) {}\n")
     selectedCheck(ws, constrained, selectionArgs + ["--go-test=TestConstrained"], passed: 7, failed: 1, messages: ["selected failure"])
+  }
+
+  # -failfast stops m1/p1 at TestFoo, so TestBar there never runs and fails.
+  # The helper's unit tests check its message: the report may show the shared
+  # run's test spans for TestBar's check instead of its error.
+  selectedFailfastCheck(ws: Workspace!): Void @check {
+    let fixture = selectionFixture.withNewFile("m1/p1/tests_test.go", "package p1\nimport \"testing\"\nfunc TestFoo(t *testing.T) { t.Fatal(\"selected failure\") }\nfunc TestBar(t *testing.T) {}\n")
+    selectedCheck(
+      ws,
+      fixture,
+      selectionArgs,
+      passed: 6,
+      failed: 2,
+      messages: ["selected failure"],
+      goflags: "-failfast",
+    )
   }
 
   selectedBuildFailureCheck(ws: Workspace!): Void @check {
