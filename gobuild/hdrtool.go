@@ -675,6 +675,21 @@ func fileSHA256(file string, generated bool) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// unpackAll unpacks every .gohdr pack in dir under dst, in one process
+// rather than one per pack.
+func unpackAll(dir, dst string) error {
+	packs, err := filepath.Glob(filepath.Join(dir, "*.gohdr"))
+	if err != nil {
+		return err
+	}
+	for _, p := range packs {
+		if err := unpack(p, dst, os.DevNull); err != nil {
+			return fmt.Errorf("%s: %w", filepath.Base(p), err)
+		}
+	}
+	return nil
+}
+
 // packmod writes to out a pack of what a plan reads of a downloaded module:
 // the files at rels under root, the module cache, each directory walked. A
 // Go file is its header (goHeader), as the plan reads of the source; a test
@@ -909,6 +924,8 @@ func main() {
 		err = importsOfPack(args[1], args[2] == "tests")
 	case len(args) >= 3 && args[0] == "packmod":
 		err = packmod(args[1], args[2], args[3:])
+	case len(args) == 3 && args[0] == "unpackall":
+		err = unpackAll(args[1], args[2])
 	case len(args) == 4 && args[0] == "unpack":
 		err = unpack(args[1], args[2], args[3])
 	case len(args) == 2 && args[0] == "weigh":

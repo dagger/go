@@ -528,6 +528,26 @@ func newBuild(ctx context.Context, ctr *dagger.Container, image string, from *da
 			return nil, err
 		}
 	}
+	// What the source's packages import, which the build follows from the
+	// package it builds to the modules it downloads. It needs nothing of the
+	// setup below, so it's listed alongside it.
+	importsMode := "build"
+	if tests {
+		importsMode = "tests"
+	}
+	type listing struct {
+		out string
+		err error
+	}
+	imports := make(chan listing, 1)
+	go func() {
+		out, err := public.
+			WithMountedFile("/gobuild/gohdr", hdrTool(), dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
+			WithMountedFile("/gobuild/src.hdr", headers, dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
+			WithExec([]string{"/gobuild/gohdr", "imports", "/gobuild/src.hdr", importsMode}, bare).
+			Stdout(ctx)
+		imports <- listing{out, err}
+	}()
 	// The Go caches' volumes are dropped: they would shadow the module
 	// sources mounted per package, and live on one engine. A custom base's
 	// other mounts, such as a toolchain or headers, stay.
@@ -708,21 +728,11 @@ go env GOOS GOARCH CGO_ENABLED GOVERSION > /gobuild/goenv
 		if d.privatePatterns, err = firstEnv(ctx, caller, "GOPRIVATE", "GONOPROXY"); err != nil {
 			return nil, err
 		}
-		// What the source's packages import: the build follows them from
-		// the package it builds to the modules it downloads.
-		mode := "build"
-		if tests {
-			mode = "tests"
+		listed := <-imports
+		if listed.err != nil {
+			return nil, fmt.Errorf("source imports: %w", listed.err)
 		}
-		listed, err := public.
-			WithMountedFile("/gobuild/gohdr", hdrTool(), dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
-			WithMountedFile("/gobuild/src.hdr", headers, dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
-			WithExec([]string{"/gobuild/gohdr", "imports", "/gobuild/src.hdr", mode}, bare).
-			Stdout(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("source imports: %w", err)
-		}
-		if b.packs, b.zips, err = d.discover(ctx, parseSourceImports(d.target, listed), pkgDir); err != nil {
+		if b.packs, b.zips, err = d.discover(ctx, parseSourceImports(d.target, listed.out), pkgDir); err != nil {
 			return nil, fmt.Errorf("go mod download: %w", err)
 		}
 		b.fetch = d.lazyZip
@@ -885,7 +895,7 @@ func (b *build) unpackModules() string {
 	if b.packs == nil {
 		return ""
 	}
-	return "for p in /gobuild/modpacks/*.gohdr; do /gobuild/gohdr unpack \"$p\" " + shQuote(b.roots.Mod) + " /dev/null || exit 1; done && "
+	return "/gobuild/gohdr unpackall /gobuild/modpacks " + shQuote(b.roots.Mod) + " && "
 }
 
 // planWith makes a plan as plan does, with goCmd the go command that prints
