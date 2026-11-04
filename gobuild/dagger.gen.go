@@ -3,35 +3,28 @@
 package main
 
 import (
+	core "dagger.io/dagger/core"
+
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
-	"os"
-	"sort"
 
-	telemetry "github.com/dagger/otel-go"
-	"github.com/vektah/gqlparser/v2/gqlerror"
+	"github.com/dagger/querybuilder"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/sdk/resource"
-	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
 	"go.opentelemetry.io/otel/trace"
 
 	"dagger/gobuild/internal/dagger"
-
-	"github.com/dagger/querybuilder"
 )
 
+// Deprecated: use explicit core constructors and generated module clients.
 var dag = dagger.Connect()
 
 func Tracer() trace.Tracer {
 	return otel.Tracer("dagger.io/sdk.go")
 }
 
-// used for local MarshalJSON implementations
 var marshalCtx = context.Background()
 
-// called by main()
 func setMarshalContext(ctx context.Context) {
 	marshalCtx = ctx
 	dagger.SetMarshalContext(ctx)
@@ -44,13 +37,8 @@ type DaggerObject interface {
 
 type ExecError = dagger.ExecError
 
-// ptr returns a pointer to the given value.
-func ptr[T any](v T) *T {
-	return &v
-}
+func ptr[T any](v T) *T { return &v }
 
-// convertSlice converts a slice of one type to a slice of another type using a
-// converter function
 func convertSlice[I any, O any](in []I, f func(I) O) []O {
 	out := make([]O, len(in))
 	for i, v := range in {
@@ -73,132 +61,31 @@ func (r *Gobuild) UnmarshalJSON(bs []byte) error {
 	return nil
 }
 
-func main() {
-	ctx := context.Background()
-
-	// Direct slog to the new stderr. This is only for dev time debugging, and
-	// runtime errors/warnings.
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelWarn,
-	})))
-
-	if err := dispatch(ctx); err != nil {
-		os.Exit(2)
-	}
-}
-
-func convertError(rerr error) *dagger.Error {
-	if gqlErr := findSingleGQLError(rerr); gqlErr != nil {
-		dagErr := dag.Error(gqlErr.Message)
-		if gqlErr.Extensions != nil {
-			keys := make([]string, 0, len(gqlErr.Extensions))
-			for k := range gqlErr.Extensions {
-				keys = append(keys, k)
-			}
-			sort.Strings(keys)
-			for _, k := range keys {
-				val, err := json.Marshal(gqlErr.Extensions[k])
-				if err != nil {
-					fmt.Println("failed to marshal error value:", err)
-				}
-				dagErr = dagErr.WithValue(k, dagger.JSON(val))
-			}
-		}
-		return dagErr
-	}
-	return dag.Error(rerr.Error())
-}
-
-func findSingleGQLError(rerr error) *gqlerror.Error {
-	switch x := rerr.(type) {
-	case *gqlerror.Error:
-		return x
-	case interface{ Unwrap() []error }:
-		return nil
-	case interface{ Unwrap() error }:
-		return findSingleGQLError(x.Unwrap())
-	default:
-		return nil
-	}
-}
-func dispatch(ctx context.Context) (rerr error) {
-	ctx = telemetry.InitEmbedded(ctx, resource.NewWithAttributes(
-		semconv.SchemaURL,
-		semconv.ServiceNameKey.String("dagger-go-sdk"),
-		// TODO version?
-	))
-	defer telemetry.Close()
-
-	// A lot of the "work" actually happens when we're marshalling the return
-	// value, which entails getting object IDs, which happens in MarshalJSON,
-	// which has no ctx argument, so we use this lovely global variable.
+func DaggerDispatch(ctx context.Context, parentJSON []byte, parentName string, fnName string, inputArgs map[string][]byte) (_ any, err error) {
 	setMarshalContext(ctx)
-
-	fnCall := dag.CurrentFunctionCall()
-	defer func() {
-		if rerr != nil {
-			if err := fnCall.ReturnError(ctx, convertError(rerr)); err != nil {
-				fmt.Println("failed to return error:", err, "\noriginal error:", rerr)
-			}
-		}
-	}()
-
-	parentName, err := fnCall.ParentName(ctx)
-	if err != nil {
-		return fmt.Errorf("get parent name: %w", err)
-	}
-	fnName, err := fnCall.Name(ctx)
-	if err != nil {
-		return fmt.Errorf("get fn name: %w", err)
-	}
-	parentJson, err := fnCall.Parent(ctx)
-	if err != nil {
-		return fmt.Errorf("get fn parent: %w", err)
-	}
-	fnArgs, err := fnCall.InputArgs(ctx)
-	if err != nil {
-		return fmt.Errorf("get fn args: %w", err)
-	}
-
-	inputArgs := map[string][]byte{}
-	for _, fnArg := range fnArgs {
-		argName, err := fnArg.Name(ctx)
-		if err != nil {
-			return fmt.Errorf("get fn arg name: %w", err)
-		}
-		argValue, err := fnArg.Value(ctx)
-		if err != nil {
-			return fmt.Errorf("get fn arg value: %w", err)
-		}
-		inputArgs[argName] = []byte(argValue)
-	}
-
-	result, err := invoke(ctx, []byte(parentJson), parentName, fnName, inputArgs)
-	if err != nil {
-		return err
-	}
-	resultBytes, err := json.Marshal(result)
-	if err != nil {
-		return fmt.Errorf("marshal: %w", err)
-	}
-
-	if err := fnCall.ReturnValue(ctx, dagger.JSON(resultBytes)); err != nil {
-		return fmt.Errorf("store return value: %w", err)
-	}
-	return nil
-}
-func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName string, inputArgs map[string][]byte) (_ any, err error) {
 	_ = inputArgs
+	if parentName == "" {
+		switch fnName {
+		case "Gobuild", "gobuild":
+			parentName = "Gobuild"
+			fnName = ""
+		}
+	}
 	switch parentName {
 	case "Gobuild":
+		if fnName == "New" {
+			fnName = ""
+		}
 		switch fnName {
+		case "":
+			return &Gobuild{}, nil
 		case "Archives":
 			var parent Gobuild
 			err = json.Unmarshal(parentJSON, &parent)
 			if err != nil {
 				panic(fmt.Errorf("%s: %w", "failed to unmarshal parent object", err))
 			}
-			var base *dagger.Container
+			var base *core.Container
 			if inputArgs["base"] != nil {
 				err = json.Unmarshal([]byte(inputArgs["base"]), &base)
 				if err != nil {
@@ -212,21 +99,21 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg image", err))
 				}
 			}
-			var from *dagger.Container
+			var from *core.Container
 			if inputArgs["from"] != nil {
 				err = json.Unmarshal([]byte(inputArgs["from"]), &from)
 				if err != nil {
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg from", err))
 				}
 			}
-			var source *dagger.Directory
+			var source *core.Directory
 			if inputArgs["source"] != nil {
 				err = json.Unmarshal([]byte(inputArgs["source"]), &source)
 				if err != nil {
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg source", err))
 				}
 			}
-			var headers *dagger.File
+			var headers *core.File
 			if inputArgs["headers"] != nil {
 				err = json.Unmarshal([]byte(inputArgs["headers"]), &headers)
 				if err != nil {
@@ -254,21 +141,14 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg flags", err))
 				}
 			}
-			var dependencies bool
-			if inputArgs["dependencies"] != nil {
-				err = json.Unmarshal([]byte(inputArgs["dependencies"]), &dependencies)
-				if err != nil {
-					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg dependencies", err))
-				}
-			}
-			return (*Gobuild).Archives(&parent, ctx, base, image, from, source, headers, mountPath, workdir, flags, dependencies)
+			return (*Gobuild).Archives(&parent, ctx, base, image, from, source, headers, mountPath, workdir, flags)
 		case "Binary":
 			var parent Gobuild
 			err = json.Unmarshal(parentJSON, &parent)
 			if err != nil {
 				panic(fmt.Errorf("%s: %w", "failed to unmarshal parent object", err))
 			}
-			var base *dagger.Container
+			var base *core.Container
 			if inputArgs["base"] != nil {
 				err = json.Unmarshal([]byte(inputArgs["base"]), &base)
 				if err != nil {
@@ -282,21 +162,21 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg image", err))
 				}
 			}
-			var from *dagger.Container
+			var from *core.Container
 			if inputArgs["from"] != nil {
 				err = json.Unmarshal([]byte(inputArgs["from"]), &from)
 				if err != nil {
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg from", err))
 				}
 			}
-			var source *dagger.Directory
+			var source *core.Directory
 			if inputArgs["source"] != nil {
 				err = json.Unmarshal([]byte(inputArgs["source"]), &source)
 				if err != nil {
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg source", err))
 				}
 			}
-			var headers *dagger.File
+			var headers *core.File
 			if inputArgs["headers"] != nil {
 				err = json.Unmarshal([]byte(inputArgs["headers"]), &headers)
 				if err != nil {
@@ -345,7 +225,7 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 			if err != nil {
 				panic(fmt.Errorf("%s: %w", "failed to unmarshal parent object", err))
 			}
-			var base *dagger.Container
+			var base *core.Container
 			if inputArgs["base"] != nil {
 				err = json.Unmarshal([]byte(inputArgs["base"]), &base)
 				if err != nil {
@@ -359,21 +239,21 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg image", err))
 				}
 			}
-			var from *dagger.Container
+			var from *core.Container
 			if inputArgs["from"] != nil {
 				err = json.Unmarshal([]byte(inputArgs["from"]), &from)
 				if err != nil {
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg from", err))
 				}
 			}
-			var source *dagger.Directory
+			var source *core.Directory
 			if inputArgs["source"] != nil {
 				err = json.Unmarshal([]byte(inputArgs["source"]), &source)
 				if err != nil {
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg source", err))
 				}
 			}
-			var headers *dagger.File
+			var headers *core.File
 			if inputArgs["headers"] != nil {
 				err = json.Unmarshal([]byte(inputArgs["headers"]), &headers)
 				if err != nil {
@@ -412,54 +292,6 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 		default:
 			return nil, fmt.Errorf("unknown function %s", fnName)
 		}
-	case "":
-		return dag.Module().
-			WithDescription("A private helper of the go module: it builds a main package with one exec\nper package, so Dagger caches each package's compile separately and an\nedit re-runs only what it reaches.\n\nIt replays the go command's own plan, \"go build -n\", made from a header\npack of the source, so an edit inside function bodies doesn't re-plan.\nEvery package, the standard library and dependencies included, is built\nin an exec of its own that reads only the archives of what it imports, so\nbuilds that compile the same package the same way share it, and a package\nwhose archive comes out unchanged leaves its dependents cached.\n").
-			WithObject(
-				dag.TypeDef().WithObject("Gobuild", dagger.TypeDefWithObjectOpts{SourceMap: dag.SourceMap("main.go", 29, 6)}).
-					WithFunction(
-						dag.Function("Archives",
-							dag.TypeDef().WithObject("Directory")).
-							WithDescription("Archives compiles, one exec per package as Binary builds, every package\nthat \"go list -export -deps -test ./...\" compiles in the module in workdir:\nits packages, main packages included, their test variants and external test\npackages, the packages recompiled against those, and every package they\nimport. It returns a directory for golangci-lint's export driver: under\narchives/, each package's export data, the archive \"go tool compile -pack\n-linkobj\" writes without the package's object code; under cgo/, the Go files cgo wrote for each cgo package's compile;\nand manifest.json, which describes them: the Go version, target and build\ntags they were compiled for, and for each package, by its ID in go list's\nlisting, its archive, its cgo files and their output, and a digest of what\nit was compiled from. With all of them, the driver compiles nothing and\nruns no cgo. With dependencies, only the packages of other modules and the\nstandard library: a directory keyed by their content alone, which an edit\nof the module's own packages leaves as it is.").
-							WithSourceMap(dag.SourceMap("main.go", 153, 1)).
-							WithArg("base", dag.TypeDef().WithObject("Container"), dagger.FunctionWithArgOpts{Description: "The Go container to build in, as for Binary.", SourceMap: dag.SourceMap("main.go", 156, 2)}).
-							WithArg("image", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{Description: "The image base was made from, as for Binary.", SourceMap: dag.SourceMap("main.go", 159, 2)}).
-							WithArg("from", dag.TypeDef().WithObject("Container").WithOptional(true), dagger.FunctionWithArgOpts{Description: "The custom container base was made from, as for Binary.", SourceMap: dag.SourceMap("main.go", 162, 2)}).
-							WithArg("source", dag.TypeDef().WithObject("Directory"), dagger.FunctionWithArgOpts{Description: "The source tree, with its test files, which name packages the tests\nimport.", SourceMap: dag.SourceMap("main.go", 165, 2)}).
-							WithArg("headers", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{Description: "The header pack of source's Go files, test files included, and go.mod\nfiles, from the go module's scan.", SourceMap: dag.SourceMap("main.go", 168, 2)}).
-							WithArg("mountPath", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{Description: "Where source is mounted.", SourceMap: dag.SourceMap("main.go", 170, 2)}).
-							WithArg("workdir", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{Description: "The module's directory, relative to mountPath.", SourceMap: dag.SourceMap("main.go", 173, 2), DefaultValue: dagger.JSON("\".\"")}).
-							WithArg("flags", dag.TypeDef().WithListOf(dag.TypeDef().WithKind(dagger.TypeDefKindStringKind)).WithOptional(true), dagger.FunctionWithArgOpts{Description: "Flags for go build, as for Binary: the build tags among them are the\nmanifest's.", SourceMap: dag.SourceMap("main.go", 177, 2)}).
-							WithArg("dependencies", dag.TypeDef().WithKind(dagger.TypeDefKindBooleanKind).WithOptional(true), dagger.FunctionWithArgOpts{Description: "Only the packages outside the module.", SourceMap: dag.SourceMap("main.go", 180, 2)})).
-					WithFunction(
-						dag.Function("Binary",
-							dag.TypeDef().WithObject("Directory")).
-							WithDescription("Binary builds the main package pkg as \"go build\" would and returns a\ndirectory holding the binary, named output, and for a c-archive or\nc-shared build the C header go build writes next to it. The binary's Go\nbuild ID is a hash of what its link reads, not the one go build computes.").
-							WithSourceMap(dag.SourceMap("main.go", 45, 1)).
-							WithArg("base", dag.TypeDef().WithObject("Container"), dagger.FunctionWithArgOpts{Description: "The Go container to build in: its image supplies the toolchain, and\nits environment (GOOS, GOARCH, GOFLAGS, GOPROXY...) applies. Per\npackage, its mounts, such as Go cache volumes, are left out.", SourceMap: dag.SourceMap("main.go", 50, 2)}).
-							WithArg("image", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{Description: "The image base was made from. Set, package execs run in that image\nwith base's environment alone, so their keys don't carry how base was\nmade (a workdir at the project's mount path, its cache mounts), and\nprojects with the same image and settings share them.", SourceMap: dag.SourceMap("main.go", 56, 2)}).
-							WithArg("from", dag.TypeDef().WithObject("Container").WithOptional(true), dagger.FunctionWithArgOpts{Description: "The custom container base was made from, as image is for an image:\npackage execs run in it with base's environment alone.", SourceMap: dag.SourceMap("main.go", 60, 2)}).
-							WithArg("source", dag.TypeDef().WithObject("Directory"), dagger.FunctionWithArgOpts{Description: "The source tree.", SourceMap: dag.SourceMap("main.go", 62, 2)}).
-							WithArg("headers", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{Description: "The header pack of source's Go files and go.mod files, from the go\nmodule's scan: what the plan is made from, with source's other files.", SourceMap: dag.SourceMap("main.go", 65, 2)}).
-							WithArg("mountPath", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{Description: "Where source is mounted. Paths in the binary's debug information\nname it, unless flags hold -trimpath.", SourceMap: dag.SourceMap("main.go", 68, 2)}).
-							WithArg("workdir", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{Description: "The directory to run go build in, relative to mountPath.", SourceMap: dag.SourceMap("main.go", 71, 2), DefaultValue: dagger.JSON("\".\"")}).
-							WithArg("pkg", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{Description: "The go build package argument, e.g. \".\" or \"./cmd/foo\".", SourceMap: dag.SourceMap("main.go", 73, 2)}).
-							WithArg("output", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{Description: "The binary's file name.", SourceMap: dag.SourceMap("main.go", 75, 2)}).
-							WithArg("flags", dag.TypeDef().WithListOf(dag.TypeDef().WithKind(dagger.TypeDefKindStringKind)).WithOptional(true), dagger.FunctionWithArgOpts{Description: "Flags for go build, before the package.", SourceMap: dag.SourceMap("main.go", 78, 2)})).
-					WithFunction(
-						dag.Function("TestBinary",
-							dag.TypeDef().WithObject("File")).
-							WithDescription("TestBinary builds the test binary of package pkg as \"go test -c\" would,\none exec per package as Binary builds a binary: the package compiled with\nits test files, its external test package, the packages it is imported\nthrough recompiled against it, and the test main the go command writes,\nlinked. Unlike go test -c, it does not run go vet, which is left to the\nlint checks. The binary's Go build ID is a hash of what its link reads,\nnot the one go test computes.").
-							WithSourceMap(dag.SourceMap("main.go", 106, 1)).
-							WithArg("base", dag.TypeDef().WithObject("Container"), dagger.FunctionWithArgOpts{Description: "The Go container to build in, as for Binary.", SourceMap: dag.SourceMap("main.go", 109, 2)}).
-							WithArg("image", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{Description: "The image base was made from, as for Binary.", SourceMap: dag.SourceMap("main.go", 112, 2)}).
-							WithArg("from", dag.TypeDef().WithObject("Container").WithOptional(true), dagger.FunctionWithArgOpts{Description: "The custom container base was made from, as for Binary.", SourceMap: dag.SourceMap("main.go", 115, 2)}).
-							WithArg("source", dag.TypeDef().WithObject("Directory"), dagger.FunctionWithArgOpts{Description: "The source tree, with the package's test files.", SourceMap: dag.SourceMap("main.go", 117, 2)}).
-							WithArg("headers", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{Description: "The header pack of source's Go files, test files included, and go.mod\nfiles, from the go module's scan.", SourceMap: dag.SourceMap("main.go", 120, 2)}).
-							WithArg("mountPath", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{Description: "Where source is mounted.", SourceMap: dag.SourceMap("main.go", 122, 2)}).
-							WithArg("workdir", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{Description: "The directory to run go test in, relative to mountPath.", SourceMap: dag.SourceMap("main.go", 125, 2), DefaultValue: dagger.JSON("\".\"")}).
-							WithArg("pkg", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{Description: "The go test package argument, e.g. \".\" or \"./pkg/foo\".", SourceMap: dag.SourceMap("main.go", 127, 2)}).
-							WithArg("flags", dag.TypeDef().WithListOf(dag.TypeDef().WithKind(dagger.TypeDefKindStringKind)).WithOptional(true), dagger.FunctionWithArgOpts{Description: "Flags for go test -c, before the package, e.g. -race or -ldflags.", SourceMap: dag.SourceMap("main.go", 130, 2)}))), nil
 	default:
 		return nil, fmt.Errorf("unknown object %s", parentName)
 	}
