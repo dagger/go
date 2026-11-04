@@ -40,6 +40,33 @@ func SetMarshalContext(ctx context.Context) {
 	marshalCtx = ctx
 }
 
+// DispatchInputs reads what a module's entrypoint dispatches the call with,
+// in one request: its parent object's type name, its name, its parent's JSON
+// value, and each argument's JSON value by name.
+func (r *FunctionCall) DispatchInputs(ctx context.Context) (parentName, name string, parent []byte, args map[string][]byte, rerr error) {
+	var resp struct {
+		ParentName string
+		Name       string
+		Parent     string
+		InputArgs  []struct {
+			Name  string
+			Value string
+		}
+	}
+	q := r.query.SelectMixed(
+		[]string{"parentName", "name", "parent"},
+		map[string]*querybuilder.Selection{"inputArgs": querybuilder.Query().SelectFields("name", "value")},
+	)
+	if err := q.Bind(&resp).Execute(ctx); err != nil {
+		return "", "", nil, nil, err
+	}
+	args = make(map[string][]byte, len(resp.InputArgs))
+	for _, arg := range resp.InputArgs {
+		args[arg.Name] = []byte(arg.Value)
+	}
+	return resp.ParentName, resp.Name, []byte(resp.Parent), args, nil
+}
+
 // assertNotNil panic if the given value is nil.
 // This function is used to validate that input with pointer type are not nil.
 // See https://github.com/dagger/dagger/issues/5696 for more context.
@@ -5155,6 +5182,12 @@ type ContainerWithExecOpts struct {
 	//
 	// Only use this if you specifically need the command to be pid 1 in the container. Otherwise it may result in unexpected behavior. If you're not sure, you don't need this.
 	NoInit bool
+	// Let the command, and the processes it starts, use the Linux kernel's transparent huge pages. Large-memory programs such as compilers can run faster with them, at some cost in memory.
+	//
+	// Without this, a command gets huge pages only for memory its own program asks huge pages for, as on a host set to "madvise". That only matters on hosts with Linux 6.18 or later whose transparent huge pages are set to "always" (/sys/kernel/mm/transparent_hugepage/enabled, or a size under /sys/kernel/mm/transparent_hugepage/hugepages-*). With the usual default settings, this changes nothing. On older kernels, commands get what the host's settings give them, whether they set this or not.
+	//
+	// It isn't part of the exec's cache key: an exec that differs from a cached one only in this setting reuses the cached result, whichever setting produced it.
+	TransparentHugePages bool
 }
 
 // Execute a command in the container, and return a new snapshot of the container state after execution.
@@ -5208,6 +5241,10 @@ func (r *Container) WithExec(args []string, opts ...ContainerWithExecOpts) *Cont
 		// `noInit` optional argument
 		if !querybuilder.IsZeroValue(opts[i].NoInit) {
 			q = q.Arg("noInit", opts[i].NoInit)
+		}
+		// `transparentHugePages` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TransparentHugePages) {
+			q = q.Arg("transparentHugePages", opts[i].TransparentHugePages)
 		}
 	}
 	q = q.Arg("args", args)
@@ -9080,6 +9117,14 @@ type FileExtractOpts struct {
 	//
 	// Entries with no more elements than this are skipped.
 	StripComponents int
+	// If set, only entries matching one of these glob patterns, or in a directory that does, are extracted (e.g., ["src/", "*.go"]).
+	//
+	// Patterns match entry paths after stripComponents is applied.
+	Include []string
+	// If set, entries matching one of these glob patterns, or in a directory that does, are not extracted (e.g., ["**/testdata", "**/*_test.go"]).
+	//
+	// Patterns match entry paths after stripComponents is applied.
+	Exclude []string
 }
 
 // Extracts this archive file into a directory.
@@ -9093,6 +9138,14 @@ func (r *File) Extract(opts ...FileExtractOpts) *Directory {
 		// `stripComponents` optional argument
 		if !querybuilder.IsZeroValue(opts[i].StripComponents) {
 			q = q.Arg("stripComponents", opts[i].StripComponents)
+		}
+		// `include` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Include) {
+			q = q.Arg("include", opts[i].Include)
+		}
+		// `exclude` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Exclude) {
+			q = q.Arg("exclude", opts[i].Exclude)
 		}
 	}
 
@@ -25855,6 +25908,10 @@ func getClientParams() (graphql.Client, error) {
 		DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
 			return net.Dial("tcp", host)
 		},
+		// Every request goes to this one host. Keep as many idle connections
+		// for it as Go's default transport keeps in all, not its default of
+		// 2 per host, so concurrent requests reuse them instead of dialing.
+		MaxIdleConnsPerHost: 100,
 	}
 	httpClient := &http.Client{
 		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
