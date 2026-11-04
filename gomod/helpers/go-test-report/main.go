@@ -63,9 +63,9 @@ type testResult struct {
 }
 
 type packageResult struct {
-	passed, failed, namedFailure, uncheckedTestFailure bool
-	tests                                              map[string]*testResult
-	log                                                tail
+	started, passed, failed, namedFailure, uncheckedTestFailure bool
+	tests                                                       map[string]*testResult
+	log                                                         tail
 }
 
 func summarize(report io.Reader, selections []selection, exitCode int, stderr io.Reader) (map[check]string, error) {
@@ -108,6 +108,7 @@ func summarize(report io.Reader, selections []selection, exitCode int, stderr io
 			p = &packageResult{}
 			packages[pkg] = p
 		}
+		p.started = true
 		p.log.add(e.Output)
 		if e.Action == "fail" {
 			anyFailure = true
@@ -161,6 +162,10 @@ func summarize(report io.Reader, selections []selection, exitCode int, stderr io
 					// -failfast stopped the package at a represented failure before
 					// this test started, or the test binary left it out.
 					failure = fmt.Sprintf("%s did not run: go test failed %s without running it\n%s", name, s.Pkg, p.log.String())
+				case !p.started && anyFailure:
+					// With -failfast, go test starts no further package once one
+					// fails, and a package it never starts has no events at all.
+					failure = fmt.Sprintf("%s did not run: go test stopped before starting %s, after a failure\n", name, s.Pkg)
 				default:
 					failure = fmt.Sprintf("no successful result for %s (go test exit %d)\n%s%s", name, exitCode, p.log.String(), stderrTail.String())
 				}
