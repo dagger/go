@@ -41,17 +41,24 @@ type GobuildArchivesOpts struct {
 	// Flags for go build, as for Binary: the build tags among them are the
 	// manifest's.
 	Flags []string
+	// Only the packages outside the module.
+	Dependencies bool
 }
 
-// Archives compiles, one exec per package as Binary builds, every package of
-// the module in workdir and every package it and its tests import, and
-// returns a directory of their archives, the full output of "go tool compile
-// -pack", under archives/, with manifest.json, which describes them for
-// golangci-lint's export driver: the Go version, target and build tags they
-// were compiled for, and for each package, by import path, its archive and a
-// digest of what it was compiled from. The packages are those "go list -deps
-// -test ./..." lists but test variants, external test packages and test
-// mains: main packages too, which the driver loads plainly as well.
+// Archives compiles, one exec per package as Binary builds, every package
+// that "go list -export -deps -test ./..." compiles in the module in workdir:
+// its packages, main packages included, their test variants and external test
+// packages, the packages recompiled against those, and every package they
+// import. It returns a directory for golangci-lint's export driver: under
+// archives/, each package's export data, the archive "go tool compile -pack
+// -linkobj" writes without the package's object code; under cgo/, the Go files cgo wrote for each cgo package's compile;
+// and manifest.json, which describes them: the Go version, target and build
+// tags they were compiled for, and for each package, by its ID in go list's
+// listing, its archive, its cgo files and their output, and a digest of what
+// it was compiled from. With all of them, the driver compiles nothing and
+// runs no cgo. With dependencies, only the packages of other modules and the
+// standard library: a directory keyed by their content alone, which an edit
+// of the module's own packages leaves as it is.
 func (r *Gobuild) Archives(base *Container, source *Directory, headers *File, mountPath string, opts ...GobuildArchivesOpts) *Directory {
 	assertNotNil("base", base)
 	assertNotNil("source", source)
@@ -73,6 +80,10 @@ func (r *Gobuild) Archives(base *Container, source *Directory, headers *File, mo
 		// `flags` optional argument
 		if !querybuilder.IsZeroValue(opts[i].Flags) {
 			q = q.Arg("flags", opts[i].Flags)
+		}
+		// `dependencies` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Dependencies) {
+			q = q.Arg("dependencies", opts[i].Dependencies)
 		}
 	}
 	q = q.Arg("base", base)

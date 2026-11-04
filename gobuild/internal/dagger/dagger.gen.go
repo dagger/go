@@ -22,6 +22,7 @@ type ContainerWithMountedFileOpts = core.ContainerWithMountedFileOpts
 type Directory = core.Directory
 type DirectoryFilterOpts = core.DirectoryFilterOpts
 type File = core.File
+type FileExtractOpts = core.FileExtractOpts
 type ID = core.ID
 type Node = core.Node
 
