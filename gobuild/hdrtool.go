@@ -38,6 +38,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
 	"go/scanner"
 	"go/token"
 	"io"
@@ -673,10 +675,124 @@ func fileSHA256(file string, generated bool) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// packmod writes to out a pack of what a plan reads of a downloaded module:
+// the files at rels under root, the module cache, each directory walked. A
+// Go file is its header (goHeader), as the plan reads of the source; a test
+// file and a testdata directory, which no build reads, are left out; any
+// other file is whole, as a //go:embed or a C include may name it.
+func packmod(root, out string, rels []string) error {
+	var files []string
+	for _, rel := range rels {
+		err := filepath.WalkDir(filepath.Join(root, rel), func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				if d.Name() == "testdata" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if strings.HasSuffix(d.Name(), "_test.go") {
+				return nil
+			}
+			r, err := filepath.Rel(root, p)
+			if err != nil {
+				return err
+			}
+			files = append(files, filepath.ToSlash(r))
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+	sort.Strings(files)
+	f, err := os.Create(out)
+	if err != nil {
+		return err
+	}
+	w := bufio.NewWriter(f)
+	fmt.Fprintln(w, "gohdr 1")
+	for _, rel := range files {
+		p := filepath.Join(root, rel)
+		fi, err := os.Lstat(p)
+		if err != nil {
+			return err
+		}
+		var data []byte
+		mode := fi.Mode() & (fs.ModePerm | fs.ModeSymlink)
+		if fi.Mode()&fs.ModeSymlink != 0 {
+			target, err := os.Readlink(p)
+			if err != nil {
+				return err
+			}
+			data = []byte(target)
+		} else {
+			if data, err = os.ReadFile(p); err != nil {
+				return err
+			}
+			if strings.HasSuffix(rel, ".go") {
+				data = goHeader(rel, data)
+			}
+		}
+		fmt.Fprintf(w, "%s\n%o\n%d\n", rel, uint32(mode), len(data))
+		w.Write(data)
+		w.WriteByte('\n')
+	}
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	return f.Close()
+}
+
+// headerEnd follows a header's go:embed lines, as the go module's scan writes
+// them: go/build up to Go 1.25 looks for go:embed lines only when its scan of
+// the imports stops at a token before the end of the file.
+const headerEnd = "var _ struct{}\n"
+
+// goHeader is a Go file up to the end of its imports, plus its go:embed
+// lines, then headerEnd when there are any; a file that does not parse is
+// kept whole. It is the go module's scan's header (gomod's go-includes).
+func goHeader(name string, src []byte) []byte {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, name, src, parser.ImportsOnly|parser.ParseComments|parser.SkipObjectResolution)
+	if err != nil || f == nil {
+		return src
+	}
+	end := f.Name.End()
+	for _, d := range f.Decls {
+		if gen, ok := d.(*ast.GenDecl); !ok || gen.Tok != token.IMPORT {
+			break
+		}
+		if d.End() > end {
+			end = d.End()
+		}
+	}
+	off := min(fset.Position(end).Offset, len(src))
+	var out bytes.Buffer
+	out.Write(src[:off])
+	out.WriteByte('\n')
+	embeds := false
+	for _, line := range strings.Split(string(src[off:]), "\n") {
+		if t := strings.TrimSpace(line); strings.HasPrefix(t, "//go:embed") {
+			out.WriteString(t)
+			out.WriteByte('\n')
+			embeds = true
+		}
+	}
+	if embeds {
+		out.WriteString(headerEnd)
+	}
+	return out.Bytes()
+}
+
 func main() {
 	args := os.Args[1:]
 	var err error
 	switch {
+	case len(args) >= 3 && args[0] == "packmod":
+		err = packmod(args[1], args[2], args[3:])
 	case len(args) == 4 && args[0] == "unpack":
 		err = unpack(args[1], args[2], args[3])
 	case len(args) == 2 && args[0] == "weigh":

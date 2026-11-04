@@ -9,6 +9,7 @@ import (
 	"sync"
 	"unicode"
 
+	"dagger.io/dagger/core"
 	"dagger/gobuild/internal/dagger"
 )
 
@@ -119,34 +120,33 @@ var downloadEnv = []string{
 	"GOINSECURE", "GOVCS", "GOAUTH", "GIT_SSH_COMMAND", "GIT_TERMINAL_PROMPT",
 }
 
-// downloads makes the build's module cache from one download per module
-// version in sums. public runs a public module's download: the build's
-// toolchain with downloadEnv alone. private runs one GOPRIVATE or GONOPROXY
-// names, in the caller's own container, with its credentials, so its
-// download is shared only with builds that have them. start is the module
-// cache the build starts from: the go command's own work before the
-// downloads, such as a toolchain it switched to.
-func downloads(ctx context.Context, start *dagger.Directory, public, private *dagger.Container, gomodcache string, sums []sumEntry) (*dagger.Directory, error) {
+// downloads downloads, once each, the module versions in sums whose zips a
+// build may read, and returns a directory of their plan packs and their zips
+// by module cache directory name. public runs a public module's download:
+// the build's toolchain with downloadEnv alone. private runs one GOPRIVATE or
+// GONOPROXY names, in the caller's own container, with its credentials, so
+// its download is shared only with builds that have them.
+//
+// A go.sum also records the go.mod of every version the module graph ever
+// looked at; with graph pruning, the plan loads few of them, and fetches
+// those itself.
+func downloads(ctx context.Context, public, private *dagger.Container, gomodcache string, sums []sumEntry) (*dagger.Directory, map[string]*dagger.File, error) {
 	privatePatterns, err := firstEnv(ctx, private, "GOPRIVATE", "GONOPROXY")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	// A go.sum also records the go.mod of every version the module graph
-	// ever looked at; with graph pruning, the plan loads few of them, and
-	// fetches those itself. Only the zips are what a build reads.
 	var zips []sumEntry
 	for _, e := range sums {
 		if e.zip != "" {
 			zips = append(zips, e)
 		}
 	}
-	sums = zips
-	dirs := make([]*dagger.Directory, len(sums))
-	errs := make([]error, len(sums))
+	got := make([]*dagger.Directory, len(zips))
+	errs := make([]error, len(zips))
 	var wg sync.WaitGroup
 	// Downloads wait on the network more than the CPU.
 	gate := make(chan struct{}, 32)
-	for i, e := range sums {
+	for i, e := range zips {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -156,56 +156,76 @@ func downloads(ctx context.Context, start *dagger.Directory, public, private *da
 			if privatePatterns != "" && matchPrefixPatterns(privatePatterns, e.path) {
 				ctr = private
 			}
-			dirs[i], errs[i] = downloadModule(ctx, ctr, gomodcache, e)
+			got[i], errs[i] = downloadModule(ctx, ctr, gomodcache, e)
 		}()
 	}
 	wg.Wait()
-	// One exec copies them into one module cache: merged one by one, they
-	// would stack a layer each, hundreds deep, past what a mount takes.
-	ctr := public.WithMountedDirectory("/gobuild/start", start, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
-	for i, d := range dirs {
+	packs := make([]*dagger.File, len(zips))
+	files := map[string]*dagger.File{}
+	for i, e := range zips {
 		if errs[i] != nil {
-			return nil, fmt.Errorf("%s@%s: %w", sums[i].path, sums[i].version, errs[i])
+			return nil, nil, fmt.Errorf("%s@%s: %w", e.path, e.version, errs[i])
 		}
-		ctr = ctr.WithMountedDirectory(fmt.Sprintf("/gobuild/in/%d", i), d, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
+		name := moduleDirName(e)
+		packs[i] = got[i].File(packName(e))
+		files[name] = got[i].File(zipPath(e))
 	}
-	return ctr.
-		WithExec([]string{"sh", "-c", "set -e; mkdir -p " + modCacheDir + "; cp -a /gobuild/start/. " + modCacheDir + "/; " +
-			"[ ! -d /gobuild/in ] || for d in /gobuild/in/*; do cp -a \"$d\"/. " + modCacheDir + "/; done"}, bare).
-		Directory(modCacheDir).Sync(ctx)
+	if len(packs) == 0 {
+		return nil, files, nil
+	}
+	// One directory of every pack, made in one step: merged one by one,
+	// hundreds of them would stack a layer each, past what a mount takes.
+	dir, err := core.NewDirectory().WithFiles(".", packs).Sync(ctx)
+	return dir, files, err
+}
+
+// moduleDirName is a module version's directory name in the module cache.
+func moduleDirName(e sumEntry) string {
+	return escapeModule(e.path) + "@" + escapeModule(e.version)
+}
+
+// zipPath is where a module version's zip is in the module cache.
+func zipPath(e sumEntry) string {
+	return "cache/download/" + escapeModule(e.path) + "/@v/" + escapeModule(e.version) + ".zip"
+}
+
+// packName is the file name of a module version's plan pack: its directory
+// name, which no other module version has, with no "/".
+func packName(e sumEntry) string {
+	return strings.ReplaceAll(moduleDirName(e), "/", "%") + ".gohdr"
 }
 
 // downloadModule downloads one module version into an empty module cache and
-// returns it: its zip, checked against the go.sum checksum, with its go.mod
-// and info, or only its go.mod and info when the go.sum names no zip. It is
-// left unextracted: a build reads each module extracted on its own (modules),
-// and the plan extracts what it reads from the zips, as the go command does. A module cache the toolchain image comes with, filled for offline
-// builds, is read first. Its key is the module version and its checksums, so
-// every project that reads it shares it.
+// returns it: its zip, checked against the go.sum checksum, and its go.mod
+// and info, and beside them its plan pack, what a plan reads of the module
+// (gohdr packmod): its Go files' headers, its other files whole, and its
+// go.mod, info and checksum, so a plan that unpacks it sees the module
+// downloaded and extracted. A module cache the toolchain image comes with,
+// filled for offline builds, is read first. Its key is the module version
+// and its checksums, so every project that reads it shares it.
 func downloadModule(ctx context.Context, ctr *dagger.Container, gomodcache string, e sumEntry) (*dagger.Directory, error) {
 	q := e.path + "@" + e.version
-	at := "cache/download/" + escapeModule(e.path) + "/@v/" + escapeModule(e.version)
-	fetch := "go list -m -json " + shQuote(q) + " >/dev/null"
-	check := ""
-	if e.zip != "" {
-		fetch = "go mod download -json " + shQuote(q) + " >/dev/null"
-		check = "\n[ \"$(cat " + shQuote(modCacheDir+"/"+at+".ziphash") + ")\" = " + shQuote(e.zip) + " ] || { echo " +
-			shQuote(q+": checksum mismatch: go.sum has "+e.zip) + " >&2; exit 1; }"
-	}
+	meta := strings.TrimSuffix(zipPath(e), ".zip")
 	script := "set -e\nmkdir -p " + modCacheDir + " /gobuild/empty\n" +
 		"c=" + shQuote(gomodcache) + "\n" +
 		"[ ! -d \"$c/cache/download\" ] || [ \"$c\" -ef " + modCacheDir + " ] || export GOPROXY=\"file://$c/cache/download,${GOPROXY:-https://proxy.golang.org,direct}\"\n" +
 		"export GOMODCACHE=" + modCacheDir + " GOFLAGS=-modcacherw GOTOOLCHAIN=local GOWORK=off\n" +
-		"cd /gobuild/empty\n" + fetch + check +
-		// Not part of the module version: the go command's locks, and its
+		"cd /gobuild/empty\ngo mod download -json " + shQuote(q) + " >/dev/null\n" +
+		"[ \"$(cat " + shQuote(modCacheDir+"/"+meta+".ziphash") + ")\" = " + shQuote(e.zip) + " ] || { echo " +
+		shQuote(q+": checksum mismatch: go.sum has "+e.zip) + " >&2; exit 1; }\n" +
+		"/gobuild/gohdr packmod " + modCacheDir + " " + shQuote(modCacheDir+"/"+packName(e)) + " " +
+		shQuote(moduleDirName(e)) + " " + shQuote(meta+".mod") + " " + shQuote(meta+".info") + " " + shQuote(meta+".ziphash") + "\n" +
+		// Not part of the module version: its extraction, which a build
+		// makes from the zip on its own; the go command's locks; and its
 		// record of the queries that found it.
-		"\nfind " + modCacheDir + " -name '*.lock' -delete\nrm -rf " + modCacheDir + "/cache/download/sumdb " + modCacheDir + "/cache/vcs" +
-		"\nfind " + modCacheDir + " -mindepth 1 -maxdepth 1 ! -name cache -exec rm -rf {} +" +
+		"find " + modCacheDir + " -mindepth 1 -maxdepth 1 ! -name cache ! -name " + shQuote(packName(e)) + " -exec rm -rf {} +\n" +
+		"find " + modCacheDir + " -name '*.lock' -delete\nrm -rf " + modCacheDir + "/cache/download/sumdb " + modCacheDir + "/cache/vcs" +
 		// The go.mod's checksum is in the key too, as a comment: the plan
 		// verifies the go.mod against it, so a download is the same input
 		// only for the same pair of checksums.
 		"\n# go.mod " + e.mod
 	return ctr.
+		WithMountedFile("/gobuild/gohdr", hdrTool(), dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
 		WithExec([]string{"sh", "-c", script}, bare).
 		Directory(modCacheDir).Sync(ctx)
 }

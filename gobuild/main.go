@@ -235,9 +235,12 @@ func (m *Gobuild) Archives(
 	sort.Slice(order, func(i, j int) bool { return order[i].importPath < order[j].importPath })
 	// The digests are of the source whole, and of what cgo wrote for a cgo
 	// package's compile, read from the package's exec.
-	ctr := b.base.
-		WithMountedFile("/gobuild/gohdr", hdrTool()).
-		WithMountedDirectory(b.roots.Mod, b.mods).
+	var modFiles []string
+	for _, bl := range blocks {
+		modFiles = append(modFiles, bl.modFiles...)
+	}
+	ctr := b.modules.mount(b.base.
+		WithMountedFile("/gobuild/gohdr", hdrTool()), modFiles).
 		WithMountedDirectory(b.roots.Src, b.src)
 	out := core.NewDirectory()
 	var entries strings.Builder
@@ -407,7 +410,8 @@ func (b *build) walk(ctx context.Context, blocks map[string]*block, weights map[
 	for _, bl := range blocks {
 		bl.addCFlags(cc)
 	}
-	mods := &modules{root: b.roots.Mod, all: b.mods, sums: b.sums}
+	mods := &modules{root: b.roots.Mod, all: b.mods, zips: b.zips, sums: b.sums}
+	b.modules = mods
 	if err := mods.expandLoose(ctx, blocks); err != nil {
 		return nil, err
 	}
@@ -473,10 +477,21 @@ type build struct {
 	// shadows the module sources mounted per package.
 	base  *dagger.Container
 	src   *dagger.Directory
-	mods  *dagger.Directory
-	// sums is the checksum of each downloaded module in mods, by its
-	// directory name in the module cache.
+	// mods is the module cache the go command made before any download,
+	// such as a toolchain it switched to, or all of it, downloaded per
+	// project, when it switched.
+	mods *dagger.Directory
+	// packs is the plan packs of the build's downloaded modules (downloads),
+	// which a plan unpacks into its module cache; nil without any.
+	packs *dagger.Directory
+	// zips is each downloaded module's zip, by its directory name in the
+	// module cache.
+	zips map[string]*dagger.File
+	// sums is the checksum of each downloaded module, by its directory name
+	// in the module cache.
 	sums  map[string]string
+	// modules is the walk's modules, for a step after it that reads them.
+	modules *modules
 	tools *dagger.Directory
 	roots roots
 }
@@ -668,10 +683,10 @@ fi
 		startSums <- sums
 	}()
 	entries := parseGoSums([]string{sumFile})
+	b.mods = start
 	if switched, _ := first.Directory("/gobuild").Glob(ctx, "switched"); len(switched) > 0 {
 		entries = nil
-		b.mods = start
-	} else if b.mods, err = downloads(ctx, start, public, caller, gomodcache, entries); err != nil {
+	} else if b.packs, b.zips, err = downloads(ctx, public, caller, gomodcache, entries); err != nil {
 		return nil, fmt.Errorf("go mod download: %w", err)
 	}
 	b.sums = map[string]string{}
@@ -815,19 +830,38 @@ type planned struct {
 	goDirs  *dagger.File
 }
 
+// withModules mounts the module cache a plan reads: the go command's own,
+// and, when the build downloaded modules, their plan packs, which
+// unpackModules unpacks into it.
+func (b *build) withModules(ctr *dagger.Container) *dagger.Container {
+	ctr = ctr.WithMountedDirectory(b.roots.Mod, b.mods)
+	if b.packs != nil {
+		ctr = ctr.WithMountedDirectory("/gobuild/modpacks", b.packs, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
+	}
+	return ctr
+}
+
+// unpackModules is the script that unpacks the build's plan packs into the
+// module cache, ending in "&& ", or "" without any.
+func (b *build) unpackModules() string {
+	if b.packs == nil {
+		return ""
+	}
+	return "for p in /gobuild/modpacks/*.gohdr; do /gobuild/gohdr unpack \"$p\" " + shQuote(b.roots.Mod) + " /dev/null || exit 1; done && "
+}
+
 // planWith makes a plan as plan does, with goCmd the go command that prints
 // it, run after pre, which may be empty or a command ending in "&&".
 func (b *build) planWith(ctx context.Context, headers *dagger.File, pre, goCmd string) (*planned, error) {
-	ran := b.base.
-		WithMountedFile("/gobuild/gohdr", hdrTool()).
-		WithMountedDirectory(b.roots.Mod, b.mods).
+	ran := b.withModules(b.base.
+		WithMountedFile("/gobuild/gohdr", hdrTool())).
 		WithMountedDirectory(b.roots.Src, planSource(b.src)).
 		WithMountedFile("/gobuild/src.hdr", headers).
 		// An empty build cache, so the plan holds every step.
 		WithEnvVariable("GOCACHE", "/gobuild/plancache").
 		// A failed plan prints go build's error, such as a //go:embed
 		// pattern it rejects, rather than leaving it in the plan file.
-		WithExec([]string{"sh", "-c", "/gobuild/gohdr unpack /gobuild/src.hdr " + shQuote(b.roots.Src) + " /gobuild/godirs.txt" +
+		WithExec([]string{"sh", "-c", b.unpackModules() + "/gobuild/gohdr unpack /gobuild/src.hdr " + shQuote(b.roots.Src) + " /gobuild/godirs.txt" +
 			" && cd " + shQuote(b.roots.Cwd) + " && " + pre + "{ " + goCmd + " 2> /gobuild/plan.txt" +
 			" || { status=$?; cat /gobuild/plan.txt >&2; exit $status; }; }" +
 			" && /gobuild/gohdr weigh /gobuild/plan.txt > /gobuild/weights.txt" +
@@ -874,14 +908,13 @@ func (b *build) testmain(ctx context.Context, headers *dagger.File, flags []stri
 	for i, c := range cmd {
 		quoted[i] = shQuote(c)
 	}
-	return b.base.
-		WithMountedFile("/gobuild/gohdr", hdrTool()).
-		WithMountedDirectory(b.roots.Mod, b.mods).
+	return b.withModules(b.base.
+		WithMountedFile("/gobuild/gohdr", hdrTool())).
 		WithMountedDirectory(b.roots.Src, planSource(b.src)).
 		WithMountedFile("/gobuild/src.hdr", headers).
 		WithMountedDirectory("/gobuild/tests", tests).
 		WithEnvVariable("GOCACHE", "/gobuild/plancache").
-		WithExec([]string{"sh", "-c", "/gobuild/gohdr unpack /gobuild/src.hdr " + shQuote(b.roots.Src) + " /gobuild/godirs.txt" +
+		WithExec([]string{"sh", "-c", b.unpackModules() + "/gobuild/gohdr unpack /gobuild/src.hdr " + shQuote(b.roots.Src) + " /gobuild/godirs.txt" +
 			" && cp -R /gobuild/tests/. " + shQuote(b.roots.Src) + "/" +
 			" && cd " + shQuote(b.roots.Cwd) + " && { " + strings.Join(quoted, " ") + " 2> /gobuild/testmain.err; " +
 			`work=$(sed -n 's/^WORK=//p' /gobuild/testmain.err); ` +

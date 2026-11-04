@@ -25,9 +25,13 @@ import (
 type modules struct {
 	// root is where they are, GOMODCACHE.
 	root string
-	// all is the module cache the build downloaded, evaluated, for a file
-	// outside any module's directory.
+	// all is the module cache the go command made before any download,
+	// evaluated, for a file outside any module's directory, or a module's
+	// zip downloaded with it.
 	all *dagger.Directory
+	// zips is each module's zip the build downloaded on its own, by its
+	// directory name.
+	zips map[string]*dagger.File
 	// sums holds the checksum of each module the build downloaded, by its
 	// directory name, as the go command recorded it in the module cache.
 	sums map[string]string
@@ -57,7 +61,10 @@ func (m *modules) dir(name string) *dagger.Directory {
 		return d
 	}
 	at := strings.LastIndex(name, "@")
-	zip := m.all.File(path.Join("cache/download", name[:at], "@v", name[at+1:]+".zip"))
+	zip, ok := m.zips[name]
+	if !ok {
+		zip = m.all.File(path.Join("cache/download", name[:at], "@v", name[at+1:]+".zip"))
+	}
 	// The zip holds the module's files under "<module>@<version>/", the
 	// module path not escaped.
 	d := zip.Extract(dagger.FileExtractOpts{Exclude: m.exclude[name]}).Directory(unescapeModule(name))
