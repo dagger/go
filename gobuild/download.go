@@ -130,6 +130,8 @@ type downloader struct {
 	privatePatterns string
 	gomodcache      string
 	sums            []sumEntry
+	// target is what discover evaluates build constraints against.
+	target target
 }
 
 // discover downloads the modules a build of the source may read, as the go
@@ -191,19 +193,15 @@ func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDir str
 			m.dir = dir
 			m.imports = map[string][]string{}
 			prefix := moduleDirName(e)
-			for _, line := range strings.Split(list, "\n") {
-				f := strings.Fields(line)
-				if len(f) == 0 {
-					continue
-				}
-				rel := strings.TrimPrefix(strings.TrimPrefix(f[0], prefix), "/")
+			for dir, imports := range fileImportsFor(d.target, list) {
+				rel := strings.TrimPrefix(strings.TrimPrefix(dir, prefix), "/")
 				ip := e.path
 				// Only the module path and version are escaped in the
 				// module cache; its directories are as the module has them.
 				if rel != "" {
 					ip = e.path + "/" + rel
 				}
-				m.imports[ip] = f[1:]
+				m.imports[ip] = imports
 			}
 		}()
 		return m
@@ -291,15 +289,13 @@ type sourceImports struct {
 
 type sourceModule struct{ dir, path string }
 
-func parseSourceImports(out string) sourceImports {
-	src := sourceImports{pkgs: map[string][]string{}}
+// parseSourceImports parses "gohdr imports": its module lines, and its Go
+// files' lines (importLine), of the files that build for t.
+func parseSourceImports(t target, out string) sourceImports {
+	src := sourceImports{pkgs: fileImportsFor(t, out)}
 	for _, line := range strings.Split(out, "\n") {
-		f := strings.Fields(line)
-		switch {
-		case len(f) == 3 && f[0] == "mod":
+		if f := strings.Fields(line); len(f) == 3 && f[0] == "mod" {
 			src.mods = append(src.mods, sourceModule{dir: f[1], path: f[2]})
-		case len(f) >= 2 && f[0] == "pkg":
-			src.pkgs[f[1]] = f[2:]
 		}
 	}
 	// The longest module path first, so a nested module wins.

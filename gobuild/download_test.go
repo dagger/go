@@ -93,12 +93,12 @@ func TestProviders(t *testing.T) {
 }
 
 func TestSourceImports(t *testing.T) {
-	src := parseSourceImports("mod . example.com/root\n" +
-		"mod tools example.com/root/tools\n" +
-		"pkg . example.com/root/lib fmt\n" +
-		"pkg lib github.com/dep/x\n" +
-		"pkg tools/cmd example.com/root/tools/inner\n" +
-		"pkg tools/inner golang.org/x/sys/unix\n")
+	src := parseSourceImports(newTarget("linux\narm64\n0\ngo1.27.3\n", nil), "mod . example.com/root\n"+
+		"mod tools example.com/root/tools\n"+
+		".\tmain.go\t-\texample.com/root/lib fmt\n"+
+		"lib\tlib.go\t-\tgithub.com/dep/x\n"+
+		"tools/cmd\tmain.go\t-\texample.com/root/tools/inner\n"+
+		"tools/inner\tinner.go\t-\tgolang.org/x/sys/unix\n")
 	for ip, want := range map[string]string{
 		"example.com/root":             ".",
 		"example.com/root/lib":         "lib",
@@ -113,6 +113,36 @@ func TestSourceImports(t *testing.T) {
 		}
 		if dir != want {
 			t.Errorf("dirOf(%q) = %q, want %q", ip, dir, want)
+		}
+	}
+}
+
+func TestTargetMatchFile(t *testing.T) {
+	tg := newTarget("linux\narm64\n0\ngo1.27.3\n", []string{"extended"})
+	for _, c := range []struct {
+		name, expr string
+		want       bool
+	}{
+		{"a.go", "-", true},
+		{"a_linux.go", "-", true},
+		{"a_windows.go", "-", false},
+		{"a_arm64.go", "-", true},
+		{"a_amd64.go", "-", false},
+		{"a_linux_arm64.go", "-", true},
+		{"a_darwin_arm64.go", "-", false},
+		{"a_linux_test.go", "-", true},
+		{"tools.go", "tools", false},
+		{"x.go", "ignore", false},
+		{"x.go", "linux && !cgo", true},
+		{"x.go", "cgo", false},
+		{"x.go", "unix", true},
+		{"x.go", "go1.27", true},
+		{"x.go", "go1.28", false},
+		{"x.go", "extended", true},
+		{"x.go", "windows || darwin", false},
+	} {
+		if got := tg.matchFile(c.name, c.expr); got != c.want {
+			t.Errorf("matchFile(%q, %q) = %v, want %v", c.name, c.expr, got, c.want)
 		}
 	}
 }

@@ -657,6 +657,7 @@ if [ -z "$mode" ] && [ -n "$(find "$src" -path '*/vendor/modules.txt' | head -n 
 	fi
 fi
 : > /gobuild/sums
+go env GOOS GOARCH CGO_ENABLED GOVERSION > /gobuild/goenv
 [ "$mode" = vendor ] || {
 	gomods=$(` + strings.Join(listed, " ") + `)
 	if [ "$(go env GOVERSION)" != "$(GOTOOLCHAIN=local go env GOVERSION)" ]; then
@@ -698,7 +699,12 @@ fi
 	if switched, _ := first.Directory("/gobuild").Glob(ctx, "switched"); len(switched) > 0 {
 		entries = nil
 	} else {
-		d := &downloader{public: public, private: caller, gomodcache: gomodcache, sums: entries}
+		goenv, err := first.File("/gobuild/goenv").Contents(ctx)
+		if err != nil {
+			return nil, err
+		}
+		d := &downloader{public: public, private: caller, gomodcache: gomodcache, sums: entries,
+			target: newTarget(goenv, buildTags(append(append([]string(nil), envFlags...), flags...)))}
 		if d.privatePatterns, err = firstEnv(ctx, caller, "GOPRIVATE", "GONOPROXY"); err != nil {
 			return nil, err
 		}
@@ -716,7 +722,7 @@ fi
 		if err != nil {
 			return nil, fmt.Errorf("source imports: %w", err)
 		}
-		if b.packs, b.zips, err = d.discover(ctx, parseSourceImports(listed), pkgDir); err != nil {
+		if b.packs, b.zips, err = d.discover(ctx, parseSourceImports(d.target, listed), pkgDir); err != nil {
 			return nil, fmt.Errorf("go mod download: %w", err)
 		}
 		b.fetch = d.lazyZip

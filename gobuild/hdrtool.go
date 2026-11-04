@@ -714,8 +714,8 @@ func packmod(root, out string, rels []string) error {
 	}
 	w := bufio.NewWriter(f)
 	fmt.Fprintln(w, "gohdr 1")
-	// Each package's imports, by its directory: what discover follows.
-	imports := map[string]map[string]bool{}
+	// Each Go file's imports and build constraint: what discover follows.
+	var imports []string
 	for _, rel := range files {
 		p := filepath.Join(root, rel)
 		fi, err := os.Lstat(p)
@@ -736,13 +736,7 @@ func packmod(root, out string, rels []string) error {
 			}
 			if strings.HasSuffix(rel, ".go") {
 				data = goHeader(rel, data)
-				dir := filepath.ToSlash(filepath.Dir(rel))
-				if imports[dir] == nil {
-					imports[dir] = map[string]bool{}
-				}
-				for _, ip := range fileImports(rel, data) {
-					imports[dir][ip] = true
-				}
+				imports = append(imports, importLine(rel, data))
 			}
 		}
 		fmt.Fprintf(w, "%s\n%o\n%d\n", rel, uint32(mode), len(data))
@@ -755,39 +749,32 @@ func packmod(root, out string, rels []string) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return writePackageImports(out+".imports", imports)
+	return os.WriteFile(out+".imports", []byte(strings.Join(imports, "")), 0o644)
 }
 
-// writePackageImports writes each package's imports to path, a line per
-// package: its directory, relative to the module cache, then its imports,
-// separated by spaces, all sorted.
-func writePackageImports(path string, imports map[string]map[string]bool) error {
-	dirs := make([]string, 0, len(imports))
-	for dir := range imports {
-		dirs = append(dirs, dir)
-	}
-	sort.Strings(dirs)
-	var b strings.Builder
-	for _, dir := range dirs {
-		list := make([]string, 0, len(imports[dir]))
-		for ip := range imports[dir] {
-			list = append(list, ip)
+// importLine is a Go file's line in an imports list: its directory, its
+// name, its //go:build expression or "-", and its imports, separated by
+// tabs, the imports by spaces.
+func importLine(rel string, src []byte) string {
+	expr := "-"
+	for _, l := range strings.Split(string(src), "\n") {
+		t := strings.TrimSpace(l)
+		if strings.HasPrefix(t, "package ") {
+			break
 		}
-		sort.Strings(list)
-		b.WriteString(dir)
-		for _, ip := range list {
-			b.WriteString(" " + ip)
+		if strings.HasPrefix(t, "//go:build ") {
+			expr = strings.TrimSpace(strings.TrimPrefix(t, "//go:build "))
 		}
-		b.WriteString("\n")
 	}
-	return os.WriteFile(path, []byte(b.String()), 0o644)
+	return filepath.ToSlash(filepath.Dir(rel)) + "\t" + filepath.Base(rel) + "\t" + expr + "\t" +
+		strings.Join(fileImports(rel, src), " ") + "\n"
 }
 
-// importsOfPack prints what a pack's packages import, for following the
-// imports of a build from its main package: a line "pkg <dir> <imports...>"
-// per package directory, of its Go files but its tests, or with tests, its
-// tests too; and a line "mod <dir> <module path>" per go.mod, from its module
-// directive. Testdata directories are left out.
+// importsOfPack prints what a pack's Go files import, for following the
+// imports of a build from its main package: a line per Go file (importLine),
+// but tests, or with tests, its tests too; and a line "mod <dir> <module
+// path>" per go.mod, from its module directive. Testdata directories are
+// left out.
 func importsOfPack(pack string, tests bool) error {
 	in, err := os.Open(pack)
 	if err != nil {
@@ -802,7 +789,7 @@ func importsOfPack(pack string, tests bool) error {
 	if magic, err := line(); err != nil || magic != "gohdr 1" {
 		return fmt.Errorf("not a gohdr pack")
 	}
-	imports := map[string]map[string]bool{}
+	var files []string
 	var mods []string
 	for {
 		rel, err := line()
@@ -843,34 +830,15 @@ func importsOfPack(pack string, tests bool) error {
 		if !strings.HasSuffix(rel, ".go") || (!tests && strings.HasSuffix(rel, "_test.go")) {
 			continue
 		}
-		if imports[dir] == nil {
-			imports[dir] = map[string]bool{}
-		}
-		for _, ip := range fileImports(rel, data[:size]) {
-			imports[dir][ip] = true
-		}
+		files = append(files, importLine(rel, data[:size]))
 	}
-	dirs := make([]string, 0, len(imports))
-	for dir := range imports {
-		dirs = append(dirs, dir)
-	}
-	sort.Strings(dirs)
 	sort.Strings(mods)
 	var b strings.Builder
 	for _, m := range mods {
 		b.WriteString(m + "\n")
 	}
-	for _, dir := range dirs {
-		list := make([]string, 0, len(imports[dir]))
-		for ip := range imports[dir] {
-			list = append(list, ip)
-		}
-		sort.Strings(list)
-		b.WriteString("pkg " + dir)
-		for _, ip := range list {
-			b.WriteString(" " + ip)
-		}
-		b.WriteString("\n")
+	for _, f := range files {
+		b.WriteString(f)
 	}
 	_, err = os.Stdout.WriteString(b.String())
 	return err
