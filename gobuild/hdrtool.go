@@ -714,6 +714,7 @@ func packmod(root, out string, rels []string) error {
 	}
 	w := bufio.NewWriter(f)
 	fmt.Fprintln(w, "gohdr 1")
+	imports := map[string]bool{}
 	for _, rel := range files {
 		p := filepath.Join(root, rel)
 		fi, err := os.Lstat(p)
@@ -734,6 +735,9 @@ func packmod(root, out string, rels []string) error {
 			}
 			if strings.HasSuffix(rel, ".go") {
 				data = goHeader(rel, data)
+				for _, ip := range fileImports(rel, data) {
+					imports[ip] = true
+				}
 			}
 		}
 		fmt.Fprintf(w, "%s\n%o\n%d\n", rel, uint32(mode), len(data))
@@ -743,7 +747,90 @@ func packmod(root, out string, rels []string) error {
 	if err := w.Flush(); err != nil {
 		return err
 	}
-	return f.Close()
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return writeImports(out+".imports", imports)
+}
+
+// importsOfPack prints the import paths of a pack's Go files but its tests,
+// one per line, sorted: what a build of its packages may import, whatever
+// its build constraints select.
+func importsOfPack(pack string) error {
+	in, err := os.Open(pack)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	r := bufio.NewReader(in)
+	line := func() (string, error) {
+		s, err := r.ReadString('\n')
+		return strings.TrimSuffix(s, "\n"), err
+	}
+	if magic, err := line(); err != nil || magic != "gohdr 1" {
+		return fmt.Errorf("not a gohdr pack")
+	}
+	imports := map[string]bool{}
+	for {
+		rel, err := line()
+		if err == io.EOF && rel == "" {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := line(); err != nil {
+			return err
+		}
+		sizeStr, err := line()
+		if err != nil {
+			return err
+		}
+		size, err := strconv.Atoi(sizeStr)
+		if err != nil {
+			return err
+		}
+		data := make([]byte, size+1)
+		if _, err := io.ReadFull(r, data); err != nil {
+			return err
+		}
+		if strings.HasSuffix(rel, ".go") && !strings.HasSuffix(rel, "_test.go") && !strings.Contains("/"+rel, "/testdata/") {
+			for _, ip := range fileImports(rel, data[:size]) {
+				imports[ip] = true
+			}
+		}
+	}
+	return writeImports("/dev/stdout", imports)
+}
+
+// fileImports is a Go file's import paths but "C"; nothing for a file that
+// does not parse.
+func fileImports(name string, src []byte) []string {
+	f, err := parser.ParseFile(token.NewFileSet(), name, src, parser.ImportsOnly|parser.SkipObjectResolution)
+	if err != nil || f == nil {
+		return nil
+	}
+	var out []string
+	for _, im := range f.Imports {
+		if ip, err := strconv.Unquote(im.Path.Value); err == nil && ip != "C" {
+			out = append(out, ip)
+		}
+	}
+	return out
+}
+
+// writeImports writes import paths to path, one per line, sorted.
+func writeImports(path string, imports map[string]bool) error {
+	list := make([]string, 0, len(imports))
+	for ip := range imports {
+		list = append(list, ip)
+	}
+	sort.Strings(list)
+	var b strings.Builder
+	for _, ip := range list {
+		b.WriteString(ip + "\n")
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
 }
 
 // headerEnd follows a header's go:embed lines, as the go module's scan writes
@@ -791,6 +878,8 @@ func main() {
 	args := os.Args[1:]
 	var err error
 	switch {
+	case len(args) == 2 && args[0] == "imports":
+		err = importsOfPack(args[1])
 	case len(args) >= 3 && args[0] == "packmod":
 		err = packmod(args[1], args[2], args[3:])
 	case len(args) == 4 && args[0] == "unpack":

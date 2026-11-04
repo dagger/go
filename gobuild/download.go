@@ -120,63 +120,146 @@ var downloadEnv = []string{
 	"GOINSECURE", "GOVCS", "GOAUTH", "GIT_SSH_COMMAND", "GIT_TERMINAL_PROMPT",
 }
 
-// downloads downloads, once each, the module versions in sums whose zips a
-// build may read, and returns a directory of their plan packs and their zips
-// by module cache directory name. public runs a public module's download:
-// the build's toolchain with downloadEnv alone. private runs one GOPRIVATE or
-// GONOPROXY names, in the caller's own container, with its credentials, so
-// its download is shared only with builds that have them.
-//
-// A go.sum also records the go.mod of every version the module graph ever
-// looked at; with graph pruning, the plan loads few of them, and fetches
-// those itself.
-func downloads(ctx context.Context, public, private *dagger.Container, gomodcache string, sums []sumEntry) (*dagger.Directory, map[string]*dagger.File, error) {
-	privatePatterns, err := firstEnv(ctx, private, "GOPRIVATE", "GONOPROXY")
-	if err != nil {
-		return nil, nil, err
-	}
-	var zips []sumEntry
-	for _, e := range sums {
+// downloader downloads, once each, the module versions in sums whose zips a
+// build reads. public runs a public module's download: the build's toolchain
+// with downloadEnv alone. private runs one GOPRIVATE or GONOPROXY names, in
+// the caller's own container, with its credentials, so its download is
+// shared only with builds that have them.
+type downloader struct {
+	public, private *dagger.Container
+	privatePatterns string
+	gomodcache      string
+	sums            []sumEntry
+}
+
+// discover downloads the modules a build of the source may read, as the go
+// command's loader finds them, and returns a directory of their plan packs
+// and their zips by module cache directory name. It starts from the modules
+// that provide the source's imports, seed, and as each download finishes,
+// downloads those that provide the module's own imports, until no new one
+// turns up: what the build's packages import, whatever their build
+// constraints select, but no test's. Only modules whose zip a go.sum names
+// are candidates; a module the plan reads that discover missed, such as one
+// a replace renames, the plan fetches itself, and the build downloads its
+// zip on its own (lazyZip).
+func (d *downloader) discover(ctx context.Context, seed []string) (*dagger.Directory, map[string]*dagger.File, error) {
+	byPath := map[string][]sumEntry{}
+	for _, e := range d.sums {
 		if e.zip != "" {
-			zips = append(zips, e)
+			byPath[e.path] = append(byPath[e.path], e)
 		}
 	}
-	got := make([]*dagger.Directory, len(zips))
-	errs := make([]error, len(zips))
-	var wg sync.WaitGroup
-	// Downloads wait on the network more than the CPU.
-	gate := make(chan struct{}, 32)
-	for i, e := range zips {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			gate <- struct{}{}
-			defer func() { <-gate }()
-			ctr := public
-			if privatePatterns != "" && matchPrefixPatterns(privatePatterns, e.path) {
-				ctr = private
+	var (
+		mu      sync.Mutex
+		started = map[string]bool{}
+		got     = map[string]*dagger.Directory{}
+		entry   = map[string]sumEntry{}
+		errs    []error
+		wg      sync.WaitGroup
+		// Downloads wait on the network more than the CPU.
+		gate = make(chan struct{}, 32)
+	)
+	var follow func(imports []string)
+	follow = func(imports []string) {
+		for _, ip := range imports {
+			for _, e := range providers(byPath, ip) {
+				name := moduleDirName(e)
+				mu.Lock()
+				if started[name] {
+					mu.Unlock()
+					continue
+				}
+				started[name] = true
+				entry[name] = e
+				mu.Unlock()
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					gate <- struct{}{}
+					dir, err := d.download(e).Sync(ctx)
+					var imports string
+					if err == nil {
+						imports, err = dir.File(packName(e) + ".imports").Contents(ctx)
+					}
+					<-gate
+					mu.Lock()
+					if err != nil {
+						errs = append(errs, fmt.Errorf("%s@%s: %w", e.path, e.version, err))
+						mu.Unlock()
+						return
+					}
+					got[name] = dir
+					mu.Unlock()
+					follow(strings.Fields(imports))
+				}()
 			}
-			got[i], errs[i] = downloadModule(ctx, ctr, gomodcache, e)
-		}()
-	}
-	wg.Wait()
-	packs := make([]*dagger.File, len(zips))
-	files := map[string]*dagger.File{}
-	for i, e := range zips {
-		if errs[i] != nil {
-			return nil, nil, fmt.Errorf("%s@%s: %w", e.path, e.version, errs[i])
 		}
-		name := moduleDirName(e)
-		packs[i] = got[i].File(packName(e))
-		files[name] = got[i].File(zipPath(e))
+	}
+	follow(seed)
+	wg.Wait()
+	if len(errs) > 0 {
+		return nil, nil, errs[0]
+	}
+	names := make([]string, 0, len(got))
+	for name := range got {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	packs := make([]*dagger.File, len(names))
+	zips := map[string]*dagger.File{}
+	for i, name := range names {
+		packs[i] = got[name].File(packName(entry[name]))
+		zips[name] = got[name].File(zipPath(entry[name]))
 	}
 	if len(packs) == 0 {
-		return nil, files, nil
+		return nil, zips, nil
 	}
 	// One directory of every pack, made in one step: merged one by one,
 	// hundreds of them would stack a layer each, past what a mount takes.
 	dir, err := core.NewDirectory().WithFiles(".", packs).Sync(ctx)
-	return dir, files, err
+	return dir, zips, err
+}
+
+// lazyZip is the zip of the module version with the module cache directory
+// name, downloaded on its own; nil for one no go.sum names a zip for.
+func (d *downloader) lazyZip(name string) *dagger.File {
+	for _, e := range d.sums {
+		if e.zip != "" && moduleDirName(e) == name {
+			return d.download(e).File(zipPath(e))
+		}
+	}
+	return nil
+}
+
+// providers is the module versions that may provide the package with import
+// path ip: those of the longest module path that is ip or a prefix of it by
+// path elements. A standard library package, whose first element has no
+// dot, has none.
+func providers(byPath map[string][]sumEntry, ip string) []sumEntry {
+	first, _, _ := strings.Cut(ip, "/")
+	if !strings.Contains(first, ".") {
+		return nil
+	}
+	for p := ip; ; {
+		if es, ok := byPath[p]; ok {
+			return es
+		}
+		i := strings.LastIndex(p, "/")
+		if i < 0 {
+			return nil
+		}
+		p = p[:i]
+	}
+}
+
+// download is the download of one module version (downloadModule), in the
+// container its path calls for.
+func (d *downloader) download(e sumEntry) *dagger.Directory {
+	ctr := d.public
+	if d.privatePatterns != "" && matchPrefixPatterns(d.privatePatterns, e.path) {
+		ctr = d.private
+	}
+	return downloadModule(ctr, d.gomodcache, e)
 }
 
 // moduleDirName is a module version's directory name in the module cache.
@@ -203,7 +286,7 @@ func packName(e sumEntry) string {
 // downloaded and extracted. A module cache the toolchain image comes with,
 // filled for offline builds, is read first. Its key is the module version
 // and its checksums, so every project that reads it shares it.
-func downloadModule(ctx context.Context, ctr *dagger.Container, gomodcache string, e sumEntry) (*dagger.Directory, error) {
+func downloadModule(ctr *dagger.Container, gomodcache string, e sumEntry) *dagger.Directory {
 	q := e.path + "@" + e.version
 	meta := strings.TrimSuffix(zipPath(e), ".zip")
 	script := "set -e\nmkdir -p " + modCacheDir + " /gobuild/empty\n" +
@@ -218,7 +301,7 @@ func downloadModule(ctx context.Context, ctr *dagger.Container, gomodcache strin
 		// Not part of the module version: its extraction, which a build
 		// makes from the zip on its own; the go command's locks; and its
 		// record of the queries that found it.
-		"find " + modCacheDir + " -mindepth 1 -maxdepth 1 ! -name cache ! -name " + shQuote(packName(e)) + " -exec rm -rf {} +\n" +
+		"find " + modCacheDir + " -mindepth 1 -maxdepth 1 ! -name cache ! -name " + shQuote(packName(e)) + " ! -name " + shQuote(packName(e)+".imports") + " -exec rm -rf {} +\n" +
 		"find " + modCacheDir + " -name '*.lock' -delete\nrm -rf " + modCacheDir + "/cache/download/sumdb " + modCacheDir + "/cache/vcs" +
 		// The go.mod's checksum is in the key too, as a comment: the plan
 		// verifies the go.mod against it, so a download is the same input
@@ -227,7 +310,7 @@ func downloadModule(ctx context.Context, ctr *dagger.Container, gomodcache strin
 	return ctr.
 		WithMountedFile("/gobuild/gohdr", hdrTool(), dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
 		WithExec([]string{"sh", "-c", script}, bare).
-		Directory(modCacheDir).Sync(ctx)
+		Directory(modCacheDir)
 }
 
 // firstEnv is the first of ctr's named environment variables that is set.

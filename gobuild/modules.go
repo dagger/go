@@ -32,6 +32,9 @@ type modules struct {
 	// zips is each module's zip the build downloaded on its own, by its
 	// directory name.
 	zips map[string]*dagger.File
+	// fetchZip downloads the zip of a module zips lacks, by its directory
+	// name; nil when the build downloaded per project.
+	fetchZip func(name string) *dagger.File
 	// sums holds the checksum of each module the build downloaded, by its
 	// directory name, as the go command recorded it in the module cache.
 	sums map[string]string
@@ -62,7 +65,10 @@ func (m *modules) dir(name string) *dagger.Directory {
 	}
 	at := strings.LastIndex(name, "@")
 	zip, ok := m.zips[name]
-	if !ok {
+	if !ok && m.fetchZip != nil {
+		zip = m.fetchZip(name)
+	}
+	if zip == nil {
 		zip = m.all.File(path.Join("cache/download", name[:at], "@v", name[at+1:]+".zip"))
 	}
 	// The zip holds the module's files under "<module>@<version>/", the

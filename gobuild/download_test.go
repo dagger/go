@@ -62,3 +62,32 @@ func TestMatchPrefixPatterns(t *testing.T) {
 		}
 	}
 }
+
+func TestProviders(t *testing.T) {
+	byPath := map[string][]sumEntry{
+		"github.com/a/b":           {{path: "github.com/a/b", version: "v1.0.0", zip: "h1:x"}},
+		"github.com/a/b/v2":        {{path: "github.com/a/b/v2", version: "v2.1.0", zip: "h1:y"}},
+		"golang.org/x/sys":         {{path: "golang.org/x/sys", version: "v0.42.0", zip: "h1:z"}},
+		"cloud.google.com/go":      {{path: "cloud.google.com/go", version: "v0.1.0", zip: "h1:c"}},
+		"cloud.google.com/go/auth": {{path: "cloud.google.com/go/auth", version: "v0.2.0", zip: "h1:d"}},
+	}
+	for ip, want := range map[string]string{
+		"github.com/a/b":                 "github.com/a/b",
+		"github.com/a/b/pkg/sub":         "github.com/a/b",
+		"github.com/a/b/v2/pkg":          "github.com/a/b/v2",
+		"github.com/a/bc":                "",
+		"golang.org/x/sys/unix":          "golang.org/x/sys",
+		"cloud.google.com/go/auth/oauth": "cloud.google.com/go/auth",
+		"cloud.google.com/go/storage":    "cloud.google.com/go",
+		"fmt":                            "",
+		"dagger/gobuild/internal/dagger": "",
+	} {
+		got := ""
+		if es := providers(byPath, ip); len(es) > 0 {
+			got = es[0].path
+		}
+		if got != want {
+			t.Errorf("providers(%q) = %q, want %q", ip, got, want)
+		}
+	}
+}

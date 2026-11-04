@@ -29,8 +29,11 @@ import (
 
 type Gobuild struct{}
 
-// toolImage builds gohdr, which runs in whatever image the build uses.
-const toolImage = "golang:1.26-alpine"
+// toolImage builds gohdr, which runs in whatever image the build uses. It is
+// pinned by digest, so gohdr, which every plan and download mounts, is the
+// same input in every build: a tag moves, and a workspace's lockfile may pin
+// it to another digest than the registry serves.
+const toolImage = "golang:1.26-alpine@sha256:9ce231b28998b32e116927c61aa5c406183061d4f3f2d61b292c88e7f6bdf7ca"
 
 // bare runs an exec as its command alone: none of these execs call Dagger,
 // and starting a nested session for each would cost every package; and
@@ -187,7 +190,7 @@ func (m *Gobuild) Archives(
 	dependencies bool,
 ) (*dagger.Directory, error) {
 	cwd := path.Join(mountPath, workdir)
-	b, err := newBuild(ctx, base, image, from, source, mountPath, cwd, flags)
+	b, err := newBuild(ctx, base, image, from, source, headers, mountPath, cwd, flags)
 	if err != nil {
 		return nil, err
 	}
@@ -340,7 +343,7 @@ func run(ctx context.Context, base *dagger.Container, image string, from *dagger
 		// checks: the per-package build doesn't replay it.
 		flags = append([]string{"-vet=off"}, flags...)
 	}
-	b, err := newBuild(ctx, base, image, from, source, mountPath, cwd, flags)
+	b, err := newBuild(ctx, base, image, from, source, headers, mountPath, cwd, flags)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -410,7 +413,7 @@ func (b *build) walk(ctx context.Context, blocks map[string]*block, weights map[
 	for _, bl := range blocks {
 		bl.addCFlags(cc)
 	}
-	mods := &modules{root: b.roots.Mod, all: b.mods, zips: b.zips, sums: b.sums}
+	mods := &modules{root: b.roots.Mod, all: b.mods, zips: b.zips, fetchZip: b.fetch, sums: b.sums}
 	b.modules = mods
 	if err := mods.expandLoose(ctx, blocks); err != nil {
 		return nil, err
@@ -492,11 +495,15 @@ type build struct {
 	sums  map[string]string
 	// modules is the walk's modules, for a step after it that reads them.
 	modules *modules
+	// fetch downloads, on its own, the zip of a module the build reads that
+	// discover didn't find, by its directory name; nil when the build didn't
+	// download per module.
+	fetch func(name string) *dagger.File
 	tools *dagger.Directory
 	roots roots
 }
 
-func newBuild(ctx context.Context, ctr *dagger.Container, image string, from *dagger.Container, source *dagger.Directory, mountPath, cwd string, flags []string) (*build, error) {
+func newBuild(ctx context.Context, ctr *dagger.Container, image string, from *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, cwd string, flags []string) (*build, error) {
 	// The plan's view of the source is a filtered copy, as slow on a large
 	// source as the rest of this setup, which it doesn't depend on: it's
 	// made alongside it. An error shows again where the plan mounts it.
@@ -686,8 +693,24 @@ fi
 	b.mods = start
 	if switched, _ := first.Directory("/gobuild").Glob(ctx, "switched"); len(switched) > 0 {
 		entries = nil
-	} else if b.packs, b.zips, err = downloads(ctx, public, caller, gomodcache, entries); err != nil {
-		return nil, fmt.Errorf("go mod download: %w", err)
+	} else {
+		d := &downloader{public: public, private: caller, gomodcache: gomodcache, sums: entries}
+		if d.privatePatterns, err = firstEnv(ctx, caller, "GOPRIVATE", "GONOPROXY"); err != nil {
+			return nil, err
+		}
+		// What the source imports seeds which modules the build may read.
+		seed, err := public.
+			WithMountedFile("/gobuild/gohdr", hdrTool(), dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
+			WithMountedFile("/gobuild/src.hdr", headers, dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
+			WithExec([]string{"/gobuild/gohdr", "imports", "/gobuild/src.hdr"}, bare).
+			Stdout(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("source imports: %w", err)
+		}
+		if b.packs, b.zips, err = d.discover(ctx, strings.Fields(seed)); err != nil {
+			return nil, fmt.Errorf("go mod download: %w", err)
+		}
+		b.fetch = d.lazyZip
 	}
 	b.sums = map[string]string{}
 	for k, v := range <-startSums {
