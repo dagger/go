@@ -987,6 +987,24 @@ type GoDev {
   }
 
   """
+  The archives of chosen packages are what those packages import, without
+  test variants when asked: what codegen type-checks a module's root package
+  against. A package elsewhere in the module that doesn't load, such as a
+  nested module's directory without its go.mod, doesn't fail them.
+  """
+  archivesPackagesCheck: Void @check {
+    let ws = directory
+      .withNewFile("go.mod", "module example.com/app\n\ngo 1.22\n")
+      .withNewFile("main.go", "package main\n\nimport \"strings\"\n\nfunc main() { println(strings.ToUpper(\"x\")) }\n")
+      .withNewFile("main_test.go", "package main\n\nimport (\n\t\"net/http/httptest\"\n\t\"testing\"\n)\n\nfunc TestX(t *testing.T) { _ = httptest.NewRecorder() }\n")
+      .withNewFile("nested/main.go", "package main\n\nimport \"example.com/elsewhere/missing\"\n\nfunc main() { missing.F() }\n")
+      .asWorkspace
+    let manifest = go(version: "1.27.3").module(ws, ".").archives(ws, dependencies: true, packages: ["."], tests: false).file("manifest.json").contents
+    assert(manifest.contains("\"strings\": {"), "the root package's import is not archived: " + manifest)
+    assert(manifest.contains("net/http/httptest") == false, "a test-only import is archived without tests: " + manifest)
+  }
+
+  """
   A module's archives are what golangci-lint's export driver reads: the
   manifest lists every package go list -deps -test lists, main packages,
   what only tests import, test variants and external test packages included,

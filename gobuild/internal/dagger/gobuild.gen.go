@@ -45,6 +45,14 @@ type GobuildArchivesOpts struct {
 	Dependencies bool
 	// The container module downloads run with, as for Binary.
 	Downloads *Container
+	// The packages whose imports are archived, as go list patterns from
+	// workdir. Unset, every package of the module.
+	Packages []string
+	// With the packages' test variants and external test packages, and what
+	// they import, as a lint reads them.
+	//
+	// Default: true
+	Tests bool
 }
 
 // Archives compiles, one exec per package as Binary builds, every package
@@ -90,6 +98,14 @@ func (r *Gobuild) Archives(base *Container, source *Directory, headers *File, mo
 		// `downloads` optional argument
 		if !querybuilder.IsZeroValue(opts[i].Downloads) {
 			q = q.Arg("downloads", opts[i].Downloads)
+		}
+		// `packages` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Packages) {
+			q = q.Arg("packages", opts[i].Packages)
+		}
+		// `tests` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Tests) {
+			q = q.Arg("tests", opts[i].Tests)
 		}
 	}
 	q = q.Arg("base", base)

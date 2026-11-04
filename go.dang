@@ -1560,6 +1560,17 @@ type GoModule {
     as they are.
     """
     dependencies: Boolean! = false,
+    """
+    The packages whose imports are archived, as go list patterns from the
+    module's directory, e.g. ["."] for what its root package type-checks
+    against.
+    """
+    packages: [String!]! = ["./..."],
+    """
+    With the packages' test variants and external test packages, and what
+    they import, as a lint reads them.
+    """
+    tests: Boolean! = true,
   ): Directory! {
     let ctr = platformBase(ws, gomod.hostPlatform)
     let flags = buildFlags + (ctr.envVariable("GOFLAGS") ?? "").split(" ").filter { f => f != "" }
@@ -1570,13 +1581,15 @@ type GoModule {
       base: ctr,
       image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
       from: if (baseImage == null) { null } else { baseImage.withoutEntrypoint },
-      source: source(ws, test: true),
+      source: source(ws, test: tests),
       headers: lib.scan(ws).sync.file("_headers_.gohdr"),
       mountPath: mountPath,
       workdir: path,
       flags: buildFlags,
       dependencies: dependencies,
       downloads: tool.downloads,
+      packages: packages,
+      tests: tests,
     )
     out.sync rescue {
       err: Error => raise "Go archives of module " + path + ": " + err.message

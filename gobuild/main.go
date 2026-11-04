@@ -200,9 +200,17 @@ func (m *Gobuild) Archives(
 	// The container module downloads run with, as for Binary.
 	// +optional
 	downloads *dagger.Container,
+	// The packages whose imports are archived, as go list patterns from
+	// workdir. Unset, every package of the module.
+	// +optional
+	packages []string,
+	// With the packages' test variants and external test packages, and what
+	// they import, as a lint reads them.
+	// +default=true
+	tests bool,
 ) (*dagger.Directory, error) {
 	cwd := path.Join(mountPath, workdir)
-	b, err := newBuild(ctx, base, image, from, downloads, source, headers, "", true, mountPath, cwd, flags)
+	b, err := newBuild(ctx, base, image, from, downloads, source, headers, "", tests, mountPath, cwd, flags)
 	if err != nil {
 		return nil, err
 	}
@@ -217,7 +225,14 @@ func (m *Gobuild) Archives(
 	// go list -export prints the plan of what it compiles, as go build -n
 	// does, and its listing of the packages.
 	pre := "go env -json GOVERSION GOOS GOARCH CGO_ENABLED GOMODCACHE " + strings.Join(cgoVars, " ") + " > /gobuild/env.json && "
-	goCmd := shJoin(append(append([]string{"go", "list", "-export", "-deps", "-test", "-n", "-json=" + listFields}, flags...), "./...")) + " > /gobuild/list.json"
+	listCmd := []string{"go", "list", "-export", "-deps", "-n", "-json=" + listFields}
+	if tests {
+		listCmd = append(listCmd, "-test")
+	}
+	if len(packages) == 0 {
+		packages = []string{"./..."}
+	}
+	goCmd := shJoin(append(append(listCmd, flags...), packages...)) + " > /gobuild/list.json"
 	p, err := b.planWith(ctx, headers, pre, goCmd)
 	if err != nil {
 		return nil, err

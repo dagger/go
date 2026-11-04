@@ -152,7 +152,21 @@ func DaggerDispatch(ctx context.Context, parentJSON []byte, parentName string, f
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg downloads", err))
 				}
 			}
-			return (*Gobuild).Archives(&parent, ctx, base, image, from, source, headers, mountPath, workdir, flags, dependencies, downloads)
+			var packages []string
+			if inputArgs["packages"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["packages"]), &packages)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg packages", err))
+				}
+			}
+			var tests bool
+			if inputArgs["tests"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["tests"]), &tests)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg tests", err))
+				}
+			}
+			return (*Gobuild).Archives(&parent, ctx, base, image, from, source, headers, mountPath, workdir, flags, dependencies, downloads, packages, tests)
 		case "Binary":
 			var parent Gobuild
 			err = json.Unmarshal(parentJSON, &parent)
