@@ -61,10 +61,11 @@ func TestSummarizeAttribution(t *testing.T) {
 	}
 }
 
-// Discovery includes build-excluded tests, while the report contains only
-// tests present in the binary. Do not confuse an absent test with an aborted one.
+// A selected test with no events in a package that failed by a named test,
+// as -failfast leaves the tests after the first failure, did not run. One that
+// started and never finished has no result either.
 func TestAbsentAndInterruptedTests(t *testing.T) {
-	selected := []selection{{"example.com/p", []string{"TestBad", "TestTagged", "TestInterrupted", "TestOK"}}}
+	selected := []selection{{"example.com/p", []string{"TestBad", "TestAfterFailure", "TestInterrupted", "TestOK"}}}
 	got, err := summarize(report(
 		event{Action: "pass", Package: "example.com/p", Test: "TestOK"},
 		event{Action: "fail", Package: "example.com/p", Test: "TestBad"},
@@ -75,10 +76,10 @@ func TestAbsentAndInterruptedTests(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, want := range map[string]string{
-		"TestBad":         "TestBad failed",
-		"TestTagged":      "",
-		"TestInterrupted": "no successful result for TestInterrupted",
-		"TestOK":          "",
+		"TestBad":          "TestBad failed",
+		"TestAfterFailure": "TestAfterFailure did not run: go test failed example.com/p without running it",
+		"TestInterrupted":  "no successful result for TestInterrupted",
+		"TestOK":           "",
 	} {
 		message, ok := got[check{"example.com/p", name}]
 		if !ok || (want == "" && message != "") || (want != "" && !strings.Contains(message, want)) {
