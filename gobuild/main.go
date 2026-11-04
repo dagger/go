@@ -996,10 +996,12 @@ func (b *build) planWith(ctx context.Context, headers *dagger.File, pre, goCmd s
 		// An empty build cache, so the plan holds every step.
 		WithEnvVariable("GOCACHE", "/gobuild/plancache").
 		// A failed plan prints go build's error, such as a //go:embed
-		// pattern it rejects, rather than leaving it in the plan file.
+		// pattern it rejects, rather than leaving it in the plan file: the
+		// end of go build's output, where it writes the error, and not the
+		// plan before it, which a large build makes hundreds of KB long.
 		WithExec([]string{"sh", "-c", b.unpackHeaders() +
 			" && cd " + shQuote(b.roots.Cwd) + " && " + pre + "{ " + goCmd + " 2> /gobuild/plan.txt" +
-			" || { status=$?; cat /gobuild/plan.txt >&2; exit $status; }; }" +
+			" || { status=$?; tail -n 40 /gobuild/plan.txt >&2; exit $status; }; }" +
 			" && /gobuild/gohdr weigh /gobuild/plan.txt > /gobuild/weights.txt" +
 			" && /gobuild/gohdr cc /gobuild/plan.txt > /gobuild/cc.txt"}, bare)
 	plan, err := ran.File("/gobuild/plan.txt").Contents(ctx)

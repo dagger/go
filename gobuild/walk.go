@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"runtime"
@@ -256,6 +257,7 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 				// a hash of the whole binary on every link.
 				r.dir = ran.Directory("/work/" + n.Name)
 				r.file, r.err = r.dir.File(n.Output).Sync(ctx)
+				r.err = execFailure(r.err)
 				return
 			}
 			// Evaluate the output directory first, then read the file from
@@ -264,7 +266,7 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 			// its dependents' execs cached.
 			out, err := ran.Directory("/work/" + n.Name).Sync(ctx)
 			if err != nil {
-				r.err = err
+				r.err = execFailure(err)
 				return
 			}
 			r.dir = out
@@ -543,4 +545,25 @@ func literalPatterns(paths []string) []string {
 		out[i] = b.String()
 	}
 	return out
+}
+
+// execFailure is a package exec's failure with what the exec printed: the
+// compiler's or the linker's own messages, which they write to stdout, and
+// the script's, on stderr. The SDK's error says only the exit code, and the
+// exec's output would otherwise reach a user only in the exec's span.
+func execFailure(err error) error {
+	var execErr *dagger.ExecError
+	if !errors.As(err, &execErr) {
+		return err
+	}
+	var out []string
+	for _, o := range []string{execErr.Stdout, execErr.Stderr} {
+		if o = strings.TrimSpace(o); o != "" {
+			out = append(out, o)
+		}
+	}
+	if len(out) == 0 {
+		return err
+	}
+	return fmt.Errorf("%s: %s", strings.Join(out, "\n"), err.Error())
 }
