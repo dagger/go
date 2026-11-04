@@ -902,7 +902,8 @@ func importLine(rel string, src []byte) string {
 // imports of a build from its main package: a line per Go file (importLine),
 // but tests, or with tests, its tests too; and a line "mod <dir> <module
 // path>" per go.mod, from its module directive. Testdata directories are
-// left out.
+// listed too: a build may name a package there, though no pattern matches
+// one.
 func importsOfPack(pack string, tests bool) error {
 	in, err := os.Open(pack)
 	if err != nil {
@@ -941,9 +942,6 @@ func importsOfPack(pack string, tests bool) error {
 		data := make([]byte, size+1)
 		if _, err := io.ReadFull(r, data); err != nil {
 			return err
-		}
-		if strings.Contains("/"+rel, "/testdata/") {
-			continue
 		}
 		dir := filepath.ToSlash(filepath.Dir(rel))
 		if filepath.Base(rel) == "go.mod" {

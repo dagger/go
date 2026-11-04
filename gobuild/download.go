@@ -259,7 +259,9 @@ func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDir str
 		followSource(path.Clean(pkgDir))
 	} else {
 		for dir := range src.pkgs {
-			followSource(dir)
+			if !inTestdata(dir) {
+				followSource(dir)
+			}
 		}
 	}
 	wg.Wait()
@@ -290,6 +292,12 @@ func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDir str
 	// hundreds of them would stack a layer each, past what a mount takes.
 	dir, err := core.NewDirectory().WithFiles(".", packs).Sync(ctx)
 	return dir, zips, dirs, err
+}
+
+// inTestdata reports whether a source directory is in a testdata directory,
+// whose packages a build of every package leaves out, as "./..." does.
+func inTestdata(dir string) bool {
+	return dir == "testdata" || strings.HasPrefix(dir, "testdata/") || strings.Contains(dir, "/testdata/") || strings.HasSuffix(dir, "/testdata")
 }
 
 // planDirs is the directories whose Go files a plan reads, of the source and
@@ -327,7 +335,9 @@ func planDirsOf(src sourceImports, pkgDir string, byPath map[string][]sumEntry, 
 		addSource(path.Clean(pkgDir))
 	} else {
 		for dir := range src.all {
-			addSource(dir)
+			if !inTestdata(dir) {
+				addSource(dir)
+			}
 		}
 	}
 	for len(queue) > 0 {

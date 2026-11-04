@@ -187,3 +187,19 @@ func TestPlanDirsOf(t *testing.T) {
 		t.Errorf("planDirsOf:\n got %+v\nwant %+v", got, want)
 	}
 }
+
+// A package in a testdata directory is followed when the build names it, and
+// left out of a build of every package, as "./..." leaves it out.
+func TestPlanDirsOfTestdata(t *testing.T) {
+	src := parseSourceImports(newTarget("linux\namd64\n0\ngo1.27.3\n", nil), "mod . example.com/root\n"+
+		"mod testdata/fixture example.com/fixture\n"+
+		"lib\tlib.go\t-\t\n"+
+		"testdata/fixture/cmd\tmain.go\t-\texample.com/fixture/inner\n"+
+		"testdata/fixture/inner\tinner.go\t-\t\n")
+	if got, want := planDirsOf(src, "testdata/fixture/cmd", nil, nil).src, []string{"testdata/fixture/cmd", "testdata/fixture/inner"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("planDirsOf(testdata/fixture/cmd).src = %q, want %q", got, want)
+	}
+	if got, want := planDirsOf(src, "", nil, nil).src, []string{"lib"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("planDirsOf(every package).src = %q, want %q", got, want)
+	}
+}
