@@ -134,14 +134,14 @@ type downloader struct {
 
 // discover downloads the modules a build of the source may read, as the go
 // command's loader finds them, and returns a directory of their plan packs
-// and their zips by module cache directory name. It starts from the modules
-// that provide the source's imports, seed, and as each download finishes,
-// downloads those that provide the module's own imports, until no new one
-// turns up: what the build's packages import, whatever their build
-// constraints select, but no test's. Only modules whose zip a go.sum names
-// are candidates; a module the plan reads that discover missed, such as one
-// a replace renames, the plan fetches itself, and the build downloads its
-// zip on its own (lazyZip).
+// and their zips by module cache directory name. It follows packages: from
+// the source's imports, seed, each imported package's module is downloaded,
+// and its pack lists the package's own imports, which it follows in turn,
+// until no new package turns up: what the build's packages import, whatever
+// their build constraints select, but not the rest of their modules, nor
+// any test's. Only modules whose zip a go.sum names are candidates; a module
+// the plan reads that discover missed, such as one a replace renames, the
+// plan fetches itself, and the build downloads its zip on its own (lazyZip).
 func (d *downloader) discover(ctx context.Context, seed []string) (*dagger.Directory, map[string]*dagger.File, error) {
 	byPath := map[string][]sumEntry{}
 	for _, e := range d.sums {
@@ -149,67 +149,104 @@ func (d *downloader) discover(ctx context.Context, seed []string) (*dagger.Direc
 			byPath[e.path] = append(byPath[e.path], e)
 		}
 	}
+	type module struct {
+		e    sumEntry
+		dir  *dagger.Directory
+		done chan struct{}
+		err  error
+		// imports is each of its packages' imports, by import path.
+		imports map[string][]string
+	}
 	var (
-		mu      sync.Mutex
-		started = map[string]bool{}
-		got     = map[string]*dagger.Directory{}
-		entry   = map[string]sumEntry{}
-		errs    []error
-		wg      sync.WaitGroup
+		mu       sync.Mutex
+		modules  = map[string]*module{}
+		seenPkgs = map[string]bool{}
+		wg       sync.WaitGroup
 		// Downloads wait on the network more than the CPU.
 		gate = make(chan struct{}, 32)
 	)
-	var follow func(imports []string)
-	follow = func(imports []string) {
-		for _, ip := range imports {
-			for _, e := range providers(byPath, ip) {
-				name := moduleDirName(e)
-				mu.Lock()
-				if started[name] {
-					mu.Unlock()
+	start := func(e sumEntry) *module {
+		name := moduleDirName(e)
+		if m, ok := modules[name]; ok {
+			return m
+		}
+		m := &module{e: e, done: make(chan struct{})}
+		modules[name] = m
+		go func() {
+			defer close(m.done)
+			gate <- struct{}{}
+			defer func() { <-gate }()
+			dir, err := d.download(e).Sync(ctx)
+			var list string
+			if err == nil {
+				list, err = dir.File(packName(e) + ".imports").Contents(ctx)
+			}
+			if err != nil {
+				m.err = fmt.Errorf("%s@%s: %w", e.path, e.version, err)
+				return
+			}
+			m.dir = dir
+			m.imports = map[string][]string{}
+			prefix := moduleDirName(e)
+			for _, line := range strings.Split(list, "\n") {
+				f := strings.Fields(line)
+				if len(f) == 0 {
 					continue
 				}
-				started[name] = true
-				entry[name] = e
+				rel := strings.TrimPrefix(strings.TrimPrefix(f[0], prefix), "/")
+				ip := e.path
+				// Only the module path and version are escaped in the
+				// module cache; its directories are as the module has them.
+				if rel != "" {
+					ip = e.path + "/" + rel
+				}
+				m.imports[ip] = f[1:]
+			}
+		}()
+		return m
+	}
+	var follow func(ips []string)
+	follow = func(ips []string) {
+		for _, ip := range ips {
+			mu.Lock()
+			if seenPkgs[ip] {
 				mu.Unlock()
+				continue
+			}
+			seenPkgs[ip] = true
+			var ms []*module
+			for _, e := range providers(byPath, ip) {
+				ms = append(ms, start(e))
+			}
+			mu.Unlock()
+			for _, m := range ms {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					gate <- struct{}{}
-					dir, err := d.download(e).Sync(ctx)
-					var imports string
-					if err == nil {
-						imports, err = dir.File(packName(e) + ".imports").Contents(ctx)
+					<-m.done
+					if m.err == nil {
+						follow(m.imports[ip])
 					}
-					<-gate
-					mu.Lock()
-					if err != nil {
-						errs = append(errs, fmt.Errorf("%s@%s: %w", e.path, e.version, err))
-						mu.Unlock()
-						return
-					}
-					got[name] = dir
-					mu.Unlock()
-					follow(strings.Fields(imports))
 				}()
 			}
 		}
 	}
 	follow(seed)
 	wg.Wait()
-	if len(errs) > 0 {
-		return nil, nil, errs[0]
-	}
-	names := make([]string, 0, len(got))
-	for name := range got {
+	names := make([]string, 0, len(modules))
+	for name, m := range modules {
+		if m.err != nil {
+			return nil, nil, m.err
+		}
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	packs := make([]*dagger.File, len(names))
 	zips := map[string]*dagger.File{}
 	for i, name := range names {
-		packs[i] = got[name].File(packName(entry[name]))
-		zips[name] = got[name].File(zipPath(entry[name]))
+		m := modules[name]
+		packs[i] = m.dir.File(packName(m.e))
+		zips[name] = m.dir.File(zipPath(m.e))
 	}
 	if len(packs) == 0 {
 		return nil, zips, nil

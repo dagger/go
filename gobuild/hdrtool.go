@@ -714,7 +714,8 @@ func packmod(root, out string, rels []string) error {
 	}
 	w := bufio.NewWriter(f)
 	fmt.Fprintln(w, "gohdr 1")
-	imports := map[string]bool{}
+	// Each package's imports, by its directory: what discover follows.
+	imports := map[string]map[string]bool{}
 	for _, rel := range files {
 		p := filepath.Join(root, rel)
 		fi, err := os.Lstat(p)
@@ -735,8 +736,12 @@ func packmod(root, out string, rels []string) error {
 			}
 			if strings.HasSuffix(rel, ".go") {
 				data = goHeader(rel, data)
+				dir := filepath.ToSlash(filepath.Dir(rel))
+				if imports[dir] == nil {
+					imports[dir] = map[string]bool{}
+				}
 				for _, ip := range fileImports(rel, data) {
-					imports[ip] = true
+					imports[dir][ip] = true
 				}
 			}
 		}
@@ -750,7 +755,32 @@ func packmod(root, out string, rels []string) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return writeImports(out+".imports", imports)
+	return writePackageImports(out+".imports", imports)
+}
+
+// writePackageImports writes each package's imports to path, a line per
+// package: its directory, relative to the module cache, then its imports,
+// separated by spaces, all sorted.
+func writePackageImports(path string, imports map[string]map[string]bool) error {
+	dirs := make([]string, 0, len(imports))
+	for dir := range imports {
+		dirs = append(dirs, dir)
+	}
+	sort.Strings(dirs)
+	var b strings.Builder
+	for _, dir := range dirs {
+		list := make([]string, 0, len(imports[dir]))
+		for ip := range imports[dir] {
+			list = append(list, ip)
+		}
+		sort.Strings(list)
+		b.WriteString(dir)
+		for _, ip := range list {
+			b.WriteString(" " + ip)
+		}
+		b.WriteString("\n")
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
 }
 
 // importsOfPack prints the import paths of a pack's Go files but its tests,
