@@ -493,6 +493,10 @@ type build struct {
 	// sums is the checksum of each downloaded module, by its directory name
 	// in the module cache.
 	sums  map[string]string
+	// planSrc and planMods list, a line each, the directories of the source
+	// and of the module cache whose Go files a plan unpacks (planDirs); nil
+	// for every one.
+	planSrc, planMods *string
 	// modules is the walk's modules, for a step after it that reads them.
 	modules *modules
 	// fetch downloads, on its own, the zip of a module the build reads that
@@ -676,6 +680,7 @@ if [ -z "$mode" ] && [ -n "$(find "$src" -path '*/vendor/modules.txt' | head -n 
 		[ "${minor:-0}" -ge "$min" ] && mode=vendor
 	fi
 fi
+printf '%s' "$mode" > /gobuild/mode
 : > /gobuild/sums
 go env GOOS GOARCH CGO_ENABLED GOVERSION > /gobuild/goenv
 [ "$mode" = vendor ] || {
@@ -732,8 +737,20 @@ go env GOOS GOARCH CGO_ENABLED GOVERSION > /gobuild/goenv
 		if listed.err != nil {
 			return nil, fmt.Errorf("source imports: %w", listed.err)
 		}
-		if b.packs, b.zips, err = d.discover(ctx, parseSourceImports(d.target, listed.out), pkgDir); err != nil {
+		var dirs planDirs
+		if b.packs, b.zips, dirs, err = d.discover(ctx, parseSourceImports(d.target, listed.out), pkgDir); err != nil {
 			return nil, fmt.Errorf("go mod download: %w", err)
+		}
+		mods := strings.Join(dirs.mods, "\n")
+		b.planMods = &mods
+		// In vendor mode a package outside the source's modules is in its
+		// vendor directory, which discover doesn't follow: the plan unpacks
+		// every source directory.
+		if mode, err := first.File("/gobuild/mode").Contents(ctx); err != nil {
+			return nil, err
+		} else if mode != "vendor" {
+			src := strings.Join(dirs.src, "\n")
+			b.planSrc = &src
 		}
 		b.fetch = d.lazyZip
 	}
@@ -880,22 +897,39 @@ type planned struct {
 
 // withModules mounts the module cache a plan reads: the go command's own,
 // and, when the build downloaded modules, their plan packs, which
-// unpackModules unpacks into it.
+// unpackHeaders unpacks into it, with the lists of the directories it
+// unpacks.
 func (b *build) withModules(ctr *dagger.Container) *dagger.Container {
 	ctr = ctr.WithMountedDirectory(b.roots.Mod, b.mods)
 	if b.packs != nil {
 		ctr = ctr.WithMountedDirectory("/gobuild/modpacks", b.packs, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
 	}
+	if b.planSrc != nil {
+		ctr = ctr.WithNewFile("/gobuild/plandirs/src", *b.planSrc)
+	}
+	if b.planMods != nil {
+		ctr = ctr.WithNewFile("/gobuild/plandirs/mods", *b.planMods)
+	}
 	return ctr
 }
 
-// unpackModules is the script that unpacks the build's plan packs into the
-// module cache, ending in "&& ", or "" without any.
-func (b *build) unpackModules() string {
-	if b.packs == nil {
-		return ""
+// unpackHeaders is the script that unpacks, for a plan, the build's plan
+// packs into the module cache and the source's header pack into the source,
+// each only in the directories the plan reads, when they're known.
+func (b *build) unpackHeaders() string {
+	script := ""
+	if b.packs != nil {
+		script = "/gobuild/gohdr unpackall /gobuild/modpacks " + shQuote(b.roots.Mod)
+		if b.planMods != nil {
+			script += " /gobuild/plandirs/mods"
+		}
+		script += " && "
 	}
-	return "/gobuild/gohdr unpackall /gobuild/modpacks " + shQuote(b.roots.Mod) + " && "
+	script += "/gobuild/gohdr unpack /gobuild/src.hdr " + shQuote(b.roots.Src) + " /gobuild/godirs.txt"
+	if b.planSrc != nil {
+		script += " /gobuild/plandirs/src"
+	}
+	return script
 }
 
 // planWith makes a plan as plan does, with goCmd the go command that prints
@@ -909,7 +943,7 @@ func (b *build) planWith(ctx context.Context, headers *dagger.File, pre, goCmd s
 		WithEnvVariable("GOCACHE", "/gobuild/plancache").
 		// A failed plan prints go build's error, such as a //go:embed
 		// pattern it rejects, rather than leaving it in the plan file.
-		WithExec([]string{"sh", "-c", b.unpackModules() + "/gobuild/gohdr unpack /gobuild/src.hdr " + shQuote(b.roots.Src) + " /gobuild/godirs.txt" +
+		WithExec([]string{"sh", "-c", b.unpackHeaders() +
 			" && cd " + shQuote(b.roots.Cwd) + " && " + pre + "{ " + goCmd + " 2> /gobuild/plan.txt" +
 			" || { status=$?; cat /gobuild/plan.txt >&2; exit $status; }; }" +
 			" && /gobuild/gohdr weigh /gobuild/plan.txt > /gobuild/weights.txt" +
@@ -962,7 +996,7 @@ func (b *build) testmain(ctx context.Context, headers *dagger.File, flags []stri
 		WithMountedFile("/gobuild/src.hdr", headers).
 		WithMountedDirectory("/gobuild/tests", tests).
 		WithEnvVariable("GOCACHE", "/gobuild/plancache").
-		WithExec([]string{"sh", "-c", b.unpackModules() + "/gobuild/gohdr unpack /gobuild/src.hdr " + shQuote(b.roots.Src) + " /gobuild/godirs.txt" +
+		WithExec([]string{"sh", "-c", b.unpackHeaders() +
 			" && cp -R /gobuild/tests/. " + shQuote(b.roots.Src) + "/" +
 			" && cd " + shQuote(b.roots.Cwd) + " && { " + strings.Join(quoted, " ") + " 2> /gobuild/testmain.err; " +
 			`work=$(sed -n 's/^WORK=//p' /gobuild/testmain.err); ` +

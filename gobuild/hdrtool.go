@@ -56,10 +56,14 @@ import (
 
 // unpack writes out the pack at src under dst, and writes to list, one per
 // line, the pack's Go files in a directory named like a Go file, at any
-// depth.
-func unpack(src, dst, list string) error {
+// depth. With dirs, a file listing directories of the pack a line each, it
+// writes only the Go files the plan reads (planFiles).
+func unpack(src, dst, list string, dirs ...string) error {
 	files, listed, err := readPack(src, dst)
 	if err != nil {
+		return err
+	}
+	if files, err = planFiles(files, dirs); err != nil {
 		return err
 	}
 	if err := writeFiles(files); err != nil {
@@ -69,8 +73,8 @@ func unpack(src, dst, list string) error {
 }
 
 // unpackAll unpacks every .gohdr pack in dir under dst, all in one process
-// and at once.
-func unpackAll(dir, dst string) error {
+// and at once, with dirs as unpack takes them, of every pack.
+func unpackAll(dir, dst string, dirs ...string) error {
 	packs, err := filepath.Glob(filepath.Join(dir, "*.gohdr"))
 	if err != nil {
 		return err
@@ -83,14 +87,73 @@ func unpackAll(dir, dst string) error {
 		}
 		files = append(files, f...)
 	}
+	if files, err = planFiles(files, dirs); err != nil {
+		return err
+	}
 	return writeFiles(files)
 }
 
-// packFile is a file of a pack, at its path under where it's unpacked.
+// planFiles is files without the Go files a plan doesn't read, with dirs
+// one file, the list of the directories it reads Go files in: those of the
+// packages it may load. Under a directory there with a //go:embed line,
+// which may embed any file below it, every file stays, as does any file
+// that isn't Go, which a C include may name. Without dirs, every file stays.
+func planFiles(files []packFile, dirs []string) ([]packFile, error) {
+	if len(dirs) == 0 {
+		return files, nil
+	}
+	list, err := os.ReadFile(dirs[0])
+	if err != nil {
+		return nil, err
+	}
+	read := map[string]bool{}
+	for _, d := range strings.Split(string(list), "\n") {
+		if d != "" {
+			read[d] = true
+		}
+	}
+	embeds := map[string]bool{}
+	for _, f := range files {
+		if dir := filepath.Dir(f.rel); read[dir] && strings.HasSuffix(f.rel, ".go") &&
+			bytes.Contains(f.data, []byte("//go:embed")) {
+			embeds[dir] = true
+		}
+	}
+	kept := files[:0]
+	for _, f := range files {
+		if keepFile(f.rel, read, embeds) {
+			kept = append(kept, f)
+		}
+	}
+	return kept, nil
+}
+
+// keepFile reports whether planFiles keeps the file at rel: one that isn't
+// Go, a Go file in a directory the plan reads, or one below a directory that
+// embeds.
+func keepFile(rel string, read, embeds map[string]bool) bool {
+	if !strings.HasSuffix(rel, ".go") {
+		return true
+	}
+	dir := filepath.Dir(rel)
+	if read[dir] {
+		return true
+	}
+	for d := dir; d != "." && d != "/"; {
+		d = filepath.Dir(d)
+		if embeds[d] {
+			return true
+		}
+	}
+	return false
+}
+
+// packFile is a file of a pack: its path in the pack and under where it's
+// unpacked.
 type packFile struct {
-	path string
-	mode fs.FileMode
-	data []byte
+	rel, path string
+	mode      fs.FileMode
+	data      []byte
 }
 
 // readPack reads the pack at src, its files at their paths under dst, and
@@ -143,7 +206,7 @@ func readPack(src, dst string) ([]packFile, string, error) {
 			(strings.HasSuffix(dir, ".go") || strings.Contains(dir, ".go/")) {
 			listed.WriteString(rel + "\n")
 		}
-		files = append(files, packFile{filepath.Join(dst, rel), fs.FileMode(mode), data[:size]})
+		files = append(files, packFile{rel, filepath.Join(dst, rel), fs.FileMode(mode), data[:size]})
 	}
 }
 
@@ -974,10 +1037,10 @@ func main() {
 		err = importsOfPack(args[1], args[2] == "tests")
 	case len(args) >= 3 && args[0] == "packmod":
 		err = packmod(args[1], args[2], args[3:])
-	case len(args) == 3 && args[0] == "unpackall":
-		err = unpackAll(args[1], args[2])
-	case len(args) == 4 && args[0] == "unpack":
-		err = unpack(args[1], args[2], args[3])
+	case (len(args) == 3 || len(args) == 4) && args[0] == "unpackall":
+		err = unpackAll(args[1], args[2], args[3:]...)
+	case (len(args) == 4 || len(args) == 5) && args[0] == "unpack":
+		err = unpack(args[1], args[2], args[3], args[4:]...)
 	case len(args) == 2 && args[0] == "weigh":
 		err = weigh(args[1])
 	case len(args) == 2 && args[0] == "sizes":

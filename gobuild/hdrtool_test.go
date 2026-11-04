@@ -79,6 +79,58 @@ func TestHdrToolUnpackList(t *testing.T) {
 	}
 }
 
+// With a list of directories, gohdr unpack writes only the Go files there
+// and below a listed directory that embeds, and every file that isn't Go.
+func TestHdrToolUnpackPlanDirs(t *testing.T) {
+	dir := buildHdrTool(t)
+	files := map[string]string{
+		"go.mod":              "module m\n",
+		"main.go":             "package main\n\nimport \"m/lib\"\n",
+		"lib/lib.go":          "package lib\n",
+		"lib/lib.s":           "TEXT x(SB)\n",
+		"other/other.go":      "package other\n",
+		"other/data.txt":      "data\n",
+		"tmpl/tmpl.go":        "package tmpl\n\nimport _ \"embed\"\n\n//go:embed skel\nvar skel string\n",
+		"tmpl/skel/x.go":      "package skel\n",
+		"tmpl/skel/sub/y.go":  "package sub\n",
+		"unread/deep/deep.go": "package deep\n",
+	}
+	var pack bytes.Buffer
+	pack.WriteString("gohdr 1\n")
+	names := make([]string, 0, len(files))
+	for f := range files {
+		names = append(names, f)
+	}
+	sort.Strings(names)
+	for _, f := range names {
+		fmt.Fprintf(&pack, "%s\n644\n%d\n%s\n", f, len(files[f]), files[f])
+	}
+	packPath := filepath.Join(dir, "src.hdr")
+	if err := os.WriteFile(packPath, pack.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dirs := filepath.Join(dir, "dirs")
+	if err := os.WriteFile(dirs, []byte(".\nlib\ntmpl"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "src")
+	if b, err := exec.Command(filepath.Join(dir, "gohdr"), "unpack", packPath, out, os.DevNull, dirs).CombinedOutput(); err != nil {
+		t.Fatalf("unpack: %v\n%s", err, b)
+	}
+	var got []string
+	filepath.WalkDir(out, func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			rel, _ := filepath.Rel(out, p)
+			got = append(got, rel)
+		}
+		return err
+	})
+	want := []string{"go.mod", "lib/lib.go", "lib/lib.s", "main.go", "other/data.txt", "tmpl/skel/sub/y.go", "tmpl/skel/x.go", "tmpl/tmpl.go"}
+	if !slices.Equal(got, want) {
+		t.Errorf("unpacked %q, want %q", got, want)
+	}
+}
+
 func TestLiteralPatterns(t *testing.T) {
 	got := literalPatterns([]string{"a.go/x.go", "b.go/[x]*?^.go", "!c.go/d.go", `e.go/f\g.go`})
 	want := []string{"a.go/x.go", `b.go/\[x\]\*\?\^.go`, `\!c.go/d.go`, `e.go/f\\g.go`}

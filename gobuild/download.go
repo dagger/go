@@ -146,7 +146,8 @@ type downloader struct {
 // any test's. Only modules whose zip a go.sum names are candidates; a module
 // the plan reads that discover missed, such as one a replace renames, the
 // plan fetches itself, and the build downloads its zip on its own (lazyZip).
-func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDir string) (*dagger.Directory, map[string]*dagger.File, error) {
+// With them come the directories whose Go files the plan reads (planDirs).
+func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDir string) (*dagger.Directory, map[string]*dagger.File, planDirs, error) {
 	byPath := map[string][]sumEntry{}
 	for _, e := range d.sums {
 		if e.zip != "" {
@@ -160,6 +161,7 @@ func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDir str
 		err  error
 		// imports is each of its packages' imports, by import path.
 		imports map[string][]string
+		pkgs    modulePackages
 	}
 	var (
 		mu       sync.Mutex
@@ -192,16 +194,22 @@ func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDir str
 			}
 			m.dir = dir
 			m.imports = map[string][]string{}
+			m.pkgs = modulePackages{all: map[string][]string{}, dirs: map[string]string{}}
 			prefix := moduleDirName(e)
-			for dir, imports := range fileImportsFor(d.target, list) {
-				rel := strings.TrimPrefix(strings.TrimPrefix(dir, prefix), "/")
-				ip := e.path
+			importPath := func(dir string) string {
 				// Only the module path and version are escaped in the
 				// module cache; its directories are as the module has them.
-				if rel != "" {
-					ip = e.path + "/" + rel
+				if rel := strings.TrimPrefix(strings.TrimPrefix(dir, prefix), "/"); rel != "" {
+					return e.path + "/" + rel
 				}
-				m.imports[ip] = imports
+				return e.path
+			}
+			for dir, imports := range fileImportsFor(d.target, list) {
+				m.imports[importPath(dir)] = imports
+			}
+			for dir, imports := range fileImportsFor(target{}, list) {
+				m.pkgs.all[importPath(dir)] = imports
+				m.pkgs.dirs[importPath(dir)] = dir
 			}
 		}()
 		return m
@@ -258,10 +266,15 @@ func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDir str
 	names := make([]string, 0, len(modules))
 	for name, m := range modules {
 		if m.err != nil {
-			return nil, nil, m.err
+			return nil, nil, planDirs{}, m.err
 		}
 		names = append(names, name)
 	}
+	pkgs := map[string]modulePackages{}
+	for name, m := range modules {
+		pkgs[name] = m.pkgs
+	}
+	dirs := planDirsOf(src, pkgDir, byPath, pkgs)
 	sort.Strings(names)
 	packs := make([]*dagger.File, len(names))
 	zips := map[string]*dagger.File{}
@@ -271,12 +284,75 @@ func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDir str
 		zips[name] = m.dir.File(zipPath(m.e))
 	}
 	if len(packs) == 0 {
-		return nil, zips, nil
+		return nil, zips, dirs, nil
 	}
 	// One directory of every pack, made in one step: merged one by one,
 	// hundreds of them would stack a layer each, past what a mount takes.
 	dir, err := core.NewDirectory().WithFiles(".", packs).Sync(ctx)
-	return dir, zips, err
+	return dir, zips, dirs, err
+}
+
+// planDirs is the directories whose Go files a plan reads, of the source and
+// of the module cache, each relative to it: a plan unpacks the headers of the
+// Go files there alone, of thousands in a large source and its modules.
+type planDirs struct {
+	src, mods []string
+}
+
+// modulePackages is a downloaded module's packages: each one's imports,
+// whatever its files' build constraints, and its directory in the module
+// cache, by import path.
+type modulePackages struct {
+	all  map[string][]string
+	dirs map[string]string
+}
+
+// planDirsOf is the directories a plan reads: of the packages imports reach
+// from the package in pkgDir, or every package of the source, through the
+// source's packages and the downloaded modules', pkgs by module cache
+// directory name, followed whatever their files' build constraints, so
+// never fewer than the go command loads for the build's target.
+func planDirsOf(src sourceImports, pkgDir string, byPath map[string][]sumEntry, pkgs map[string]modulePackages) planDirs {
+	var dirs planDirs
+	seenSrc, seenPkg := map[string]bool{}, map[string]bool{}
+	var queue []string
+	addSource := func(dir string) {
+		if !seenSrc[dir] {
+			seenSrc[dir] = true
+			dirs.src = append(dirs.src, dir)
+			queue = append(queue, src.all[dir]...)
+		}
+	}
+	if _, ok := src.all[path.Clean(pkgDir)]; pkgDir != "" && ok {
+		addSource(path.Clean(pkgDir))
+	} else {
+		for dir := range src.all {
+			addSource(dir)
+		}
+	}
+	for len(queue) > 0 {
+		ip := queue[0]
+		queue = queue[1:]
+		if seenPkg[ip] {
+			continue
+		}
+		seenPkg[ip] = true
+		if srcDirs := src.dirsOf(ip); len(srcDirs) > 0 {
+			for _, dir := range srcDirs {
+				addSource(dir)
+			}
+			continue
+		}
+		for _, e := range providers(byPath, ip) {
+			if dir, ok := pkgs[moduleDirName(e)].dirs[ip]; ok {
+				dirs.mods = append(dirs.mods, dir)
+				queue = append(queue, pkgs[moduleDirName(e)].all[ip]...)
+			}
+		}
+	}
+	sort.Strings(dirs.src)
+	sort.Strings(dirs.mods)
+	return dirs
 }
 
 // sourceImports is what the source's packages import, from "gohdr imports":
@@ -285,14 +361,16 @@ func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDir str
 type sourceImports struct {
 	mods []sourceModule
 	pkgs map[string][]string
+	// all is each package's imports whatever its files' build constraints.
+	all map[string][]string
 }
 
 type sourceModule struct{ dir, path string }
 
 // parseSourceImports parses "gohdr imports": its module lines, and its Go
-// files' lines (importLine), of the files that build for t.
+// files' lines (importLine), of the files that build for t, and of all.
 func parseSourceImports(t target, out string) sourceImports {
-	src := sourceImports{pkgs: fileImportsFor(t, out)}
+	src := sourceImports{pkgs: fileImportsFor(t, out), all: fileImportsFor(target{}, out)}
 	for _, line := range strings.Split(out, "\n") {
 		if f := strings.Fields(line); len(f) == 3 && f[0] == "mod" {
 			src.mods = append(src.mods, sourceModule{dir: f[1], path: f[2]})
@@ -315,6 +393,22 @@ func (src sourceImports) dirOf(ip string) (string, bool) {
 		return dir, ok
 	}
 	return "", false
+}
+
+// dirsOf is every source directory that may hold the package with import
+// path ip, by any module of the source whose path is a prefix of it.
+func (src sourceImports) dirsOf(ip string) []string {
+	var dirs []string
+	for _, m := range src.mods {
+		if ip != m.path && !strings.HasPrefix(ip, m.path+"/") {
+			continue
+		}
+		dir := path.Join(m.dir, strings.TrimPrefix(strings.TrimPrefix(ip, m.path), "/"))
+		if _, ok := src.all[dir]; ok {
+			dirs = append(dirs, dir)
+		}
+	}
+	return dirs
 }
 
 // lazyZip is the zip of the module version with the module cache directory

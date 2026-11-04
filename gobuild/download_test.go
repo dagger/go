@@ -146,3 +146,44 @@ func TestTargetMatchFile(t *testing.T) {
 		}
 	}
 }
+
+// planDirsOf follows imports from the package built, whatever their files'
+// build constraints, through the source and the downloaded modules' packages,
+// and no further: not into another package of a module, nor a module not
+// downloaded.
+func TestPlanDirsOf(t *testing.T) {
+	src := parseSourceImports(newTarget("linux\namd64\n0\ngo1.27.3\n", nil), "mod . example.com/root\n"+
+		"mod sub example.com/root/sub\n"+
+		"cmd\tmain.go\t-\texample.com/root/lib fmt\n"+
+		"lib\tlib_windows.go\t-\tgithub.com/dep/x/win\n"+
+		"lib\tlib.go\t-\texample.com/root/sub/inner\n"+
+		"sub/inner\tinner.go\t-\tgithub.com/dep/x\n"+
+		"unread\tunread.go\t-\tgithub.com/dep/y\n")
+	byPath := map[string][]sumEntry{
+		"github.com/dep/x": {{path: "github.com/dep/x", version: "v1.0.0", zip: "h1:x"}},
+		"github.com/dep/y": {{path: "github.com/dep/y", version: "v1.0.0", zip: "h1:y"}},
+		"github.com/dep/z": {{path: "github.com/dep/z", version: "v1.0.0", zip: "h1:z"}},
+	}
+	pkgs := map[string]modulePackages{
+		"github.com/dep/x@v1.0.0": {
+			all: map[string][]string{
+				"github.com/dep/x":       {"github.com/dep/z/zz"},
+				"github.com/dep/x/win":   {"golang.org/x/sys/windows"},
+				"github.com/dep/x/other": nil,
+			},
+			dirs: map[string]string{
+				"github.com/dep/x":       "github.com/dep/x@v1.0.0",
+				"github.com/dep/x/win":   "github.com/dep/x@v1.0.0/win",
+				"github.com/dep/x/other": "github.com/dep/x@v1.0.0/other",
+			},
+		},
+	}
+	got := planDirsOf(src, "cmd", byPath, pkgs)
+	want := planDirs{
+		src:  []string{"cmd", "lib", "sub/inner"},
+		mods: []string{"github.com/dep/x@v1.0.0", "github.com/dep/x@v1.0.0/win"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("planDirsOf:\n got %+v\nwant %+v", got, want)
+	}
+}
