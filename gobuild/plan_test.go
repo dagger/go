@@ -2,6 +2,7 @@ package main
 
 import (
 	"reflect"
+	"sort"
 	"slices"
 	"strings"
 	"testing"
@@ -1234,5 +1235,28 @@ func TestWeighSource(t *testing.T) {
 	}
 	if _, err := parseSizes("x cmd/x/main.go\n"); err == nil {
 		t.Error("a malformed line parsed")
+	}
+}
+
+// A dependencies-only archive compiles the packages of other modules and the
+// standard library, and nothing of the module's own, nor what imports it.
+func TestDependencyBlocks(t *testing.T) {
+	blocks := map[string]*block{
+		"b001": {id: "b001", importPath: "example.com/app", deps: []string{"b002", "b003"}},
+		"b002": {id: "b002", importPath: "example.com/app/internal/dagger", deps: []string{"b003", "b004"}},
+		"b003": {id: "b003", importPath: "github.com/dep/x", deps: []string{"b004"}},
+		"b004": {id: "b004", importPath: "fmt"},
+		"b005": {id: "b005", importPath: "example.com/app.test", deps: []string{"b001"}},
+		"b006": {id: "b006", importPath: "github.com/dep/x/xtest", deps: []string{"b002"}},
+	}
+	own := map[string]bool{"example.com/app": true, "example.com/app/internal/dagger": true}
+	got := dependencyBlocks(blocks, own)
+	var ids []string
+	for id := range got {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	if want := []string{"b003", "b004"}; !reflect.DeepEqual(ids, want) {
+		t.Errorf("dependencyBlocks = %q, want %q", ids, want)
 	}
 }

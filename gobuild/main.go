@@ -225,12 +225,16 @@ func (m *Gobuild) Archives(
 	if err := identifyVariants(blocks, ids, mains); err != nil {
 		return nil, err
 	}
-	results, err := b.walk(ctx, blocks, p.weights, p.cc, p.goDirs, nil)
+	walked := blocks
+	if dependencies {
+		walked = dependencyBlocks(blocks, own)
+	}
+	results, err := b.walk(ctx, walked, p.weights, p.cc, p.goDirs, nil)
 	if err != nil {
 		return nil, err
 	}
 	var order []*block
-	for _, bl := range blocks {
+	for _, bl := range walked {
 		if !bl.isProfile && !(dependencies && own[bl.importPath]) {
 			order = append(order, bl)
 		}
@@ -315,6 +319,40 @@ func listedIDs(list string) (ids, mains, own map[string]bool, err error) {
 		}
 		own[p.ImportPath] = p.Module != nil && p.Module.Main
 	}
+}
+
+// dependencyBlocks is the blocks of a plan that compile none of the module's
+// own packages (own, by import path), nor anything that imports them, such
+// as a test main: the packages of other modules and the standard library,
+// which no other module's package can import the module's own into.
+func dependencyBlocks(blocks map[string]*block, own map[string]bool) map[string]*block {
+	excluded := map[string]bool{}
+	for id, bl := range blocks {
+		if own[bl.importPath] || strings.HasSuffix(bl.importPath, ".test") {
+			excluded[id] = true
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for id, bl := range blocks {
+			if excluded[id] {
+				continue
+			}
+			for _, d := range bl.deps {
+				if excluded[d] {
+					excluded[id], changed = true, true
+					break
+				}
+			}
+		}
+	}
+	kept := map[string]*block{}
+	for id, bl := range blocks {
+		if !excluded[id] {
+			kept[id] = bl
+		}
+	}
+	return kept
 }
 
 // buildTags is the -tags value in go build flags, the last one's, as a list.

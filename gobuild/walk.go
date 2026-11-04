@@ -27,9 +27,9 @@ type node struct {
 	// its own compile imports, whose export data it mounts; the link mounts
 	// every dependency's object code.
 	CompileDeps []string `json:"compileDeps,omitempty"`
-	SrcFiles   []string `json:"srcFiles,omitempty"`
-	ModFiles   []string `json:"modFiles,omitempty"`
-	Tools      bool     `json:"tools,omitempty"`
+	SrcFiles    []string `json:"srcFiles,omitempty"`
+	ModFiles    []string `json:"modFiles,omitempty"`
+	Tools       bool     `json:"tools,omitempty"`
 	// SrcNonGo is set when the package also reads every file in the
 	// source that isn't Go (block.srcNonGo).
 	SrcNonGo bool `json:"srcNonGo,omitempty"`
