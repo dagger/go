@@ -15,6 +15,11 @@ type Go {
   """
   base: Container
 
+  # The container module downloads run with, if set: its environment, such
+  # as GOPROXY and GOPRIVATE, its credentials and its mounts. No compile
+  # reads it.
+  let downloads: Container
+
   new(
     """
     Go version for every module, overriding go.mod. Ignored when base is set.
@@ -24,6 +29,14 @@ type Go {
     Base image for Go containers. Must include a Go toolchain.
     """
     base: Container = null,
+    """
+    Container module downloads run with: its environment, such as GOPROXY
+    and GOPRIVATE, its credentials and its mounts, such as git configuration
+    or an SSH agent. Compiles never read it, so their results are shared
+    with builds that download differently. Null downloads with the Go
+    containers' own settings.
+    """
+    downloads: Container = null,
     """
     Extra workspace files to mount for Go commands, as include patterns.
     """
@@ -66,6 +79,7 @@ type Go {
       }
       self.version = if (base == null) { version } else { null }
       self.base = base
+      self.downloads = downloads
       self.includeExtraFiles = includeExtraFiles
       self.test = test
       self.generate = generate
@@ -1422,6 +1436,7 @@ type GoModule {
       workdir: path,
       pkg: packageArg(pkg),
       output: name,
+      downloads: tool.downloads,
       flags: buildFlags,
     )
   }
@@ -1510,6 +1525,7 @@ type GoModule {
         workdir: path,
         pkg: packageArg(rel),
         flags: buildFlags,
+        downloads: tool.downloads,
       )
     }
     out.sync rescue {
@@ -1560,6 +1576,7 @@ type GoModule {
       workdir: path,
       flags: buildFlags,
       dependencies: dependencies,
+      downloads: tool.downloads,
     )
     out.sync rescue {
       err: Error => raise "Go archives of module " + path + ": " + err.message

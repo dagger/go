@@ -13,6 +13,7 @@ type GoDev {
   let mountPathFixturePath: String! = "testdata/go-module-mount-path"
   let noPackagesFixturePath: String! = "testdata/go-module-no-packages"
   let vendoredFixturePath: String! = "testdata/go-module-vendored"
+  let downloadsFixturePath: String! = "testdata/go-module-downloads"
   let unreadableFixturePath: String! = "fixtures/go-module-unreadable"
   # The other modules in this repository keep their own fixtures, and several
   # of theirs fail on purpose: golangci-lint's does not even compile.
@@ -1151,6 +1152,24 @@ type GoDev {
         .stdout
       if (compared.trimSpace == "") { "" } else { shape + " (Go " + version + "): " + compared.trimSpace }
     }.filter { failure => failure != "" }
+  }
+
+  """
+  Module downloads run with the downloads container's settings, which key
+  them: with GOPROXY=off there, a build that must download its dependency
+  can't, and without a downloads container the same build downloads it.
+  """
+  downloadsCheck(ws: Workspace!): Void @check {
+    let off = container.from("golang:1.27.3-alpine").withEnvVariable("GOPROXY", "off")
+    let offline = {
+      go(version: "1.27.3", downloads: off).module(ws, downloadsFixturePath).packages(ws).get(key: downloadsFixturePath).binary(ws).size
+      "built"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(offline.contains("GOPROXY=off"), "a build downloaded with GOPROXY=off in its downloads container: " + offline)
+    let built = go(version: "1.27.3").module(ws, downloadsFixturePath).packages(ws).get(key: downloadsFixturePath).binary(ws).size
+    assert(built > 0, "the build without a downloads container made an empty binary")
   }
 
   """

@@ -145,7 +145,14 @@ func DaggerDispatch(ctx context.Context, parentJSON []byte, parentName string, f
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg dependencies", err))
 				}
 			}
-			return (*Gobuild).Archives(&parent, ctx, base, image, from, source, headers, mountPath, workdir, flags, dependencies)
+			var downloads *core.Container
+			if inputArgs["downloads"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["downloads"]), &downloads)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg downloads", err))
+				}
+			}
+			return (*Gobuild).Archives(&parent, ctx, base, image, from, source, headers, mountPath, workdir, flags, dependencies, downloads)
 		case "Binary":
 			var parent Gobuild
 			err = json.Unmarshal(parentJSON, &parent)
@@ -222,7 +229,14 @@ func DaggerDispatch(ctx context.Context, parentJSON []byte, parentName string, f
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg flags", err))
 				}
 			}
-			return (*Gobuild).Binary(&parent, ctx, base, image, from, source, headers, mountPath, workdir, pkg, output, flags)
+			var downloads *core.Container
+			if inputArgs["downloads"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["downloads"]), &downloads)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg downloads", err))
+				}
+			}
+			return (*Gobuild).Binary(&parent, ctx, base, image, from, source, headers, mountPath, workdir, pkg, output, flags, downloads)
 		case "TestBinary":
 			var parent Gobuild
 			err = json.Unmarshal(parentJSON, &parent)
@@ -292,7 +306,14 @@ func DaggerDispatch(ctx context.Context, parentJSON []byte, parentName string, f
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg flags", err))
 				}
 			}
-			return (*Gobuild).TestBinary(&parent, ctx, base, image, from, source, headers, mountPath, workdir, pkg, flags)
+			var downloads *core.Container
+			if inputArgs["downloads"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["downloads"]), &downloads)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg downloads", err))
+				}
+			}
+			return (*Gobuild).TestBinary(&parent, ctx, base, image, from, source, headers, mountPath, workdir, pkg, flags, downloads)
 		default:
 			return nil, fmt.Errorf("unknown function %s", fnName)
 		}

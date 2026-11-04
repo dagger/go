@@ -43,6 +43,8 @@ type GobuildArchivesOpts struct {
 	Flags []string
 	// Only the packages outside the module.
 	Dependencies bool
+	// The container module downloads run with, as for Binary.
+	Downloads *Container
 }
 
 // Archives compiles, one exec per package as Binary builds, every package
@@ -85,6 +87,10 @@ func (r *Gobuild) Archives(base *Container, source *Directory, headers *File, mo
 		if !querybuilder.IsZeroValue(opts[i].Dependencies) {
 			q = q.Arg("dependencies", opts[i].Dependencies)
 		}
+		// `downloads` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Downloads) {
+			q = q.Arg("downloads", opts[i].Downloads)
+		}
 	}
 	q = q.Arg("base", base)
 	q = q.Arg("source", source)
@@ -110,6 +116,11 @@ type GobuildBinaryOpts struct {
 	Workdir string
 	// Flags for go build, before the package.
 	Flags []string
+	// The container module downloads run with: its environment, such as
+	// GOPROXY and GOPRIVATE, its credentials and its mounts, such as git
+	// configuration or an SSH agent. Unset, base's. No package exec reads it,
+	// so it keys downloads alone.
+	Downloads *Container
 }
 
 // Binary builds the main package pkg as "go build" would and returns a
@@ -137,6 +148,10 @@ func (r *Gobuild) Binary(base *Container, source *Directory, headers *File, moun
 		// `flags` optional argument
 		if !querybuilder.IsZeroValue(opts[i].Flags) {
 			q = q.Arg("flags", opts[i].Flags)
+		}
+		// `downloads` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Downloads) {
+			q = q.Arg("downloads", opts[i].Downloads)
 		}
 	}
 	q = q.Arg("base", base)
@@ -216,6 +231,8 @@ type GobuildTestBinaryOpts struct {
 	Workdir string
 	// Flags for go test -c, before the package, e.g. -race or -ldflags.
 	Flags []string
+	// The container module downloads run with, as for Binary.
+	Downloads *Container
 }
 
 // TestBinary builds the test binary of package pkg as "go test -c" would,
@@ -246,6 +263,10 @@ func (r *Gobuild) TestBinary(base *Container, source *Directory, headers *File, 
 		// `flags` optional argument
 		if !querybuilder.IsZeroValue(opts[i].Flags) {
 			q = q.Arg("flags", opts[i].Flags)
+		}
+		// `downloads` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Downloads) {
+			q = q.Arg("downloads", opts[i].Downloads)
 		}
 	}
 	q = q.Arg("base", base)

@@ -86,8 +86,14 @@ func (m *Gobuild) Binary(
 	// Flags for go build, before the package.
 	// +optional
 	flags []string,
+	// The container module downloads run with: its environment, such as
+	// GOPROXY and GOPRIVATE, its credentials and its mounts, such as git
+	// configuration or an SSH agent. Unset, base's. No package exec reads it,
+	// so it keys downloads alone.
+	// +optional
+	downloads *dagger.Container,
 ) (*dagger.Directory, error) {
-	blocks, linked, err := run(ctx, base, image, from, source, headers, mountPath, workdir, pkg, flags, false)
+	blocks, linked, err := run(ctx, base, image, from, downloads, source, headers, mountPath, workdir, pkg, flags, false)
 	if err != nil {
 		return nil, err
 	}
@@ -138,8 +144,11 @@ func (m *Gobuild) TestBinary(
 	// Flags for go test -c, before the package, e.g. -race or -ldflags.
 	// +optional
 	flags []string,
+	// The container module downloads run with, as for Binary.
+	// +optional
+	downloads *dagger.Container,
 ) (*dagger.File, error) {
-	_, linked, err := run(ctx, base, image, from, source, headers, mountPath, workdir, pkg, flags, true)
+	_, linked, err := run(ctx, base, image, from, downloads, source, headers, mountPath, workdir, pkg, flags, true)
 	if err != nil {
 		return nil, err
 	}
@@ -188,9 +197,12 @@ func (m *Gobuild) Archives(
 	// Only the packages outside the module.
 	// +optional
 	dependencies bool,
+	// The container module downloads run with, as for Binary.
+	// +optional
+	downloads *dagger.Container,
 ) (*dagger.Directory, error) {
 	cwd := path.Join(mountPath, workdir)
-	b, err := newBuild(ctx, base, image, from, source, headers, "", true, mountPath, cwd, flags)
+	b, err := newBuild(ctx, base, image, from, downloads, source, headers, "", true, mountPath, cwd, flags)
 	if err != nil {
 		return nil, err
 	}
@@ -374,14 +386,14 @@ func buildTags(flags []string) []string {
 
 // run builds pkg's binary, or with test its test binary, and returns the
 // plan's blocks and the link's result.
-func run(ctx context.Context, base *dagger.Container, image string, from *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir, pkg string, flags []string, test bool) (map[string]*block, *result, error) {
+func run(ctx context.Context, base *dagger.Container, image string, from, downloads *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir, pkg string, flags []string, test bool) (map[string]*block, *result, error) {
 	cwd := path.Join(mountPath, workdir)
 	if test {
 		// Vet is go test's, not the binary's, and is left to the lint
 		// checks: the per-package build doesn't replay it.
 		flags = append([]string{"-vet=off"}, flags...)
 	}
-	b, err := newBuild(ctx, base, image, from, source, headers, path.Join(workdir, pkg), test, mountPath, cwd, flags)
+	b, err := newBuild(ctx, base, image, from, downloads, source, headers, path.Join(workdir, pkg), test, mountPath, cwd, flags)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -549,7 +561,7 @@ type build struct {
 // package it builds, relative to the source, or "" for every package of the
 // module, and tests whether it builds tests: they decide which modules the
 // build downloads.
-func newBuild(ctx context.Context, ctr *dagger.Container, image string, from *dagger.Container, source *dagger.Directory, headers *dagger.File, pkgDir string, tests bool, mountPath, cwd string, flags []string) (*build, error) {
+func newBuild(ctx context.Context, ctr *dagger.Container, image string, from, downloads *dagger.Container, source *dagger.Directory, headers *dagger.File, pkgDir string, tests bool, mountPath, cwd string, flags []string) (*build, error) {
 	// The plan's view of the source is a filtered copy, as slow on a large
 	// source as the rest of this setup, which it doesn't depend on: it's
 	// made alongside it. An error shows again where the plan mounts it.
@@ -559,11 +571,15 @@ func newBuild(ctx context.Context, ctr *dagger.Container, image string, from *da
 		from = core.NewContainer().From(image)
 	}
 	// The caller's own container downloads a private module, with its
-	// credentials; a public one downloads in the toolchain alone.
+	// credentials; a public one downloads in the toolchain alone, with the
+	// caller's download settings. The caller is downloads when it's set.
 	caller := ctr
-	public := ctr
+	if downloads != nil {
+		caller = downloads
+	}
+	public := caller
 	if from != nil {
-		if public, err = withEnvOnly(ctx, ctr, from, func(name string) bool { return slices.Contains(downloadEnv, name) }); err != nil {
+		if public, err = withEnvOnly(ctx, caller, from, func(name string) bool { return slices.Contains(downloadEnv, name) }); err != nil {
 			return nil, err
 		}
 		if ctr, err = canonical(ctx, ctr, from); err != nil {
