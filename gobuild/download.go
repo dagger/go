@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"slices"
@@ -190,7 +191,7 @@ func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDir str
 				list, err = dir.File(packName(e) + ".imports").Contents(ctx)
 			}
 			if err != nil {
-				m.err = fmt.Errorf("%s@%s: %w", e.path, e.version, err)
+				m.err = fmt.Errorf("%s@%s: %w", e.path, e.version, withStderr(err))
 				return
 			}
 			m.dir = dir
@@ -429,6 +430,27 @@ func (src sourceImports) dirsOf(ip string) []string {
 	return dirs
 }
 
+// withStderr is err with what a failed exec wrote to stderr, or with none
+// there, to stdout, where "go mod download -json" reports why a download
+// failed: what the exec's error leaves out.
+func withStderr(err error) error {
+	var execErr *dagger.ExecError
+	if !errors.As(err, &execErr) {
+		return err
+	}
+	out := strings.TrimSpace(execErr.Stderr)
+	if out == "" {
+		out = strings.TrimSpace(execErr.Stdout)
+	}
+	if out == "" {
+		return err
+	}
+	if len(out) > 2048 {
+		out = out[:2048] + "..."
+	}
+	return fmt.Errorf("%w: %s", err, out)
+}
+
 // lazyZip is the zip of the module version with the module cache directory
 // name, downloaded on its own; nil for one no go.sum names a zip for.
 func (d *downloader) lazyZip(name string) *dagger.File {
@@ -502,7 +524,7 @@ func downloadModule(ctr *dagger.Container, gomodcache string, e sumEntry) *dagge
 		"c=" + shQuote(gomodcache) + "\n" +
 		"[ ! -d \"$c/cache/download\" ] || [ \"$c\" -ef " + modCacheDir + " ] || export GOPROXY=\"file://$c/cache/download,${GOPROXY:-https://proxy.golang.org,direct}\"\n" +
 		"export GOMODCACHE=" + modCacheDir + " GOFLAGS=-modcacherw GOTOOLCHAIN=local GOWORK=off\n" +
-		"cd /gobuild/empty\ngo mod download -json " + shQuote(q) + " >/dev/null\n" +
+		"cd /gobuild/empty\ngo mod download -json " + shQuote(q) + " >/gobuild/download.json || { cat /gobuild/download.json >&2; exit 1; }\n" +
 		"[ \"$(cat " + shQuote(modCacheDir+"/"+meta+".ziphash") + ")\" = " + shQuote(e.zip) + " ] || { echo " +
 		shQuote(q+": checksum mismatch: go.sum has "+e.zip) + " >&2; exit 1; }\n" +
 		"/gobuild/gohdr packmod " + modCacheDir + " " + shQuote(modCacheDir+"/"+packName(e)) + " " +
