@@ -1173,6 +1173,24 @@ type GoDev {
   }
 
   """
+  A failed compile says why: its error carries the compiler's message, not
+  only the exec's exit code.
+  """
+  execErrorCheck: Void @check {
+    let ws = directory
+      .withNewFile("go.mod", "module example.com/broken\n\ngo 1.22\n")
+      .withNewFile("main.go", "package main\n\nfunc main() {\n\tintentionallyUndefinedSymbol()\n}\n")
+      .asWorkspace
+    let failed = {
+      go(version: "1.27.3").module(ws, ".").packages(ws).get(key: ".").binary(ws).size
+      "built"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(failed.contains("undefined: intentionallyUndefinedSymbol"), "a failed compile did not say why: " + failed)
+  }
+
+  """
   The goflags setting reaches Go commands as GOFLAGS, so build tags select
   source files without a custom base container.
   """
