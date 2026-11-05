@@ -22,6 +22,7 @@
 ["","git-sha",["github.com/vito/editor","refs/tags/v0.0.3"],"a665d56ec5c7d0c1b1bfc7e1c582df55cea134c5"]
 ["","oci-latest",["docker.io/library/busybox"],"1.38.0"]
 ["","oci-sha",["docker.io/golangci/golangci-lint:v2.11.4-alpine"],"sha256:72bcd68512b4e27540dd3a778a1b7afd45759d8145cfb3c089f1d7af53e718e9"]
+["","oci-sha",["docker.io/library/alpine:3.22"],"sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f"]
 ["","oci-sha",["docker.io/library/alpine:3.23"],"sha256:ff7f0c727dd796aa36787bfcd9a64bf35a6ce72a73451b3359fde849b6703d63"]
 ["","oci-sha",["docker.io/library/busybox:1.37.0"],"sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e"]
 ["","oci-sha",["docker.io/library/busybox:1.38.0"],"sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e"]
