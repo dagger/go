@@ -159,7 +159,7 @@ func planFiles(files []packFile, dirs []string) ([]packFile, error) {
 			embeds[dir] = true
 		}
 	}
-	linked := linkTargets(files)
+	linked, absolute := linkTargets(files)
 	kept := files[:0]
 	for _, f := range files {
 		if !keepFile(f.rel, read, embeds) {
@@ -170,8 +170,9 @@ func planFiles(files []packFile, dirs []string) ([]packFile, error) {
 		// reads nothing of it, so it is written empty, and a change to it
 		// leaves what the plan reads as it was. One a symlink leads to is
 		// kept whole: a package the plan reads may hold the link as a
-		// source file.
-		if strings.HasSuffix(f.rel, ".go") && !read[filepath.Dir(f.rel)] && f.mode.IsRegular() && !linked[f.rel] {
+		// source file. A pack with an absolute symlink, which leads where
+		// the source is mounted, keeps every file whole.
+		if strings.HasSuffix(f.rel, ".go") && !read[filepath.Dir(f.rel)] && f.mode.IsRegular() && !linked[f.rel] && !absolute {
 			f.data = nil
 		}
 		kept = append(kept, f)
@@ -179,14 +180,21 @@ func planFiles(files []packFile, dirs []string) ([]packFile, error) {
 	return kept, nil
 }
 
-// linkTargets is the files of a pack that its symlinks lead to, through
-// chains of them, by their paths in the pack.
-func linkTargets(files []packFile) map[string]bool {
+// linkTargets is the files of a pack that its relative symlinks lead to,
+// through chains of them, by their paths in the pack, and whether it holds
+// an absolute symlink, whose target depends on where the pack is unpacked.
+func linkTargets(files []packFile) (map[string]bool, bool) {
 	links := map[string]string{}
+	absolute := false
 	for _, f := range files {
-		if f.mode&fs.ModeSymlink != 0 && !filepath.IsAbs(string(f.data)) {
-			links[f.rel] = filepath.Join(filepath.Dir(f.rel), string(f.data))
+		if f.mode&fs.ModeSymlink == 0 {
+			continue
 		}
+		if filepath.IsAbs(string(f.data)) {
+			absolute = true
+			continue
+		}
+		links[f.rel] = filepath.Join(filepath.Dir(f.rel), string(f.data))
 	}
 	targets := map[string]bool{}
 	for _, t := range links {
@@ -199,7 +207,7 @@ func linkTargets(files []packFile) map[string]bool {
 			t = next
 		}
 	}
-	return targets
+	return targets, absolute
 }
 
 // keepFile reports whether planFiles keeps the file at rel: one that isn't

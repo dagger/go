@@ -252,6 +252,16 @@ func TestHdrToolSubset(t *testing.T) {
 		t.Errorf("subset without directories:\n%s\nwant the pack:\n%s", got, want)
 	}
 
+	// With an absolute symlink in the pack, whose target depends on where
+	// the source is mounted, every embedded Go file stays whole.
+	abs := maps.Clone(base)
+	abs["lib/abs.go"] = entry{strconv.FormatUint(uint64(os.ModeSymlink|0o777), 8), "/ws/tmpl/skel/x.go"}
+	run("subset", writePack("abs.hdr", abs), filepath.Join(dir, "abs-plan.hdr"), os.DevNull, dirs)
+	run("unpack", filepath.Join(dir, "abs-plan.hdr"), filepath.Join(dir, "abs"), os.DevNull)
+	if got, want := read(filepath.Join(dir, "abs/tmpl/skel/x.go")), base["tmpl/skel/x.go"].data; got != want {
+		t.Errorf("with an absolute symlink, an embedded Go file was unpacked with %q, want %q", got, want)
+	}
+
 	// The subset changes with a header the plan reads, an embedded file
 	// included, and not with one it doesn't.
 	planned := read(filepath.Join(dir, "plan.hdr"))
