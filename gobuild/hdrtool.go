@@ -932,7 +932,8 @@ const (
 // checkModuleZip reports why files aren't a module zip the go command
 // would extract, as it checks one before extracting it (golang.org/x/mod's
 // zip.CheckZip): a file outside the module's directory, prefix; a path
-// that isn't clean, or isn't a module file path (checkFilePath); two paths
+// that isn't clean, or isn't a module file path (checkFilePath); a go.mod
+// anywhere but the module's root, or not named in lower case; two paths
 // that differ only in case, or one that is both a file and a directory;
 // or contents larger than the go command's limits.
 func checkModuleZip(files []*zip.File, prefix string) error {
@@ -979,6 +980,14 @@ func checkModuleZip(files []*zip.File, prefix string) error {
 		}
 		if err := checkFilePath(name); err != nil {
 			return fmt.Errorf("%s: %w", zf.Name, err)
+		}
+		if base := path.Base(name); !dir && strings.EqualFold(base, "go.mod") {
+			if base != name {
+				return fmt.Errorf("%s: go.mod file not in module root directory", zf.Name)
+			}
+			if name != "go.mod" {
+				return fmt.Errorf("%s: go.mod file name must be lower case", zf.Name)
+			}
 		}
 		if !dir {
 			sz := zf.UncompressedSize64

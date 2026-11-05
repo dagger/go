@@ -209,7 +209,8 @@ func TestHdrToolPackmod(t *testing.T) {
 
 // gohdr packmod refuses a zip the go command would refuse to extract: one
 // with a path that leaves the module's directory, two paths that differ
-// only in case, or a file outside the module's directory. A plan unpacks
+// only in case, a file outside the module's directory, or a go.mod outside
+// the module's root or named in upper case. A plan unpacks
 // the pack, so such a path would be written there.
 func TestHdrToolPackmodRefuses(t *testing.T) {
 	dir := buildHdrTool(t)
@@ -217,6 +218,8 @@ func TestHdrToolPackmodRefuses(t *testing.T) {
 		"traversal": {"example.com/m@v1.0.0/go.mod", "example.com/m@v1.0.0/../../../src/go.sum"},
 		"collision": {"example.com/m@v1.0.0/go.mod", "example.com/m@v1.0.0/a.go", "example.com/m@v1.0.0/A.go"},
 		"outside":   {"example.com/m@v1.0.0/go.mod", "example.com/other@v1.0.0/x.go"},
+		"nested":    {"example.com/m@v1.0.0/go.mod", "example.com/m@v1.0.0/m.go", "example.com/m@v1.0.0/nested/go.mod"},
+		"upper":     {"example.com/m@v1.0.0/GO.MOD", "example.com/m@v1.0.0/m.go"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			root := filepath.Join(dir, name)
