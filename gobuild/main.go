@@ -276,7 +276,13 @@ type archiveWalked struct {
 // archiveWalk plans and walks what Archives compiles, with Archives' arguments.
 func archiveWalk(ctx context.Context, base *dagger.Container, image string, from *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir string, flags []string, dependencies bool, downloads *dagger.Container, packages []string, tests bool) (*archiveWalked, error) {
 	cwd := path.Join(mountPath, workdir)
-	b, err := newBuild(ctx, base, image, from, downloads, source, headers, "", tests, mountPath, cwd, flags)
+	// Discovery follows the imports of the one package archived, as a
+	// binary's build follows its package's; of every package otherwise.
+	pkgDir := ""
+	if len(packages) == 1 && !strings.Contains(packages[0], "...") {
+		pkgDir = path.Join(workdir, packages[0])
+	}
+	b, err := newBuild(ctx, base, image, from, downloads, source, headers, pkgDir, tests, mountPath, cwd, flags)
 	if err != nil {
 		return nil, err
 	}

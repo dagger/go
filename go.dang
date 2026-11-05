@@ -1575,10 +1575,10 @@ type GoModule {
     """
     packages: [String!]! = ["./..."],
     """
-    With the packages' test variants and external test packages, and what
-    they import, as a lint reads them.
+    Without the packages' test variants and external test packages, and
+    what only they import, which a lint reads.
     """
-    tests: Boolean! = true,
+    noTests: Boolean! = false,
   ): Directory! {
     let ctr = platformBase(ws, gomod.hostPlatform)
     let flags = buildFlags + (ctr.envVariable("GOFLAGS") ?? "").split(" ").filter { f => f != "" }
@@ -1589,7 +1589,7 @@ type GoModule {
       base: ctr,
       image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
       from: if (baseImage == null) { null } else { baseImage.withoutEntrypoint },
-      source: source(ws, test: tests),
+      source: source(ws, test: noTests == false),
       headers: lib.scan(ws).sync.file("_headers_.gohdr"),
       mountPath: mountPath,
       workdir: path,
@@ -1597,7 +1597,7 @@ type GoModule {
       dependencies: dependencies,
       downloads: tool.downloads,
       packages: packages,
-      tests: tests,
+      tests: noTests == false,
     )
     out.sync rescue {
       err: Error => raise "Go archives of module " + path + ": " + err.message
@@ -1624,10 +1624,10 @@ type GoModule {
     """
     packages: [String!]! = ["./..."],
     """
-    With the packages' test variants and external test packages, and what
-    they import.
+    Without the packages' test variants and external test packages, and
+    what only they import.
     """
-    tests: Boolean! = true,
+    noTests: Boolean! = false,
   ): [ID!]! {
     let ctr = platformBase(ws, gomod.hostPlatform)
     let flags = buildFlags + (ctr.envVariable("GOFLAGS") ?? "").split(" ").filter { f => f != "" }
@@ -1638,7 +1638,7 @@ type GoModule {
       base: ctr,
       image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
       from: if (baseImage == null) { null } else { baseImage.withoutEntrypoint },
-      source: source(ws, test: tests),
+      source: source(ws, test: noTests == false),
       headers: lib.scan(ws).sync.file("_headers_.gohdr"),
       mountPath: mountPath,
       workdir: path,
@@ -1646,7 +1646,7 @@ type GoModule {
       dependencies: dependencies,
       downloads: tool.downloads,
       packages: packages,
-      tests: tests,
+      tests: noTests == false,
     ).{{id}}.map { build => build.id } rescue {
       err: Error => raise "Go archive builds of module " + path + ": " + err.message
     }
