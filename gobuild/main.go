@@ -32,7 +32,11 @@ type Gobuild struct{}
 // pinned by digest, so gohdr, which every plan and download mounts, is the
 // same input in every build: a tag moves, and a workspace's lockfile may pin
 // it to another digest than the registry serves.
-const toolImage = "golang:1.26-alpine@sha256:9ce231b28998b32e116927c61aa5c406183061d4f3f2d61b292c88e7f6bdf7ca"
+//
+// It is the image of the Go version gomod's tools build with (Gomod.goImage
+// of its scannerVersion), so a build pulls one Go image, which an engine
+// image can ship.
+const toolImage = "golang:1.27-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb"
 
 // bare runs an exec as its command alone: none of these execs call Dagger,
 // and starting a nested session for each would cost every package; and

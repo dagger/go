@@ -261,7 +261,7 @@ type Gomod {
     let parts = {{
       # No cache volumes: the scan is an ordinary result, which another engine
       # can pull from the remote cache.
-      helper: container.from("golang:" + scannerVersion + "-alpine")
+      helper: container.from(goImage(scannerVersion))
         # The same download retry as withGoCaches.
         .withEnvVariable("GOPROXY", "https://proxy.golang.org|https://proxy.golang.org|direct")
         .withoutEntrypoint
@@ -835,7 +835,7 @@ type GoMod {
     # As Gomod.scanner, the helper builds while the workspace syncs.
     let parts = {{
       helper: container
-        .from("golang:" + gomod.scannerVersion + "-alpine")
+        .from(gomod.goImage(gomod.scannerVersion))
         # The same download retry as withGoCaches.
         .withEnvVariable("GOPROXY", "https://proxy.golang.org|https://proxy.golang.org|direct")
         .withoutEntrypoint
