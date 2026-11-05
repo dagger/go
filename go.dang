@@ -1610,7 +1610,8 @@ type GoModule {
   packages with the same toolchain, flags and go.sum shares: each package's
   build (a directory: what its exec wrote, with its archives), each module
   download (a directory: its plan pack and zip), and the tools the build runs
-  (gobuild's gohdr, a file, and gomod's go-includes helper, a container). A
+  (gobuild's gohdr, a file, Go's pack, a directory, and gomod's go-includes
+  helper, a container). A
   cache that is to have exactly these results, such as the cache an engine
   image pre-warms, is filled from them. The arguments are archives'.
   """
@@ -1653,7 +1654,7 @@ type GoModule {
       )
       cache.builds.{{id}}.map { build => build.id } +
         cache.downloads.{{id}}.map { download => download.id } +
-        [cache.tool.id, gomod.includesHelper.id]
+        [cache.tool.id, cache.tools.id, gomod.includesHelper.id]
     } rescue {
       err: Error => raise "Go archive builds of module " + path + ": " + err.message
     }

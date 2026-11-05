@@ -54,9 +54,9 @@ type GobuildArchiveBuildsOpts struct {
 
 // ArchiveBuilds compiles what Archives compiles, with its arguments, and
 // returns what it read from the cache instead of the export driver's
-// directory: each package's build, each module download, and gohdr. A cache
-// that is to have exactly these results, such as the cache an engine image
-// pre-warms, is filled from them.
+// directory: each package's build, each module download, gohdr, and Go's
+// pack. A cache that is to have exactly these results, such as the cache an
+// engine image pre-warms, is filled from them.
 func (r *Gobuild) ArchiveBuilds(base *Container, source *Directory, headers *File, mountPath string, opts ...GobuildArchiveBuildsOpts) *GobuildArchiveCache {
 	assertNotNil("base", base)
 	assertNotNil("source", source)
@@ -520,6 +520,14 @@ func (r *GobuildArchiveCache) Tool() *File {
 	q := r.query.Select("tool")
 
 	return new(File).WithGraphQLQuery(q)
+}
+
+// Go's own tools the build's execs run, built by its toolchain: pack,
+// which packages with assembly run.
+func (r *GobuildArchiveCache) Tools() *Directory {
+	q := r.query.Select("tools")
+
+	return new(Directory).WithGraphQLQuery(q)
 }
 
 func (r *Query) Gobuild() *Gobuild { // gobuild (../../:0:0)

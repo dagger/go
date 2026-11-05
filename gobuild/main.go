@@ -357,13 +357,16 @@ type ArchiveCache struct {
 	Downloads []*dagger.Directory
 	// gohdr, the tool the build's execs run.
 	Tool *dagger.File
+	// Go's own tools the build's execs run, built by its toolchain: pack,
+	// which packages with assembly run.
+	Tools *dagger.Directory
 }
 
 // ArchiveBuilds compiles what Archives compiles, with its arguments, and
 // returns what it read from the cache instead of the export driver's
-// directory: each package's build, each module download, and gohdr. A cache
-// that is to have exactly these results, such as the cache an engine image
-// pre-warms, is filled from them.
+// directory: each package's build, each module download, gohdr, and Go's
+// pack. A cache that is to have exactly these results, such as the cache an
+// engine image pre-warms, is filled from them.
 func (m *Gobuild) ArchiveBuilds(
 	ctx context.Context,
 	// The Go container to build in, as for Binary.
@@ -407,7 +410,7 @@ func (m *Gobuild) ArchiveBuilds(
 	for _, bl := range w.order {
 		dirs = append(dirs, w.results[bl.id].dir)
 	}
-	return &ArchiveCache{Builds: dirs, Downloads: w.build.downloads, Tool: hdrTool()}, nil
+	return &ArchiveCache{Builds: dirs, Downloads: w.build.downloads, Tool: hdrTool(), Tools: w.build.tools}, nil
 }
 
 // listFields are the fields of go list's output Archives reads: the

@@ -63,10 +63,12 @@ func (r ArchiveCache) MarshalJSON() ([]byte, error) {
 		Builds    []*dagger.Directory
 		Downloads []*dagger.Directory
 		Tool      *dagger.File
+		Tools     *dagger.Directory
 	}
 	concrete.Builds = r.Builds
 	concrete.Downloads = r.Downloads
 	concrete.Tool = r.Tool
+	concrete.Tools = r.Tools
 	return json.Marshal(&concrete)
 }
 
@@ -75,6 +77,7 @@ func (r *ArchiveCache) UnmarshalJSON(bs []byte) error {
 		Builds    []*dagger.Directory
 		Downloads []*dagger.Directory
 		Tool      *dagger.File
+		Tools     *dagger.Directory
 	}
 	err := json.Unmarshal(bs, &concrete)
 	if err != nil {
@@ -83,6 +86,7 @@ func (r *ArchiveCache) UnmarshalJSON(bs []byte) error {
 	r.Builds = concrete.Builds
 	r.Downloads = concrete.Downloads
 	r.Tool = concrete.Tool
+	r.Tools = concrete.Tools
 	return nil
 }
 

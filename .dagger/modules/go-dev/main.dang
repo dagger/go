@@ -1064,7 +1064,7 @@ type GoDev {
   """
   A module's archive builds are what its archives read from the cache: a
   build per package the archives hold, each its own, a download per module
-  version the build read, and the build's two tools.
+  version the build read, and the build's three tools.
   """
   archiveBuildsCheck(ws: Workspace!): Void @check {
     let mod = go(version: "1.27.3").module(ws, downloadsFixturePath)
@@ -1072,7 +1072,7 @@ type GoDev {
     let archived = mod.archives(ws, dependencies: true, packages: ["."], noTests: true).directory("archives").entries
     # The fixture's one module version is golang.org/x/sync's.
     assert(archived.length > 0, "no archives")
-    assert(built.length == archived.length + 1 + 2, "archive builds: " + toString(built.length) + ", for " + toString(archived.length) + " archives, 1 module download and 2 tools")
+    assert(built.length == archived.length + 1 + 3, "archive builds: " + toString(built.length) + ", for " + toString(archived.length) + " archives, 1 module download and 3 tools")
     let distinct = built.reduce([]) { seen, id => if (seen.contains(id)) { seen } else { seen + [id] } }
     assert(distinct.length == built.length, "archive builds repeat a result")
   }
