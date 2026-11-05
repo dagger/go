@@ -135,8 +135,9 @@ func subset(src, out, list string, dirs ...string) error {
 // planFiles is files without the Go files a plan doesn't read, with dirs
 // one file, the list of the directories it reads Go files in: those of the
 // packages it may load. Under a directory there with a //go:embed line,
-// which may embed any file below it, every file stays, as does any file
-// that isn't Go, which a C include may name. Without dirs, every file stays.
+// which may embed any file below it, every file stays, the Go files emptied,
+// as does any file that isn't Go, which a C include may name. Without dirs,
+// every file stays.
 func planFiles(files []packFile, dirs []string) ([]packFile, error) {
 	if len(dirs) == 0 {
 		return files, nil
@@ -160,9 +161,17 @@ func planFiles(files []packFile, dirs []string) ([]packFile, error) {
 	}
 	kept := files[:0]
 	for _, f := range files {
-		if keepFile(f.rel, read, embeds) {
-			kept = append(kept, f)
+		if !keepFile(f.rel, read, embeds) {
+			continue
 		}
+		// A Go file in no directory the plan reads is kept only because a
+		// //go:embed pattern above it may match it, by its name: the plan
+		// reads nothing of it, so it is written empty, and a change to it
+		// leaves what the plan reads as it was.
+		if strings.HasSuffix(f.rel, ".go") && !read[filepath.Dir(f.rel)] && f.mode.IsRegular() {
+			f.data = nil
+		}
+		kept = append(kept, f)
 	}
 	return kept, nil
 }

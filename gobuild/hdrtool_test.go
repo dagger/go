@@ -234,6 +234,9 @@ func TestHdrToolSubset(t *testing.T) {
 	if got, want := tree(filepath.Join(dir, "staged")), tree(filepath.Join(dir, "direct")); !reflect.DeepEqual(got, want) {
 		t.Errorf("unpacked from the subset:\n%v\nwant:\n%v", got, want)
 	}
+	if got := read(filepath.Join(dir, "staged/tmpl/skel/x.go")); got != "" {
+		t.Errorf("an embedded Go file the plan doesn't read was unpacked with %q, want it empty", got)
+	}
 	if got, want := read(filepath.Join(dir, "subset.txt")), read(filepath.Join(dir, "direct.txt")); got != want || want != "gen.go/inner.go\n" {
 		t.Errorf("subset listed %q, unpack %q, want %q", got, want, "gen.go/inner.go\n")
 	}
@@ -254,12 +257,17 @@ func TestHdrToolSubset(t *testing.T) {
 		{"unread/deep/deep.go", false},
 		{"other/other.go", false},
 		{"lib/lib.go", true},
-		{"tmpl/skel/x.go", true},
+		// An embedded Go file is read by its name alone.
+		{"tmpl/skel/x.go", false},
+		{"tmpl/skel/new.go", true},
 		{"other/data.txt", true},
 		{"go.mod", true},
 	} {
 		files := maps.Clone(base)
-		e := files[c.file]
+		e, ok := files[c.file]
+		if !ok {
+			e.mode = "644"
+		}
 		e.data += "import _ \"fmt\"\n"
 		files[c.file] = e
 		changed := writePack("changed.hdr", files)
