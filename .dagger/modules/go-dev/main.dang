@@ -927,6 +927,63 @@ type GoDev {
     null
   }
 
+  # The error of goSumCheck's build with the go.sum made as sum, or "built".
+  let goSumFailure(made: Container!, base: Container!, sum: String!): String! {
+    let ws = made.directory("/ws").withFile("go.sum", made.file("/sums/" + sum)).asWorkspace
+    let outcome = {
+      go(base: base).modules(ws).get(key: ".").packages(ws).get(key: ".").binary(ws).size
+      "built"
+    } rescue {
+      err: Error => err.message
+    }
+    outcome
+  }
+
+  """
+  A downloaded dependency is verified against the project's go.sum, as go
+  build verifies it, and not against the checksum database: with the base's
+  checksum database out of reach, the dependency go.sum names builds and
+  runs; one whose zip or go.mod checksum go.sum lacks, or whose download
+  doesn't match go.sum, fails the build. The dependency comes from a file
+  proxy in the base, as from any module proxy.
+  """
+  goSumCheck: Void @check {
+    let dep = directory
+      .withNewFile("go.mod", "module example.com/sumdep\n\ngo 1.25\n")
+      .withNewFile("sumdep.go", "package sumdep\n\nconst Answer = 42\n")
+    let main = directory
+      .withNewFile("go.mod", "module example.com/summain\n\ngo 1.25\n\nrequire example.com/sumdep v1.0.0\n")
+      .withNewFile("main.go", "package main\n\nimport (\n\t\"fmt\"\n\n\t\"example.com/sumdep\"\n)\n\nfunc main() { fmt.Println(sumdep.Answer) }\n")
+    # The proxy serves the module as go mod download fetches it. The go.sum
+    # is written from it, then made again without the module's zip checksum,
+    # without its go.mod checksum, and with each one wrong.
+    let made = container
+      .from("golang:1.27.3-alpine")
+      .withExec(["apk", "add", "--no-cache", "zip"])
+      .withDirectory("/z/example.com/sumdep@v1.0.0", dep)
+      .withDirectory("/ws", main)
+      .withExec(["sh", "-c", "set -e; p=/proxy/example.com/sumdep/@v; mkdir -p $p; cd /z; zip -qr $p/v1.0.0.zip example.com/sumdep@v1.0.0; cp example.com/sumdep@v1.0.0/go.mod $p/v1.0.0.mod; printf 'v1.0.0\\n' > $p/list; printf '{\"Version\":\"v1.0.0\"}' > $p/v1.0.0.info; cd /ws; GOPROXY=file:///proxy GOSUMDB=off go mod tidy"])
+      .withExec(["sh", "-c", "set -e; cd /ws; z=$(awk '$2 == \"v1.0.0\" { print $3 }' go.sum); m=$(awk '$2 == \"v1.0.0/go.mod\" { print $3 }' go.sum); [ -n \"$z\" ] && [ -n \"$m\" ]; mkdir /sums; grep -v ' v1.0.0 ' go.sum > /sums/nozip; grep -v ' v1.0.0/go.mod ' go.sum > /sums/nomod; sed \"s#v1.0.0 $z#v1.0.0 $m#\" go.sum > /sums/badzip; sed \"s#v1.0.0/go.mod $m#v1.0.0/go.mod $z#\" go.sum > /sums/badmod"])
+    let base = container
+      .from("golang:1.27.3-alpine")
+      .withDirectory("/proxy", made.directory("/proxy"))
+      .withEnvVariable("GOPROXY", "file:///proxy")
+      .withEnvVariable("GOSUMDB", "sum.golang.org https://sumdb.invalid")
+    let ws = made.directory("/ws").asWorkspace
+    let built = go(base: base).modules(ws).get(key: ".").packages(ws).get(key: ".").binary(ws)
+    let out = base.withFile("/usr/local/bin/summain", built).withExec(["summain"]).stdout
+    assert(out == "42\n", "the binary built with go.sum's checksums printed: " + out)
+    let noZip = goSumFailure(made, base, "nozip")
+    assert(noZip.contains("missing go.sum entry"), "a build whose go.sum lacks the module's checksum: " + noZip)
+    let noMod = goSumFailure(made, base, "nomod")
+    assert(noMod.contains("missing go.sum entry"), "a build whose go.sum lacks the module's go.mod checksum: " + noMod)
+    let badZip = goSumFailure(made, base, "badzip")
+    assert(badZip.contains("checksum mismatch"), "a build whose go.sum has another checksum for the module: " + badZip)
+    let badMod = goSumFailure(made, base, "badmod")
+    assert(badMod.contains("checksum mismatch"), "a build whose go.sum has another checksum for the module's go.mod: " + badMod)
+    null
+  }
+
   """
   A cgo or assembly package in the source #includes files from elsewhere in
   it, which no plan line names: outside its module, of names no pattern

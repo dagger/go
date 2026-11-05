@@ -117,10 +117,11 @@ func matchPrefixPatterns(patterns, target string) bool {
 }
 
 // downloadEnv is the environment a module download reads: where it fetches
-// from and how it verifies. Nothing else of a caller's environment changes
-// what a download makes, so nothing else is in its key.
+// from. It verifies against go.sum alone, not the checksum database, so
+// nothing else of a caller's environment changes what a download makes,
+// and nothing else is in its key.
 var downloadEnv = []string{
-	"GOPROXY", "GONOPROXY", "GOPRIVATE", "GONOSUMDB", "GONOSUMCHECK", "GOSUMDB",
+	"GOPROXY", "GONOPROXY", "GOPRIVATE",
 	"GOINSECURE", "GOVCS", "GOAUTH", "GIT_SSH_COMMAND", "GIT_TERMINAL_PROMPT",
 }
 
@@ -522,13 +523,18 @@ func packName(e sumEntry) string {
 // downloaded and extracted. A module cache the toolchain image comes with,
 // filled for offline builds, is read first. Its key is the module version
 // and its checksums, so every project that reads it shares it.
+//
+// The go.sum checksum is what verifies it, as go build verifies a module
+// go.sum names, without the checksum database; so the download doesn't
+// ask the database either, which would take most of a small module's
+// download.
 func downloadModule(ctr *dagger.Container, gomodcache string, e sumEntry) *dagger.Directory {
 	q := e.path + "@" + e.version
 	meta := strings.TrimSuffix(zipPath(e), ".zip")
 	script := "set -e\nmkdir -p " + modCacheDir + " /gobuild/empty\n" +
 		"c=" + shQuote(gomodcache) + "\n" +
 		"[ ! -d \"$c/cache/download\" ] || [ \"$c\" -ef " + modCacheDir + " ] || export GOPROXY=\"file://$c/cache/download,${GOPROXY:-https://proxy.golang.org,direct}\"\n" +
-		"export GOMODCACHE=" + modCacheDir + " GOFLAGS=-modcacherw GOTOOLCHAIN=local GOWORK=off\n" +
+		"export GOMODCACHE=" + modCacheDir + " GOFLAGS=-modcacherw GOTOOLCHAIN=local GOWORK=off GOSUMDB=off\n" +
 		"cd /gobuild/empty\ngo mod download -json " + shQuote(q) + " >/gobuild/download.json || { cat /gobuild/download.json >&2; exit 1; }\n" +
 		"[ \"$(cat " + shQuote(modCacheDir+"/"+meta+".ziphash") + ")\" = " + shQuote(e.zip) + " ] || { echo " +
 		shQuote(q+": checksum mismatch: go.sum has "+e.zip) + " >&2; exit 1; }\n" +
