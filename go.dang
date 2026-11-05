@@ -1597,6 +1597,53 @@ type GoModule {
     out
   }
 
+  """
+  The IDs of the builds archives reads, one directory per package: what each
+  package's exec wrote, with its archives, as every build of the package
+  reads it from the cache. A cache that is to have exactly these builds,
+  such as the cache an engine image pre-warms, is filled from them.
+  The arguments are archives'.
+  """
+  archiveBuilds(
+    ws: Workspace!,
+    """
+    Only the packages from other modules and the standard library.
+    """
+    dependencies: Boolean! = false,
+    """
+    The packages whose imports are compiled, as go list patterns from the
+    module's directory.
+    """
+    packages: [String!]! = ["./..."],
+    """
+    With the packages' test variants and external test packages, and what
+    they import.
+    """
+    tests: Boolean! = true,
+  ): [ID!]! {
+    let ctr = platformBase(ws, gomod.hostPlatform)
+    let flags = buildFlags + (ctr.envVariable("GOFLAGS") ?? "").split(" ").filter { f => f != "" }
+    if (gccgo(flags)) {
+      raise "Go module " + path + ": a gccgo build has no archives"
+    }
+    gobuild.archiveBuilds(
+      base: ctr,
+      image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
+      from: if (baseImage == null) { null } else { baseImage.withoutEntrypoint },
+      source: source(ws, test: tests),
+      headers: lib.scan(ws).sync.file("_headers_.gohdr"),
+      mountPath: mountPath,
+      workdir: path,
+      flags: buildFlags,
+      dependencies: dependencies,
+      downloads: tool.downloads,
+      packages: packages,
+      tests: tests,
+    ).{{id}}.map { build => build.id } rescue {
+      err: Error => raise "Go archive builds of module " + path + ": " + err.message
+    }
+  }
+
   # The binaries of the main packages among pkgPaths, one build each: they
   # share the packages they have in common through the cache.
   let binaryFiles(ws: Workspace!, platform: String!, pkgPaths: [String!]!): Directory! {

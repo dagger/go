@@ -1005,6 +1005,24 @@ type GoDev {
   }
 
   """
+  A module's archive builds are the builds its archives come from: one per
+  package the archives hold, each its own.
+  """
+  archiveBuildsCheck: Void @check {
+    let ws = directory
+      .withNewFile("go.mod", "module example.com/app\n\ngo 1.22\n")
+      .withNewFile("main.go", "package main\n\nimport \"strings\"\n\nfunc main() { println(strings.ToUpper(\"x\")) }\n")
+      .asWorkspace
+    let mod = go(version: "1.27.3").module(ws, ".")
+    let built = mod.archiveBuilds(ws, dependencies: true, packages: ["."], tests: false)
+    let archived = mod.archives(ws, dependencies: true, packages: ["."], tests: false).directory("archives").entries
+    assert(built.length > 0, "no archive builds")
+    assert(built.length == archived.length, "archive builds: " + toString(built.length) + ", archives: " + toString(archived.length))
+    let distinct = built.reduce([]) { seen, id => if (seen.contains(id)) { seen } else { seen + [id] } }
+    assert(distinct.length == built.length, "archive builds repeat a build")
+  }
+
+  """
   A module's archives are what golangci-lint's export driver reads: the
   manifest lists every package go list -deps -test lists, main packages,
   what only tests import, test variants and external test packages included,

@@ -208,6 +208,73 @@ func (m *Gobuild) Archives(
 	// +default=true
 	tests bool,
 ) (*dagger.Directory, error) {
+	w, err := archiveWalk(ctx, base, image, from, source, headers, mountPath, workdir, flags, dependencies, downloads, packages, tests)
+	if err != nil {
+		return nil, err
+	}
+	b, blocks, results, order, p, envFlags := w.build, w.blocks, w.results, w.order, w.plan, w.envFlags
+	// The digests are of the source whole, and of what cgo wrote for a cgo
+	// package's compile, read from the package's exec.
+	var modFiles []string
+	for _, bl := range blocks {
+		modFiles = append(modFiles, bl.modFiles...)
+	}
+	ctr := b.modules.mount(b.base.
+		WithMountedFile("/gobuild/gohdr", hdrTool()), modFiles).
+		WithMountedDirectory(b.roots.Src, b.src)
+	out := core.NewDirectory()
+	var entries strings.Builder
+	var archives []*dagger.File
+	for _, bl := range order {
+		r := results[bl.id]
+		archives = append(archives, r.file)
+		entries.WriteString(bl.importPath + "\tarchives/" + bl.output())
+		if bl.cgo {
+			at := "/gobuild/cgo/" + bl.name
+			ctr = ctr.WithMountedDirectory(at, r.dir)
+			var generated []*dagger.File
+			for _, f := range bl.cgoOutputs() {
+				entries.WriteString("\t" + at + "/" + f)
+				generated = append(generated, r.dir.File(f))
+			}
+			out = out.WithFiles("cgo/"+bl.name, generated)
+		}
+		entries.WriteString("\n")
+	}
+	// The manifest is read from its exec's evaluated output, so it is keyed
+	// by its content: the exec reads the whole listing, which any edit
+	// changes.
+	manifestDir, err := ctr.
+		WithMountedFile("/gobuild/list.json", p.ran.File("/gobuild/list.json")).
+		WithMountedFile("/gobuild/env.json", p.ran.File("/gobuild/env.json")).
+		WithNewFile("/gobuild/entries.txt", entries.String()).
+		WithExec([]string{"sh", "-c", "mkdir -p /gobuild/manifest && /gobuild/gohdr manifest /gobuild/list.json /gobuild/env.json /gobuild/entries.txt " +
+			shQuote(strings.Join(buildTags(append(envFlags, flags...)), ",")) + " > /gobuild/manifest/manifest.json"}, bare).
+		Directory("/gobuild/manifest").Sync(ctx)
+	if err != nil {
+		return nil, err
+	}
+	manifest, err := manifestDir.File("manifest.json").Sync(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return out.WithFiles("archives", archives).WithFile("manifest.json", manifest), nil
+}
+
+// archiveWalked is the walk Archives makes: the build, its plan and the
+// flags GOFLAGS adds, the blocks it planned, each walked package's result,
+// and the walked packages Archives returns, in import path order.
+type archiveWalked struct {
+	build    *build
+	plan     *planned
+	envFlags []string
+	blocks   map[string]*block
+	results  map[string]*result
+	order    []*block
+}
+
+// archiveWalk plans and walks what Archives compiles, with Archives' arguments.
+func archiveWalk(ctx context.Context, base *dagger.Container, image string, from *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir string, flags []string, dependencies bool, downloads *dagger.Container, packages []string, tests bool) (*archiveWalked, error) {
 	cwd := path.Join(mountPath, workdir)
 	b, err := newBuild(ctx, base, image, from, downloads, source, headers, "", tests, mountPath, cwd, flags)
 	if err != nil {
@@ -266,52 +333,58 @@ func (m *Gobuild) Archives(
 		}
 	}
 	sort.Slice(order, func(i, j int) bool { return order[i].importPath < order[j].importPath })
-	// The digests are of the source whole, and of what cgo wrote for a cgo
-	// package's compile, read from the package's exec.
-	var modFiles []string
-	for _, bl := range blocks {
-		modFiles = append(modFiles, bl.modFiles...)
-	}
-	ctr := b.modules.mount(b.base.
-		WithMountedFile("/gobuild/gohdr", hdrTool()), modFiles).
-		WithMountedDirectory(b.roots.Src, b.src)
-	out := core.NewDirectory()
-	var entries strings.Builder
-	var archives []*dagger.File
-	for _, bl := range order {
-		r := results[bl.id]
-		archives = append(archives, r.file)
-		entries.WriteString(bl.importPath + "\tarchives/" + bl.output())
-		if bl.cgo {
-			at := "/gobuild/cgo/" + bl.name
-			ctr = ctr.WithMountedDirectory(at, r.dir)
-			var generated []*dagger.File
-			for _, f := range bl.cgoOutputs() {
-				entries.WriteString("\t" + at + "/" + f)
-				generated = append(generated, r.dir.File(f))
-			}
-			out = out.WithFiles("cgo/"+bl.name, generated)
-		}
-		entries.WriteString("\n")
-	}
-	// The manifest is read from its exec's evaluated output, so it is keyed
-	// by its content: the exec reads the whole listing, which any edit
-	// changes.
-	manifestDir, err := ctr.
-		WithMountedFile("/gobuild/list.json", p.ran.File("/gobuild/list.json")).
-		WithMountedFile("/gobuild/env.json", p.ran.File("/gobuild/env.json")).
-		WithNewFile("/gobuild/entries.txt", entries.String()).
-		WithExec([]string{"sh", "-c", "mkdir -p /gobuild/manifest && /gobuild/gohdr manifest /gobuild/list.json /gobuild/env.json /gobuild/entries.txt " +
-			shQuote(strings.Join(buildTags(append(envFlags, flags...)), ",")) + " > /gobuild/manifest/manifest.json"}, bare).
-		Directory("/gobuild/manifest").Sync(ctx)
+	return &archiveWalked{build: b, plan: p, envFlags: envFlags, blocks: blocks, results: results, order: order}, nil
+}
+
+// ArchiveBuilds compiles what Archives compiles, with its arguments, and
+// returns each package's build instead of the export driver's directory: the
+// directory the package's exec wrote, with its archives, as every build of
+// the package reads it from the cache. A cache that is to have exactly these
+// builds, such as the cache an engine image pre-warms, is filled from them.
+func (m *Gobuild) ArchiveBuilds(
+	ctx context.Context,
+	// The Go container to build in, as for Binary.
+	base *dagger.Container,
+	// The image base was made from, as for Binary.
+	// +optional
+	image string,
+	// The custom container base was made from, as for Binary.
+	// +optional
+	from *dagger.Container,
+	// The source tree, as for Archives.
+	source *dagger.Directory,
+	// The header pack of source's Go files, as for Archives.
+	headers *dagger.File,
+	// Where source is mounted.
+	mountPath string,
+	// The module's directory, relative to mountPath.
+	// +default="."
+	workdir string,
+	// Flags for go build, as for Binary.
+	// +optional
+	flags []string,
+	// Only the packages outside the module.
+	// +optional
+	dependencies bool,
+	// The container module downloads run with, as for Binary.
+	// +optional
+	downloads *dagger.Container,
+	// The packages whose imports are compiled, as for Archives.
+	// +optional
+	packages []string,
+	// With the packages' test variants, as for Archives.
+	// +default=true
+	tests bool,
+) ([]*dagger.Directory, error) {
+	w, err := archiveWalk(ctx, base, image, from, source, headers, mountPath, workdir, flags, dependencies, downloads, packages, tests)
 	if err != nil {
 		return nil, err
 	}
-	manifest, err := manifestDir.File("manifest.json").Sync(ctx)
-	if err != nil {
-		return nil, err
+	dirs := make([]*dagger.Directory, 0, len(w.order))
+	for _, bl := range w.order {
+		dirs = append(dirs, w.results[bl.id].dir)
 	}
-	return out.WithFiles("archives", archives).WithFile("manifest.json", manifest), nil
+	return dirs, nil
 }
 
 // listFields are the fields of go list's output Archives reads: the

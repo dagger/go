@@ -28,6 +28,107 @@ func (r *Gobuild) WithGraphQLQuery(q *querybuilder.Selection) *Gobuild {
 	}
 }
 
+// GobuildArchiveBuildsOpts contains options for Gobuild.ArchiveBuilds
+type GobuildArchiveBuildsOpts struct {
+	// The image base was made from, as for Binary.
+	Image string
+	// The custom container base was made from, as for Binary.
+	From *Container
+	// The module's directory, relative to mountPath.
+	//
+	// Default: "."
+	Workdir string
+	// Flags for go build, as for Binary.
+	Flags []string
+	// Only the packages outside the module.
+	Dependencies bool
+	// The container module downloads run with, as for Binary.
+	Downloads *Container
+	// The packages whose imports are compiled, as for Archives.
+	Packages []string
+	// With the packages' test variants, as for Archives.
+	//
+	// Default: true
+	Tests bool
+}
+
+// ArchiveBuilds compiles what Archives compiles, with its arguments, and
+// returns each package's build instead of the export driver's directory: the
+// directory the package's exec wrote, with its archives, as every build of
+// the package reads it from the cache. A cache that is to have exactly these
+// builds, such as the cache an engine image pre-warms, is filled from them.
+func (r *Gobuild) ArchiveBuilds(ctx context.Context, base *Container, source *Directory, headers *File, mountPath string, opts ...GobuildArchiveBuildsOpts) ([]Directory, error) {
+	assertNotNil("base", base)
+	assertNotNil("source", source)
+	assertNotNil("headers", headers)
+	q := r.query.Select("archiveBuilds")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `image` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Image) {
+			q = q.Arg("image", opts[i].Image)
+		}
+		// `from` optional argument
+		if !querybuilder.IsZeroValue(opts[i].From) {
+			q = q.Arg("from", opts[i].From)
+		}
+		// `workdir` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Workdir) {
+			q = q.Arg("workdir", opts[i].Workdir)
+		}
+		// `flags` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Flags) {
+			q = q.Arg("flags", opts[i].Flags)
+		}
+		// `dependencies` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Dependencies) {
+			q = q.Arg("dependencies", opts[i].Dependencies)
+		}
+		// `downloads` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Downloads) {
+			q = q.Arg("downloads", opts[i].Downloads)
+		}
+		// `packages` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Packages) {
+			q = q.Arg("packages", opts[i].Packages)
+		}
+		// `tests` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Tests) {
+			q = q.Arg("tests", opts[i].Tests)
+		}
+	}
+	q = q.Arg("base", base)
+	q = q.Arg("source", source)
+	q = q.Arg("headers", headers)
+	q = q.Arg("mountPath", mountPath)
+
+	q = q.Select("id")
+
+	type archiveBuilds struct {
+		Id ID
+	}
+
+	convert := func(fields []archiveBuilds) []Directory {
+		out := []Directory{}
+
+		for i := range fields {
+			val := *new(Directory).WithGraphQLQuery(selectNode(q.Root(), fields[i].Id, "Directory"))
+			out = append(out, val)
+		}
+
+		return out
+	}
+	var response []archiveBuilds
+
+	q = q.Bind(&response)
+
+	err := q.Execute(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return convert(response), nil
+}
+
 // GobuildArchivesOpts contains options for Gobuild.Archives
 type GobuildArchivesOpts struct {
 	// The image base was made from, as for Binary.
