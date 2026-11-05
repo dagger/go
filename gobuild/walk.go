@@ -18,6 +18,9 @@ import (
 // the go command runs in-process.
 const toolsDir = "/gobuild/tools"
 
+// scriptPath is where a package's exec reads its script.
+const scriptPath = "/gobuild/build.sh"
+
 // node is one exec: a block rendered for the walk that runs it.
 type node struct {
 	ID         string   `json:"id"`
@@ -239,14 +242,15 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 				ctr = ctr.WithMountedDirectory(path.Join(w.roots.Src, at), srcDir, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
 			}
 			ctr = w.mods.mount(ctr, n.ModFiles)
-			// A script past the kernel's argument-size limit (the link's
-			// import config at a large project's scale) goes in as a file.
-			var ran *dagger.Container
-			if len(n.Script) > 64<<10 {
-				ran = ctr.WithNewFile("/gobuild/run.sh", n.Script).WithExec([]string{"sh", "/gobuild/run.sh"}, pkgExec)
-			} else {
-				ran = ctr.WithExec([]string{"sh", "-c", n.Script}, pkgExec)
-			}
+			// The script goes in as a mounted file, and the exec names the
+			// package instead: its arguments are its title wherever the
+			// build is shown, such as over a compile error, and a script
+			// runs to tens of KB with the link's import config. A mounted
+			// file adds no layer to the step's root filesystem.
+			script := core.NewDirectory().WithNewFile("build.sh", n.Script).File("build.sh")
+			ran := ctr.
+				WithMountedFile(scriptPath, script, dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
+				WithExec([]string{"sh", scriptPath, n.ImportPath}, pkgExec)
 			if !first[id] {
 				slots.acquire(w.heights[id])
 			}
