@@ -527,11 +527,15 @@ func packName(e sumEntry) string {
 // The go.sum checksum is what verifies it, as go build verifies a module
 // go.sum names, without the checksum database; so the download doesn't
 // ask the database either, which would take most of a small module's
-// download.
+// download. Nor is the zip extracted, which takes most of a large
+// one's, and which the build makes from the zip on its own: the module's
+// directory is there before the go command runs, so it takes the module as
+// extracted once it has the zip and its checksum, and gohdr packs the
+// module from the zip.
 func downloadModule(ctr *dagger.Container, gomodcache string, e sumEntry) *dagger.Directory {
 	q := e.path + "@" + e.version
 	meta := strings.TrimSuffix(zipPath(e), ".zip")
-	script := "set -e\nmkdir -p " + modCacheDir + " /gobuild/empty\n" +
+	script := "set -e\nmkdir -p " + shQuote(modCacheDir+"/"+moduleDirName(e)) + " /gobuild/empty\n" +
 		"c=" + shQuote(gomodcache) + "\n" +
 		"[ ! -d \"$c/cache/download\" ] || [ \"$c\" -ef " + modCacheDir + " ] || export GOPROXY=\"file://$c/cache/download,${GOPROXY:-https://proxy.golang.org,direct}\"\n" +
 		"export GOMODCACHE=" + modCacheDir + " GOFLAGS=-modcacherw GOTOOLCHAIN=local GOWORK=off GOSUMDB=off\n" +
@@ -539,9 +543,9 @@ func downloadModule(ctr *dagger.Container, gomodcache string, e sumEntry) *dagge
 		"[ \"$(cat " + shQuote(modCacheDir+"/"+meta+".ziphash") + ")\" = " + shQuote(e.zip) + " ] || { echo " +
 		shQuote(q+": checksum mismatch: go.sum has "+e.zip) + " >&2; exit 1; }\n" +
 		"/gobuild/gohdr packmod " + modCacheDir + " " + shQuote(modCacheDir+"/"+packName(e)) + " " +
-		shQuote(moduleDirName(e)) + " " + shQuote(meta+".mod") + " " + shQuote(meta+".info") + " " + shQuote(meta+".ziphash") + "\n" +
-		// Not part of the module version: its extraction, which a build
-		// makes from the zip on its own; the go command's locks; and its
+		shQuote(zipPath(e)) + " " + shQuote(moduleDirName(e)) + " " + shQuote(meta+".mod") + " " + shQuote(meta+".info") + " " + shQuote(meta+".ziphash") + "\n" +
+		// Not part of the module version: its directory, which a build
+		// extracts from the zip on its own; the go command's locks; and its
 		// record of the queries that found it.
 		"find " + modCacheDir + " -mindepth 1 -maxdepth 1 ! -name cache ! -name " + shQuote(packName(e)) + " ! -name " + shQuote(packName(e)+".imports") + " -exec rm -rf {} +\n" +
 		"find " + modCacheDir + " -name '*.lock' -delete\nrm -rf " + modCacheDir + "/cache/download/sumdb " + modCacheDir + "/cache/vcs" +

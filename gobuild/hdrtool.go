@@ -31,12 +31,14 @@ var hdrTool = sync.OnceValue(func() *dagger.File {
 const hdrToolSrc = `package main
 
 import (
+	"archive/zip"
 	"bufio"
 	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -805,38 +807,99 @@ func fileSHA256(file string, generated bool) (string, error) {
 }
 
 // packmod writes to out a pack of what a plan reads of a downloaded module:
-// the files at rels under root, the module cache, each directory walked. A
-// Go file is its header (goHeader), as the plan reads of the source; a test
-// file and a testdata directory, which no build reads, are left out; any
-// other file is what a plan reads of it (planContent).
-func packmod(root, out string, rels []string) error {
-	var files []string
+// its files, read from its zip at zipRel under root, the module cache, as
+// the go command extracts them into dir, without extracting them; and the
+// files at rels under root, its metadata. A Go file is its header
+// (goHeader), as the plan reads of the source; a test file and a testdata
+// directory, which no build reads, are left out; any other file is what a
+// plan reads of it (planContent).
+func packmod(root, out, zipRel, dir string, rels []string) error {
+	type file struct {
+		rel  string
+		mode fs.FileMode
+		read func() ([]byte, error)
+	}
+	var files []file
+	z, err := zip.OpenReader(filepath.Join(root, zipRel))
+	if err != nil {
+		return err
+	}
+	defer z.Close()
+	prefix := ""
+	for _, zf := range z.File {
+		// Every file is under "<module>@<version>/", the module path not
+		// escaped, as the go command checks before it extracts one.
+		if prefix == "" {
+			at := strings.Index(zf.Name, "@")
+			slash := strings.Index(zf.Name[max(at, 0):], "/")
+			if at < 0 || slash < 0 {
+				return fmt.Errorf("%s: %s is not in a module's directory", zipRel, zf.Name)
+			}
+			prefix = zf.Name[:at+slash+1]
+		}
+		name, ok := strings.CutPrefix(zf.Name, prefix)
+		if !ok {
+			return fmt.Errorf("%s: %s is not under %s", zipRel, zf.Name, prefix)
+		}
+		if name == "" || strings.HasSuffix(name, "/") {
+			continue
+		}
+		elems := strings.Split(name, "/")
+		if slices.Contains(elems[:len(elems)-1], "testdata") || strings.HasSuffix(elems[len(elems)-1], "_test.go") {
+			continue
+		}
+		// The go command extracts every file read-only.
+		files = append(files, file{rel: dir + "/" + name, mode: 0o444, read: func() ([]byte, error) {
+			r, err := zf.Open()
+			if err != nil {
+				return nil, err
+			}
+			defer r.Close()
+			return io.ReadAll(r)
+		}})
+	}
 	for _, rel := range rels {
-		err := filepath.WalkDir(filepath.Join(root, rel), func(p string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if d.IsDir() {
-				if d.Name() == "testdata" {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if strings.HasSuffix(d.Name(), "_test.go") {
-				return nil
-			}
-			r, err := filepath.Rel(root, p)
-			if err != nil {
-				return err
-			}
-			files = append(files, filepath.ToSlash(r))
-			return nil
-		})
+		p := filepath.Join(root, rel)
+		fi, err := os.Lstat(p)
 		if err != nil {
 			return err
 		}
+		files = append(files, file{rel: rel, mode: fi.Mode() & fs.ModePerm, read: func() ([]byte, error) { return os.ReadFile(p) }})
 	}
-	sort.Strings(files)
+	sort.Slice(files, func(i, j int) bool { return files[i].rel < files[j].rel })
+	// Each file is read, decompressed from the zip, on its own: a large
+	// module's Go files are hundreds of MB.
+	datas := make([][]byte, len(files))
+	errs := make([]error, len(files))
+	sem := make(chan struct{}, runtime.NumCPU())
+	var wg sync.WaitGroup
+	for i, file := range files {
+		keep := planContent(file.rel)
+		if keep == "" {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			data, err := file.read()
+			switch {
+			case err != nil:
+				errs[i] = err
+			case keep == "header":
+				datas[i] = goHeader(file.rel, data)
+			case keep == "constraints":
+				datas[i] = leadingComments(data)
+			default:
+				datas[i] = data
+			}
+		}()
+	}
+	wg.Wait()
+	if err := errors.Join(errs...); err != nil {
+		return err
+	}
 	f, err := os.Create(out)
 	if err != nil {
 		return err
@@ -845,33 +908,12 @@ func packmod(root, out string, rels []string) error {
 	fmt.Fprintln(w, "gohdr 1")
 	// Each Go file's imports and build constraint: what discover follows.
 	var imports []string
-	for _, rel := range files {
-		p := filepath.Join(root, rel)
-		fi, err := os.Lstat(p)
-		if err != nil {
-			return err
+	for i, file := range files {
+		data := datas[i]
+		if planContent(file.rel) == "header" {
+			imports = append(imports, importLine(file.rel, data))
 		}
-		var data []byte
-		mode := fi.Mode() & (fs.ModePerm | fs.ModeSymlink)
-		if fi.Mode()&fs.ModeSymlink != 0 {
-			target, err := os.Readlink(p)
-			if err != nil {
-				return err
-			}
-			data = []byte(target)
-		} else if keep := planContent(rel); keep != "" {
-			if data, err = os.ReadFile(p); err != nil {
-				return err
-			}
-			switch keep {
-			case "header":
-				data = goHeader(rel, data)
-				imports = append(imports, importLine(rel, data))
-			case "constraints":
-				data = leadingComments(data)
-			}
-		}
-		fmt.Fprintf(w, "%s\n%o\n%d\n", rel, uint32(mode), len(data))
+		fmt.Fprintf(w, "%s\n%o\n%d\n", file.rel, uint32(file.mode), len(data))
 		w.Write(data)
 		w.WriteByte('\n')
 	}
@@ -1143,8 +1185,8 @@ func main() {
 	switch {
 	case len(args) == 3 && args[0] == "imports":
 		err = importsOfPack(args[1], args[2] == "tests")
-	case len(args) >= 3 && args[0] == "packmod":
-		err = packmod(args[1], args[2], args[3:])
+	case len(args) >= 5 && args[0] == "packmod":
+		err = packmod(args[1], args[2], args[3], args[4], args[5:])
 	case (len(args) == 3 || len(args) == 4) && args[0] == "unpackall":
 		err = unpackAll(args[1], args[2], args[3:]...)
 	case (len(args) == 4 || len(args) == 5) && args[0] == "unpack":
