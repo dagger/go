@@ -207,6 +207,52 @@ func TestHdrToolPackmod(t *testing.T) {
 	}
 }
 
+// gohdr packmod refuses a zip the go command would refuse to extract: one
+// with a path that leaves the module's directory, two paths that differ
+// only in case, or a file outside the module's directory. A plan unpacks
+// the pack, so such a path would be written there.
+func TestHdrToolPackmodRefuses(t *testing.T) {
+	dir := buildHdrTool(t)
+	for name, files := range map[string][]string{
+		"traversal": {"example.com/m@v1.0.0/go.mod", "example.com/m@v1.0.0/../../../src/go.sum"},
+		"collision": {"example.com/m@v1.0.0/go.mod", "example.com/m@v1.0.0/a.go", "example.com/m@v1.0.0/A.go"},
+		"outside":   {"example.com/m@v1.0.0/go.mod", "example.com/other@v1.0.0/x.go"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := filepath.Join(dir, name)
+			zipRel := "cache/download/example.com/m/@v/v1.0.0.zip"
+			if err := os.MkdirAll(filepath.Join(root, filepath.Dir(zipRel)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			var zipped bytes.Buffer
+			zw := zip.NewWriter(&zipped)
+			for _, f := range files {
+				w, err := zw.Create(f)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := w.Write([]byte("package m\n")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := zw.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, zipRel), zipped.Bytes(), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			pack := filepath.Join(root, "m.gohdr")
+			out, err := exec.Command(filepath.Join(dir, "gohdr"), "packmod", root, pack, zipRel, "example.com/m@v1.0.0").CombinedOutput()
+			if err == nil {
+				t.Fatalf("packmod packed it:\n%s", out)
+			}
+			if _, err := os.Stat(pack); err == nil {
+				t.Errorf("packmod wrote a pack")
+			}
+		})
+	}
+}
+
 // gohdr imports lists each go.mod's replacements of a module by a directory,
 // by the directory's path in the pack, and no other replacement.
 func TestHdrToolImportsReplace(t *testing.T) {

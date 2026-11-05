@@ -48,6 +48,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -55,6 +56,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 )
 
 // unpack writes out the pack at src under dst, and writes to list, one per
@@ -825,22 +828,15 @@ func packmod(root, out, zipRel, dir string, rels []string) error {
 		return err
 	}
 	defer z.Close()
-	prefix := ""
+	// Every file is under "<module>@<version>/", the module path not
+	// escaped, and the zip is checked as the go command checks one before
+	// it extracts it.
+	prefix := unescapeModule(dir) + "/"
+	if err := checkModuleZip(z.File, prefix); err != nil {
+		return fmt.Errorf("%s: %w", zipRel, err)
+	}
 	for _, zf := range z.File {
-		// Every file is under "<module>@<version>/", the module path not
-		// escaped, as the go command checks before it extracts one.
-		if prefix == "" {
-			at := strings.Index(zf.Name, "@")
-			slash := strings.Index(zf.Name[max(at, 0):], "/")
-			if at < 0 || slash < 0 {
-				return fmt.Errorf("%s: %s is not in a module's directory", zipRel, zf.Name)
-			}
-			prefix = zf.Name[:at+slash+1]
-		}
-		name, ok := strings.CutPrefix(zf.Name, prefix)
-		if !ok {
-			return fmt.Errorf("%s: %s is not under %s", zipRel, zf.Name, prefix)
-		}
+		name := strings.TrimPrefix(zf.Name, prefix)
 		if name == "" || strings.HasSuffix(name, "/") {
 			continue
 		}
@@ -924,6 +920,192 @@ func packmod(root, out, zipRel, dir string, rels []string) error {
 		return err
 	}
 	return os.WriteFile(out+".imports", []byte(strings.Join(imports, "")), 0o644)
+}
+
+// The limits the go command puts on a module zip's contents.
+const (
+	maxZipFile = 500 << 20
+	maxGoMod   = 16 << 20
+	maxLicense = 16 << 20
+)
+
+// checkModuleZip reports why files aren't a module zip the go command
+// would extract, as it checks one before extracting it (golang.org/x/mod's
+// zip.CheckZip): a file outside the module's directory, prefix; a path
+// that isn't clean, or isn't a module file path (checkFilePath); two paths
+// that differ only in case, or one that is both a file and a directory;
+// or contents larger than the go command's limits.
+func checkModuleZip(files []*zip.File, prefix string) error {
+	type entry struct {
+		path string
+		dir  bool
+	}
+	seen := map[string]entry{}
+	var collide func(p string, dir bool) error
+	collide = func(p string, dir bool) error {
+		fold := foldPath(p)
+		if other, ok := seen[fold]; ok {
+			switch {
+			case other.path != p:
+				return fmt.Errorf("case-insensitive file name collision: %q and %q", other.path, p)
+			case other.dir != dir:
+				return fmt.Errorf("entry %q is both a file and a directory", p)
+			case !dir:
+				return fmt.Errorf("multiple entries for file %q", p)
+			}
+		} else {
+			seen[fold] = entry{p, dir}
+		}
+		if parent := path.Dir(p); parent != "." {
+			return collide(parent, true)
+		}
+		return nil
+	}
+	var size uint64
+	for _, zf := range files {
+		name, ok := strings.CutPrefix(zf.Name, prefix)
+		if !ok {
+			return fmt.Errorf("%s: path does not have prefix %q", zf.Name, prefix)
+		}
+		if name == "" {
+			continue
+		}
+		dir := strings.HasSuffix(name, "/")
+		if dir {
+			name = name[:len(name)-1]
+		}
+		if path.Clean(name) != name {
+			return fmt.Errorf("%s: file path is not clean", zf.Name)
+		}
+		if err := checkFilePath(name); err != nil {
+			return fmt.Errorf("%s: %w", zf.Name, err)
+		}
+		if !dir {
+			sz := zf.UncompressedSize64
+			if sz > maxZipFile-size {
+				return fmt.Errorf("total uncompressed size of module contents too large (max size is %d bytes)", maxZipFile)
+			}
+			size += sz
+			if name == "go.mod" && sz > maxGoMod {
+				return fmt.Errorf("go.mod file too large (max size is %d bytes)", maxGoMod)
+			}
+			if name == "LICENSE" && sz > maxLicense {
+				return fmt.Errorf("LICENSE file too large (max size is %d bytes)", maxLicense)
+			}
+		}
+		if err := collide(name, dir); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkFilePath reports why p isn't a file path a module may hold, as
+// golang.org/x/mod's module.CheckFilePath does.
+func checkFilePath(p string) error {
+	switch {
+	case !utf8.ValidString(p):
+		return fmt.Errorf("malformed file path %q: invalid UTF-8", p)
+	case p == "":
+		return fmt.Errorf("malformed file path %q: empty string", p)
+	case strings.Contains(p, "//"):
+		return fmt.Errorf("malformed file path %q: double slash", p)
+	case strings.HasSuffix(p, "/"):
+		return fmt.Errorf("malformed file path %q: trailing slash", p)
+	}
+	for _, elem := range strings.Split(p, "/") {
+		if err := checkFileElem(elem); err != nil {
+			return fmt.Errorf("malformed file path %q: %w", p, err)
+		}
+	}
+	return nil
+}
+
+// badWindowsNames are the path element names Windows reserves, which no
+// module file path may have, whatever its extension.
+var badWindowsNames = []string{
+	"CON", "PRN", "AUX", "NUL",
+	"COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+	"LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+}
+
+// checkFileElem reports why elem isn't an element of a module file path:
+// empty, all dots, ending in a dot, a character no module file name may
+// hold, or a name Windows reserves.
+func checkFileElem(elem string) error {
+	switch {
+	case elem == "":
+		return errors.New("empty path element")
+	case strings.Count(elem, ".") == len(elem):
+		return fmt.Errorf("invalid path element %q", elem)
+	case strings.HasSuffix(elem, "."):
+		return errors.New("trailing dot in path element")
+	}
+	for _, r := range elem {
+		if !fileNameOK(r) {
+			return fmt.Errorf("invalid char %q", r)
+		}
+	}
+	short, _, _ := strings.Cut(elem, ".")
+	for _, bad := range badWindowsNames {
+		if strings.EqualFold(bad, short) {
+			return fmt.Errorf("%q disallowed as path element component on Windows", short)
+		}
+	}
+	return nil
+}
+
+// fileNameOK reports whether r may be in a module file name: an ASCII
+// letter or digit, the ASCII punctuation no shell or file system treats
+// specially, a space, or a non-ASCII letter.
+func fileNameOK(r rune) bool {
+	if r < utf8.RuneSelf {
+		const allowed = "!#$%&()+,-.=@[]^_{}~ "
+		return '0' <= r && r <= '9' || 'A' <= r && r <= 'Z' || 'a' <= r && r <= 'z' || strings.ContainsRune(allowed, r)
+	}
+	return unicode.IsLetter(r)
+}
+
+// foldPath is p case-folded, so two paths that differ only in case fold
+// to the same string.
+func foldPath(p string) string {
+	var b strings.Builder
+	for _, r := range p {
+		// unicode.SimpleFold cycles through a rune's case equivalents;
+		// the smallest one stands for all of them.
+		for {
+			next := unicode.SimpleFold(r)
+			if next <= r {
+				r = next
+				break
+			}
+			r = next
+		}
+		if 'A' <= r && r <= 'Z' {
+			r += 'a' - 'A'
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// unescapeModule is a module path or version as the module cache's
+// escaping ("!" and a lower-case letter for an upper-case one) names it.
+func unescapeModule(s string) string {
+	var b strings.Builder
+	upper := false
+	for _, r := range s {
+		if r == '!' {
+			upper = true
+			continue
+		}
+		if upper {
+			r = unicode.ToUpper(r)
+			upper = false
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // planContent is what a plan reads of a downloaded module's file at rel:
