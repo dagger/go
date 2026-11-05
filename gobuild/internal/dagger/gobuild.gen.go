@@ -53,11 +53,11 @@ type GobuildArchiveBuildsOpts struct {
 }
 
 // ArchiveBuilds compiles what Archives compiles, with its arguments, and
-// returns each package's build instead of the export driver's directory: the
-// directory the package's exec wrote, with its archives, as every build of
-// the package reads it from the cache. A cache that is to have exactly these
-// builds, such as the cache an engine image pre-warms, is filled from them.
-func (r *Gobuild) ArchiveBuilds(ctx context.Context, base *Container, source *Directory, headers *File, mountPath string, opts ...GobuildArchiveBuildsOpts) ([]Directory, error) {
+// returns what it read from the cache instead of the export driver's
+// directory: each package's build, each module download, and gohdr. A cache
+// that is to have exactly these results, such as the cache an engine image
+// pre-warms, is filled from them.
+func (r *Gobuild) ArchiveBuilds(base *Container, source *Directory, headers *File, mountPath string, opts ...GobuildArchiveBuildsOpts) *GobuildArchiveCache {
 	assertNotNil("base", base)
 	assertNotNil("source", source)
 	assertNotNil("headers", headers)
@@ -101,32 +101,10 @@ func (r *Gobuild) ArchiveBuilds(ctx context.Context, base *Container, source *Di
 	q = q.Arg("headers", headers)
 	q = q.Arg("mountPath", mountPath)
 
-	q = q.Select("id")
-
-	type archiveBuilds struct {
-		Id ID
+	return &GobuildArchiveCache{
+		query:     q,
+		refetchID: r.refetchID,
 	}
-
-	convert := func(fields []archiveBuilds) []Directory {
-		out := []Directory{}
-
-		for i := range fields {
-			val := *new(Directory).WithGraphQLQuery(selectNode(q.Root(), fields[i].Id, "Directory"))
-			out = append(out, val)
-		}
-
-		return out
-	}
-	var response []archiveBuilds
-
-	q = q.Bind(&response)
-
-	err := q.Execute(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	return convert(response), nil
 }
 
 // GobuildArchivesOpts contains options for Gobuild.Archives
@@ -391,6 +369,155 @@ func (r *Gobuild) TestBinary(base *Container, source *Directory, headers *File, 
 	q = q.Arg("headers", headers)
 	q = q.Arg("mountPath", mountPath)
 	q = q.Arg("pkg", pkg)
+
+	return new(File).WithGraphQLQuery(q)
+}
+
+// ArchiveCache is what a build reads from the cache that every build of its
+// packages with the same toolchain, flags and go.sum shares.
+type GobuildArchiveCache struct { // gobuild (../../:0:0)
+	query *querybuilder.Selection
+	// refetchID is set when this object is built through a field marked
+	// @reevaluate: it fetches its ID on every use, so each use evaluates that
+	// field again.
+	refetchID bool
+
+	id *ID
+}
+
+func (r *GobuildArchiveCache) WithGraphQLQuery(q *querybuilder.Selection) *GobuildArchiveCache {
+	return &GobuildArchiveCache{
+		query: q,
+		// The query's origin is unknown: it may go through a field that
+		// must be reevaluated.
+		refetchID: true,
+	}
+}
+
+// Each package's build: the directory the package's exec wrote, with its
+// archives, as every build of the package reads it from the cache.
+func (r *GobuildArchiveCache) Builds(ctx context.Context) ([]Directory, error) {
+	q := r.query.Select("builds")
+
+	q = q.Select("id")
+
+	type builds struct {
+		Id ID
+	}
+
+	convert := func(fields []builds) []Directory {
+		out := []Directory{}
+
+		for i := range fields {
+			val := *new(Directory).WithGraphQLQuery(selectNode(q.Root(), fields[i].Id, "Directory"))
+			out = append(out, val)
+		}
+
+		return out
+	}
+	var response []builds
+
+	q = q.Bind(&response)
+
+	err := q.Execute(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return convert(response), nil
+}
+
+// Each module version the build downloaded (go mod download), with its
+// plan pack and its zip, in the order of its module cache directory name.
+func (r *GobuildArchiveCache) Downloads(ctx context.Context) ([]Directory, error) {
+	q := r.query.Select("downloads")
+
+	q = q.Select("id")
+
+	type downloads struct {
+		Id ID
+	}
+
+	convert := func(fields []downloads) []Directory {
+		out := []Directory{}
+
+		for i := range fields {
+			val := *new(Directory).WithGraphQLQuery(selectNode(q.Root(), fields[i].Id, "Directory"))
+			out = append(out, val)
+		}
+
+		return out
+	}
+	var response []downloads
+
+	q = q.Bind(&response)
+
+	err := q.Execute(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return convert(response), nil
+}
+
+// A unique identifier for this GobuildArchiveCache.
+func (r *GobuildArchiveCache) ID(ctx context.Context) (ID, error) {
+	if r.id != nil {
+		return *r.id, nil
+	}
+	q := r.query.Select("id")
+
+	var response ID
+
+	q = q.Bind(&response)
+	if r.refetchID {
+		return response, q.Execute(ctx)
+	}
+	return memoizedID(ctx, r.query, func() (ID, error) {
+		err := q.Execute(ctx)
+		return response, err
+	})
+}
+
+// XXX_GraphQLType is an internal function. It returns the native GraphQL type name
+func (r *GobuildArchiveCache) XXX_GraphQLType() string {
+	return "GobuildArchiveCache"
+}
+
+// XXX_GraphQLIDType is an internal function. It returns the native GraphQL type name for the ID of this object
+func (r *GobuildArchiveCache) XXX_GraphQLIDType() string {
+	return "ID"
+}
+
+// XXX_GraphQLID is an internal function. It returns the underlying type ID
+func (r *GobuildArchiveCache) XXX_GraphQLID(ctx context.Context) (string, error) {
+	id, err := r.ID(ctx)
+	if err != nil {
+		return "", err
+	}
+	return string(id), nil
+}
+
+func (r *GobuildArchiveCache) MarshalJSON() ([]byte, error) {
+	id, err := r.ID(marshalCtx)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(id)
+}
+func (r *GobuildArchiveCache) UnmarshalJSON(bs []byte) error {
+	var id string
+	err := json.Unmarshal(bs, &id)
+	if err != nil {
+		return err
+	}
+	*r = GobuildArchiveCache{query: selectNode(Connect().QueryBuilder(), id, "GobuildArchiveCache")}
+	return nil
+}
+
+// gohdr, the tool the build's execs run.
+func (r *GobuildArchiveCache) Tool() *File {
+	q := r.query.Select("tool")
 
 	return new(File).WithGraphQLQuery(q)
 }

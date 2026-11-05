@@ -1606,11 +1606,13 @@ type GoModule {
   }
 
   """
-  The IDs of the builds archives reads, one directory per package: what each
-  package's exec wrote, with its archives, as every build of the package
-  reads it from the cache. A cache that is to have exactly these builds,
-  such as the cache an engine image pre-warms, is filled from them.
-  The arguments are archives'.
+  The IDs of what archives reads from the cache that every build of the
+  packages with the same toolchain, flags and go.sum shares: each package's
+  build (a directory: what its exec wrote, with its archives), each module
+  download (a directory: its plan pack and zip), and the tools the build runs
+  (gobuild's gohdr, a file, and gomod's go-includes helper, a container). A
+  cache that is to have exactly these results, such as the cache an engine
+  image pre-warms, is filled from them. The arguments are archives'.
   """
   archiveBuilds(
     ws: Workspace!,
@@ -1634,20 +1636,25 @@ type GoModule {
     if (gccgo(flags)) {
       raise "Go module " + path + ": a gccgo build has no archives"
     }
-    gobuild.archiveBuilds(
-      base: ctr,
-      image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
-      from: if (baseImage == null) { null } else { baseImage.withoutEntrypoint },
-      source: source(ws, test: noTests == false),
-      headers: lib.scan(ws).sync.file("_headers_.gohdr"),
-      mountPath: mountPath,
-      workdir: path,
-      flags: buildFlags,
-      dependencies: dependencies,
-      downloads: tool.downloads,
-      packages: packages,
-      tests: noTests == false,
-    ).{{id}}.map { build => build.id } rescue {
+    {
+      let cache = gobuild.archiveBuilds(
+        base: ctr,
+        image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
+        from: if (baseImage == null) { null } else { baseImage.withoutEntrypoint },
+        source: source(ws, test: noTests == false),
+        headers: lib.scan(ws).sync.file("_headers_.gohdr"),
+        mountPath: mountPath,
+        workdir: path,
+        flags: buildFlags,
+        dependencies: dependencies,
+        downloads: tool.downloads,
+        packages: packages,
+        tests: noTests == false,
+      )
+      cache.builds.{{id}}.map { build => build.id } +
+        cache.downloads.{{id}}.map { download => download.id } +
+        [cache.tool.id, gomod.includesHelper.id]
+    } rescue {
       err: Error => raise "Go archive builds of module " + path + ": " + err.message
     }
   }

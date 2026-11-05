@@ -139,8 +139,9 @@ type downloader struct {
 }
 
 // discover downloads the modules a build of the source may read, as the go
-// command's loader finds them, and returns a directory of their plan packs
-// and their zips by module cache directory name. It follows packages: from
+// command's loader finds them, and returns a directory of their plan packs,
+// their zips by module cache directory name, and their downloads in name
+// order. It follows packages: from
 // the package in the source's directory pkgDir, or with none, every package
 // of the source, through the source's own packages, each imported package's
 // module is downloaded,
@@ -151,7 +152,7 @@ type downloader struct {
 // the plan reads that discover missed, such as one a replace renames, the
 // plan fetches itself, and the build downloads its zip on its own (lazyZip).
 // With them come the directories whose Go files the plan reads (planDirs).
-func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDir string) (*dagger.Directory, map[string]*dagger.File, planDirs, error) {
+func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDir string) (*dagger.Directory, map[string]*dagger.File, []*dagger.Directory, planDirs, error) {
 	byPath := map[string][]sumEntry{}
 	for _, e := range d.sums {
 		if e.zip != "" {
@@ -272,7 +273,7 @@ func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDir str
 	names := make([]string, 0, len(modules))
 	for name, m := range modules {
 		if m.err != nil {
-			return nil, nil, planDirs{}, m.err
+			return nil, nil, nil, planDirs{}, m.err
 		}
 		names = append(names, name)
 	}
@@ -284,18 +285,20 @@ func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDir str
 	sort.Strings(names)
 	packs := make([]*dagger.File, len(names))
 	zips := map[string]*dagger.File{}
+	downloads := make([]*dagger.Directory, len(names))
 	for i, name := range names {
 		m := modules[name]
 		packs[i] = m.dir.File(packName(m.e))
 		zips[name] = m.dir.File(zipPath(m.e))
+		downloads[i] = m.dir
 	}
 	if len(packs) == 0 {
-		return nil, zips, dirs, nil
+		return nil, zips, downloads, dirs, nil
 	}
 	// One directory of every pack, made in one step: merged one by one,
 	// hundreds of them would stack a layer each, past what a mount takes.
 	dir, err := core.NewDirectory().WithFiles(".", packs).Sync(ctx)
-	return dir, zips, dirs, err
+	return dir, zips, downloads, dirs, err
 }
 
 // inTestdata reports whether a source directory is in a testdata directory,

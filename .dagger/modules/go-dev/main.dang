@@ -1005,21 +1005,19 @@ type GoDev {
   }
 
   """
-  A module's archive builds are the builds its archives come from: one per
-  package the archives hold, each its own.
+  A module's archive builds are what its archives read from the cache: a
+  build per package the archives hold, each its own, a download per module
+  version the build read, and the build's two tools.
   """
-  archiveBuildsCheck: Void @check {
-    let ws = directory
-      .withNewFile("go.mod", "module example.com/app\n\ngo 1.22\n")
-      .withNewFile("main.go", "package main\n\nimport \"strings\"\n\nfunc main() { println(strings.ToUpper(\"x\")) }\n")
-      .asWorkspace
-    let mod = go(version: "1.27.3").module(ws, ".")
+  archiveBuildsCheck(ws: Workspace!): Void @check {
+    let mod = go(version: "1.27.3").module(ws, downloadsFixturePath)
     let built = mod.archiveBuilds(ws, dependencies: true, packages: ["."], noTests: true)
     let archived = mod.archives(ws, dependencies: true, packages: ["."], noTests: true).directory("archives").entries
-    assert(built.length > 0, "no archive builds")
-    assert(built.length == archived.length, "archive builds: " + toString(built.length) + ", archives: " + toString(archived.length))
+    # The fixture's one module version is golang.org/x/sync's.
+    assert(archived.length > 0, "no archives")
+    assert(built.length == archived.length + 1 + 2, "archive builds: " + toString(built.length) + ", for " + toString(archived.length) + " archives, 1 module download and 2 tools")
     let distinct = built.reduce([]) { seen, id => if (seen.contains(id)) { seen } else { seen + [id] } }
-    assert(distinct.length == built.length, "archive builds repeat a build")
+    assert(distinct.length == built.length, "archive builds repeat a result")
   }
 
   """

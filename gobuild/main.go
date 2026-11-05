@@ -346,11 +346,24 @@ func archiveWalk(ctx context.Context, base *dagger.Container, image string, from
 	return &archiveWalked{build: b, plan: p, envFlags: envFlags, blocks: blocks, results: results, order: order}, nil
 }
 
+// ArchiveCache is what a build reads from the cache that every build of its
+// packages with the same toolchain, flags and go.sum shares.
+type ArchiveCache struct {
+	// Each package's build: the directory the package's exec wrote, with its
+	// archives, as every build of the package reads it from the cache.
+	Builds []*dagger.Directory
+	// Each module version the build downloaded (go mod download), with its
+	// plan pack and its zip, in the order of its module cache directory name.
+	Downloads []*dagger.Directory
+	// gohdr, the tool the build's execs run.
+	Tool *dagger.File
+}
+
 // ArchiveBuilds compiles what Archives compiles, with its arguments, and
-// returns each package's build instead of the export driver's directory: the
-// directory the package's exec wrote, with its archives, as every build of
-// the package reads it from the cache. A cache that is to have exactly these
-// builds, such as the cache an engine image pre-warms, is filled from them.
+// returns what it read from the cache instead of the export driver's
+// directory: each package's build, each module download, and gohdr. A cache
+// that is to have exactly these results, such as the cache an engine image
+// pre-warms, is filled from them.
 func (m *Gobuild) ArchiveBuilds(
 	ctx context.Context,
 	// The Go container to build in, as for Binary.
@@ -385,7 +398,7 @@ func (m *Gobuild) ArchiveBuilds(
 	// With the packages' test variants, as for Archives.
 	// +default=true
 	tests bool,
-) ([]*dagger.Directory, error) {
+) (*ArchiveCache, error) {
 	w, err := archiveWalk(ctx, base, image, from, source, headers, mountPath, workdir, flags, dependencies, downloads, packages, tests)
 	if err != nil {
 		return nil, err
@@ -394,7 +407,7 @@ func (m *Gobuild) ArchiveBuilds(
 	for _, bl := range w.order {
 		dirs = append(dirs, w.results[bl.id].dir)
 	}
-	return dirs, nil
+	return &ArchiveCache{Builds: dirs, Downloads: w.build.downloads, Tool: hdrTool()}, nil
 }
 
 // listFields are the fields of go list's output Archives reads: the
@@ -637,6 +650,9 @@ type build struct {
 	// zips is each downloaded module's zip, by its directory name in the
 	// module cache.
 	zips map[string]*dagger.File
+	// downloads is each downloaded module's download (downloadModule), in
+	// the order of its directory name in the module cache.
+	downloads []*dagger.Directory
 	// sums is the checksum of each downloaded module, by its directory name
 	// in the module cache.
 	sums map[string]string
@@ -889,7 +905,7 @@ go env GOOS GOARCH CGO_ENABLED GOVERSION > /gobuild/goenv
 			return nil, fmt.Errorf("source imports: %w", listed.err)
 		}
 		var dirs planDirs
-		if b.packs, b.zips, dirs, err = d.discover(ctx, parseSourceImports(d.target, listed.out), pkgDir); err != nil {
+		if b.packs, b.zips, b.downloads, dirs, err = d.discover(ctx, parseSourceImports(d.target, listed.out), pkgDir); err != nil {
 			return nil, fmt.Errorf("go mod download: %w", err)
 		}
 		mods := strings.Join(dirs.mods, "\n")

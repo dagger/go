@@ -58,17 +58,58 @@ func (r *Gobuild) UnmarshalJSON(bs []byte) error {
 	return nil
 }
 
+func (r ArchiveCache) MarshalJSON() ([]byte, error) {
+	var concrete struct {
+		Builds    []*dagger.Directory
+		Downloads []*dagger.Directory
+		Tool      *dagger.File
+	}
+	concrete.Builds = r.Builds
+	concrete.Downloads = r.Downloads
+	concrete.Tool = r.Tool
+	return json.Marshal(&concrete)
+}
+
+func (r *ArchiveCache) UnmarshalJSON(bs []byte) error {
+	var concrete struct {
+		Builds    []*dagger.Directory
+		Downloads []*dagger.Directory
+		Tool      *dagger.File
+	}
+	err := json.Unmarshal(bs, &concrete)
+	if err != nil {
+		return err
+	}
+	r.Builds = concrete.Builds
+	r.Downloads = concrete.Downloads
+	r.Tool = concrete.Tool
+	return nil
+}
+
 func DaggerDispatch(ctx context.Context, parentJSON []byte, parentName string, fnName string, inputArgs map[string][]byte) (_ any, err error) {
 	setMarshalContext(ctx)
 	_ = inputArgs
 	if parentName == "" {
 		switch fnName {
+		case "ArchiveCache", "archiveCache":
+			parentName = "ArchiveCache"
+			fnName = ""
 		case "Gobuild", "gobuild":
 			parentName = "Gobuild"
 			fnName = ""
 		}
 	}
 	switch parentName {
+	case "ArchiveCache":
+		if fnName == "New" {
+			fnName = ""
+		}
+		switch fnName {
+		case "":
+			return &ArchiveCache{}, nil
+		default:
+			return nil, fmt.Errorf("unknown function %s", fnName)
+		}
 	case "Gobuild":
 		if fnName == "New" {
 			fnName = ""
