@@ -593,7 +593,10 @@ func (index *localIndex) testDirectoriesFor(moduleRoot string) []string {
 	return testDirectoriesFromFiles(testFiles)
 }
 
-// replaceModules resolves local go.mod replace targets to module roots.
+// replaceModules resolves local go.mod replace targets to module roots. An
+// absent target of a module go.mod doesn't require is left to go: go build
+// reads a replacement only for a module the build needs, and reports a
+// missing target itself if it does.
 func (index *localIndex) replaceModules(moduleRoot string) ([]string, error) {
 	goModPath := path.Join(moduleRoot, "go.mod")
 	goMod, err := index.goMod(moduleRoot)
@@ -601,6 +604,10 @@ func (index *localIndex) replaceModules(moduleRoot string) ([]string, error) {
 		return nil, err
 	}
 
+	required := make(map[string]bool, len(goMod.Require))
+	for _, require := range goMod.Require {
+		required[require.Mod.Path] = true
+	}
 	var roots []string
 	for _, replace := range goMod.Replace {
 		if !isLocalReplace(replace) {
@@ -609,6 +616,14 @@ func (index *localIndex) replaceModules(moduleRoot string) ([]string, error) {
 		target := strings.TrimSuffix(replace.New.Path, "/")
 		root, ok := containingModuleDir(index.moduleSet, path.Join(path.Dir(goModPath), target))
 		if !ok {
+			// go build reads a replacement only for a module the build needs.
+			// When go.mod doesn't list the module, the replace is usually
+			// unused, and go build never looks for its target; when a
+			// dependency's go.mod does need it, go reports the missing target
+			// at build time, as it does without dagger/go.
+			if !required[replace.Old.Path] {
+				continue
+			}
 			return nil, fmt.Errorf("%s: no Go module found for local replace target: %s", replacePosition(goModPath, replace), replace.New.Path)
 		}
 		roots = append(roots, root)

@@ -436,6 +436,32 @@ func TestUnresolvableReplaceNamesDeclaringLine(t *testing.T) {
 	}
 }
 
+// go build reads a local replace's target only for a module the build needs.
+// A replace of a module go.mod doesn't list, with nothing else needing it, is
+// unused, and go build doesn't look for its target. The scan must not fail on
+// it either, or a module that builds with go build doesn't build here.
+func TestUnusedReplaceOfAbsentTargetIsIgnored(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"app/go.mod": "module example.com/app\n\n" +
+			"go 1.25\n\n" +
+			"replace example.com/unused => ../nowhere\n",
+		"app/app.go": "package app\n",
+	})
+	index, err := indexLocal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	includes, err := index.includesFor("app", false, false)
+	if err != nil {
+		t.Fatalf("an unused local replace failed the scan: %v", err)
+	}
+	for _, include := range includes {
+		if strings.Contains(include, "nowhere") {
+			t.Fatalf("an unused replace's target is included: %q", includes)
+		}
+	}
+}
+
 // One module the scan cannot read must not cost every other module its slice
 // of the scan: the whole workspace shares one pass.
 func TestScanRecordsFailurePerModuleAndCarriesOn(t *testing.T) {
