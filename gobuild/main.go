@@ -1065,8 +1065,8 @@ func (b *build) withModules(ctr *dagger.Container) *dagger.Container {
 
 // unpackHeaders is the script that unpacks, for a plan, the build's plan
 // packs into the module cache, only in the directories the plan reads when
-// they're known, and copies the source's headers (planHeaders), mounted at
-// /gobuild/hdrsrc, into the source.
+// they're known, and the pack of the source's headers the plan reads
+// (planHeaders), mounted at /gobuild/src.hdr, into the source.
 func (b *build) unpackHeaders() string {
 	script := ""
 	if b.packs != nil {
@@ -1076,51 +1076,52 @@ func (b *build) unpackHeaders() string {
 		}
 		script += " && "
 	}
-	return script + "cp -pPR /gobuild/hdrsrc/. " + shQuote(b.roots.Src) + "/"
+	// The list is planHeaders', made from the whole pack.
+	return script + "/gobuild/gohdr unpack /gobuild/src.hdr " + shQuote(b.roots.Src) + " /dev/null"
 }
 
-// planHeaders is what a plan reads of the source's Go files: from the header
-// pack, the headers of the Go files in the directories the plan reads, when
-// they're known (planDirs), at their paths in the source; and the pack's list
-// of its Go files in directories named like Go files, the plan's goDirs.
+// planHeaders is what a plan reads of the source's Go files: a pack of the
+// headers that "gohdr unpack" writes from the source's header pack with the
+// directories the plan reads, when they're known (planDirs); and the whole
+// pack's list of its Go files in directories named like Go files, the plan's
+// goDirs.
 //
-// They are unpacked in an exec of their own, and the plan mounts its output,
-// which is keyed by its content, so the plan follows only the headers it
-// reads. Unpacked in the plan itself, they were keyed by the whole pack: a
-// change to any Go file's imports anywhere in the workspace, another
-// module's included, ran the plan again, and its go command, for a plan the
-// same as before.
-func (b *build) planHeaders(ctx context.Context, headers *dagger.File) (*dagger.Directory, *dagger.File, error) {
+// They are made by an exec of their own, and each is read from its evaluated
+// output, so it is keyed by its content: the plan follows only the headers it
+// reads. With the whole pack, the plan was keyed by every Go file's imports
+// in the workspace: a change to any of them, another module's included, ran
+// the plan again, and its go command, for the same plan.
+func (b *build) planHeaders(ctx context.Context, headers *dagger.File) (*dagger.File, *dagger.File, error) {
 	ctr := core.NewContainer().From(toolImage).
 		WithMountedFile("/gobuild/gohdr", hdrTool(), dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
 		WithMountedFile("/gobuild/src.hdr", headers, dagger.ContainerWithMountedFileOpts{ReadOnly: true})
-	script := "mkdir -p /gobuild/hdr/src && /gobuild/gohdr unpack /gobuild/src.hdr /gobuild/hdr/src /gobuild/hdr/godirs.txt"
+	cmd := []string{"/gobuild/gohdr", "subset", "/gobuild/src.hdr", "/gobuild/hdr/plan.hdr", "/gobuild/hdr/godirs.txt"}
 	if b.planSrc != nil {
 		ctr = ctr.WithNewFile("/gobuild/plandirs/src", *b.planSrc)
-		script += " /gobuild/plandirs/src"
+		cmd = append(cmd, "/gobuild/plandirs/src")
 	}
-	out, err := ctr.WithExec([]string{"sh", "-c", script}, bare).Directory("/gobuild/hdr").Sync(ctx)
+	out, err := ctr.WithExec([]string{"sh", "-c", "mkdir -p /gobuild/hdr && " + shJoin(cmd)}, bare).Directory("/gobuild/hdr").Sync(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
-	src, err := out.Directory("src").Sync(ctx)
+	pack, err := out.File("plan.hdr").Sync(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
-	return src, out.File("godirs.txt"), nil
+	return pack, out.File("godirs.txt"), nil
 }
 
 // planWith makes a plan as plan does, with goCmd the go command that prints
 // it, run after pre, which may be empty or a command ending in "&&".
 func (b *build) planWith(ctx context.Context, headers *dagger.File, pre, goCmd string) (*planned, error) {
-	hdrSrc, goDirs, err := b.planHeaders(ctx, headers)
+	planHdr, goDirs, err := b.planHeaders(ctx, headers)
 	if err != nil {
 		return nil, err
 	}
 	ran := b.withModules(b.base.
 		WithMountedFile("/gobuild/gohdr", hdrTool())).
 		WithMountedDirectory(b.roots.Src, planSource(b.src)).
-		WithMountedDirectory("/gobuild/hdrsrc", hdrSrc, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true}).
+		WithMountedFile("/gobuild/src.hdr", planHdr).
 		// An empty build cache, so the plan holds every step.
 		WithEnvVariable("GOCACHE", "/gobuild/plancache").
 		// A failed plan prints go build's error, such as a //go:embed
@@ -1174,14 +1175,14 @@ func (b *build) testmain(ctx context.Context, headers *dagger.File, flags []stri
 	for i, c := range cmd {
 		quoted[i] = shQuote(c)
 	}
-	hdrSrc, _, err := b.planHeaders(ctx, headers)
+	planHdr, _, err := b.planHeaders(ctx, headers)
 	if err != nil {
 		return nil, err
 	}
 	return b.withModules(b.base.
 		WithMountedFile("/gobuild/gohdr", hdrTool())).
 		WithMountedDirectory(b.roots.Src, planSource(b.src)).
-		WithMountedDirectory("/gobuild/hdrsrc", hdrSrc, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true}).
+		WithMountedFile("/gobuild/src.hdr", planHdr).
 		WithMountedDirectory("/gobuild/tests", tests).
 		WithEnvVariable("GOCACHE", "/gobuild/plancache").
 		WithExec([]string{"sh", "-c", b.unpackHeaders() +

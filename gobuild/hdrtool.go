@@ -99,6 +99,39 @@ func unpackAll(dir, dst string, dirs ...string) error {
 	return writeFiles(files)
 }
 
+// subset writes to out, as a pack, the files unpack writes from the pack at
+// src with dirs (planFiles), and to list the whole pack's Go files in a
+// directory named like a Go file, as unpack lists them: what a plan reads of
+// the pack, in a file of its own, which changes only when one of them does.
+func subset(src, out, list string, dirs ...string) error {
+	files, listed, err := readPack(src, "")
+	if err != nil {
+		return err
+	}
+	if files, err = planFiles(files, dirs); err != nil {
+		return err
+	}
+	f, err := os.Create(out)
+	if err != nil {
+		return err
+	}
+	w := bufio.NewWriter(f)
+	fmt.Fprintln(w, "gohdr 1")
+	for _, file := range files {
+		fmt.Fprintf(w, "%s\n%o\n%d\n", file.rel, uint32(file.mode), len(file.data))
+		w.Write(file.data)
+		w.WriteByte('\n')
+	}
+	if err := w.Flush(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.WriteFile(list, []byte(listed), 0o644)
+}
+
 // planFiles is files without the Go files a plan doesn't read, with dirs
 // one file, the list of the directories it reads Go files in: those of the
 // packages it may load. Under a directory there with a //go:embed line,
@@ -1382,6 +1415,8 @@ func main() {
 		err = unpackAll(args[1], args[2], args[3:]...)
 	case (len(args) == 4 || len(args) == 5) && args[0] == "unpack":
 		err = unpack(args[1], args[2], args[3], args[4:]...)
+	case (len(args) == 4 || len(args) == 5) && args[0] == "subset":
+		err = subset(args[1], args[2], args[3], args[4:]...)
 	case len(args) == 2 && args[0] == "weigh":
 		err = weigh(args[1])
 	case len(args) == 2 && args[0] == "sizes":
@@ -1393,7 +1428,7 @@ func main() {
 	case len(args) == 5 && args[0] == "manifest":
 		err = manifest(args[1], args[2], args[3], args[4])
 	default:
-		err = fmt.Errorf("usage: gohdr unpack <pack> <dir> <list>, gohdr weigh <plan>, gohdr sizes <dir>, gohdr cc <plan>, gohdr linkid <importcfg> <salt>, or gohdr manifest <list> <env> <entries> <tags>")
+		err = fmt.Errorf("usage: gohdr unpack <pack> <dir> <list>, gohdr subset <pack> <out> <list>, gohdr weigh <plan>, gohdr sizes <dir>, gohdr cc <plan>, gohdr linkid <importcfg> <salt>, or gohdr manifest <list> <env> <entries> <tags>")
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gohdr:", err)

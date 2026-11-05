@@ -6,12 +6,14 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -136,6 +138,138 @@ func TestHdrToolUnpackPlanDirs(t *testing.T) {
 // as the go command would extract it: Go files as their headers, C and
 // assembly as their leading comments, the module's metadata whole, any other
 // file empty, and no test file nor anything in a testdata directory.
+// gohdr subset writes, as a pack, exactly what gohdr unpack writes with the
+// plan's directories, and the whole pack's list of Go files in directories
+// named like Go files. A plan mounts it in place of the whole pack, so it
+// must change when a file the plan reads changes, and only then.
+func TestHdrToolSubset(t *testing.T) {
+	dir := buildHdrTool(t)
+	gohdr := filepath.Join(dir, "gohdr")
+	type entry struct{ mode, data string }
+	base := map[string]entry{
+		"go.mod":              {"644", "module m\n"},
+		"main.go":             {"644", "package main\n\nimport \"m/lib\"\n"},
+		"lib/lib.go":          {"755", "package lib\n"},
+		"lib/lib.s":           {"644", "TEXT x(SB)\n"},
+		"lib/link.go":         {strconv.FormatUint(uint64(os.ModeSymlink|0o777), 8), "lib.go"},
+		"other/other.go":      {"644", "package other\n"},
+		"other/data.txt":      {"644", "data\n"},
+		"tmpl/tmpl.go":        {"644", "package tmpl\n\nimport _ \"embed\"\n\n//go:embed skel\nvar skel string\n"},
+		"tmpl/skel/x.go":      {"644", "package skel\n"},
+		"gen.go/inner.go":     {"644", "package gen\n"},
+		"unread/deep/deep.go": {"644", "package deep\n"},
+	}
+	writePack := func(name string, files map[string]entry) string {
+		var pack bytes.Buffer
+		pack.WriteString("gohdr 1\n")
+		names := make([]string, 0, len(files))
+		for f := range files {
+			names = append(names, f)
+		}
+		sort.Strings(names)
+		for _, f := range names {
+			fmt.Fprintf(&pack, "%s\n%s\n%d\n%s\n", f, files[f].mode, len(files[f].data), files[f].data)
+		}
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, pack.Bytes(), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	run := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command(gohdr, args...).CombinedOutput(); err != nil {
+			t.Fatalf("gohdr %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	read := func(path string) string {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	// tree is every file and symlink under root: its mode and its contents
+	// or target.
+	tree := func(root string) map[string]string {
+		t.Helper()
+		got := map[string]string{}
+		err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			rel, _ := filepath.Rel(root, p)
+			info, err := os.Lstat(p)
+			if err != nil {
+				return err
+			}
+			content := ""
+			if info.Mode()&os.ModeSymlink != 0 {
+				content, err = os.Readlink(p)
+			} else {
+				var data []byte
+				data, err = os.ReadFile(p)
+				content = string(data)
+			}
+			got[rel] = info.Mode().String() + " " + content
+			return err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	dirs := filepath.Join(dir, "dirs")
+	if err := os.WriteFile(dirs, []byte(".\nlib\ntmpl"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pack := writePack("src.hdr", base)
+
+	// What a plan unpacks from the subset is what it unpacked from the
+	// whole pack with its directories, and the list is the whole pack's.
+	run("unpack", pack, filepath.Join(dir, "direct"), filepath.Join(dir, "direct.txt"), dirs)
+	run("subset", pack, filepath.Join(dir, "plan.hdr"), filepath.Join(dir, "subset.txt"), dirs)
+	run("unpack", filepath.Join(dir, "plan.hdr"), filepath.Join(dir, "staged"), os.DevNull)
+	if got, want := tree(filepath.Join(dir, "staged")), tree(filepath.Join(dir, "direct")); !reflect.DeepEqual(got, want) {
+		t.Errorf("unpacked from the subset:\n%v\nwant:\n%v", got, want)
+	}
+	if got, want := read(filepath.Join(dir, "subset.txt")), read(filepath.Join(dir, "direct.txt")); got != want || want != "gen.go/inner.go\n" {
+		t.Errorf("subset listed %q, unpack %q, want %q", got, want, "gen.go/inner.go\n")
+	}
+
+	// Without directories, the subset is the whole pack.
+	run("subset", pack, filepath.Join(dir, "all.hdr"), os.DevNull)
+	if got, want := read(filepath.Join(dir, "all.hdr")), read(pack); got != want {
+		t.Errorf("subset without directories:\n%s\nwant the pack:\n%s", got, want)
+	}
+
+	// The subset changes with a header the plan reads, an embedded file
+	// included, and not with one it doesn't.
+	planned := read(filepath.Join(dir, "plan.hdr"))
+	for _, c := range []struct {
+		file    string
+		changes bool
+	}{
+		{"unread/deep/deep.go", false},
+		{"other/other.go", false},
+		{"lib/lib.go", true},
+		{"tmpl/skel/x.go", true},
+		{"other/data.txt", true},
+		{"go.mod", true},
+	} {
+		files := maps.Clone(base)
+		e := files[c.file]
+		e.data += "import _ \"fmt\"\n"
+		files[c.file] = e
+		changed := writePack("changed.hdr", files)
+		run("subset", changed, filepath.Join(dir, "changed-plan.hdr"), os.DevNull, dirs)
+		if got := read(filepath.Join(dir, "changed-plan.hdr")) != planned; got != c.changes {
+			t.Errorf("a change to %s changed the subset: %v, want %v", c.file, got, c.changes)
+		}
+	}
+}
+
 func TestHdrToolPackmod(t *testing.T) {
 	dir := buildHdrTool(t)
 	root := filepath.Join(dir, "mc")
