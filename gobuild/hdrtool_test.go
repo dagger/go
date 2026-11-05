@@ -156,6 +156,8 @@ func TestHdrToolSubset(t *testing.T) {
 		"other/data.txt":      {"644", "data\n"},
 		"tmpl/tmpl.go":        {"644", "package tmpl\n\nimport _ \"embed\"\n\n//go:embed skel\nvar skel string\n"},
 		"tmpl/skel/x.go":      {"644", "package skel\n"},
+		"tmpl/skel/shared.go": {"644", "package tmpl\n"},
+		"tmpl/shared.go":      {strconv.FormatUint(uint64(os.ModeSymlink|0o777), 8), "skel/shared.go"},
 		"gen.go/inner.go":     {"644", "package gen\n"},
 		"unread/deep/deep.go": {"644", "package deep\n"},
 	}
@@ -237,6 +239,9 @@ func TestHdrToolSubset(t *testing.T) {
 	if got := read(filepath.Join(dir, "staged/tmpl/skel/x.go")); got != "" {
 		t.Errorf("an embedded Go file the plan doesn't read was unpacked with %q, want it empty", got)
 	}
+	if got, want := read(filepath.Join(dir, "staged/tmpl/shared.go")), base["tmpl/skel/shared.go"].data; got != want {
+		t.Errorf("a Go file read through a symlink was unpacked with %q, want %q", got, want)
+	}
 	if got, want := read(filepath.Join(dir, "subset.txt")), read(filepath.Join(dir, "direct.txt")); got != want || want != "gen.go/inner.go\n" {
 		t.Errorf("subset listed %q, unpack %q, want %q", got, want, "gen.go/inner.go\n")
 	}
@@ -260,6 +265,8 @@ func TestHdrToolSubset(t *testing.T) {
 		// An embedded Go file is read by its name alone.
 		{"tmpl/skel/x.go", false},
 		{"tmpl/skel/new.go", true},
+		// One a package the plan reads links to is read whole.
+		{"tmpl/skel/shared.go", true},
 		{"other/data.txt", true},
 		{"go.mod", true},
 	} {
