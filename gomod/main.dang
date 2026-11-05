@@ -448,10 +448,16 @@ type Gomod {
   defaultGoVersion: String! { scannerVersion }
 
   """
-  The image goContainer starts from for a Go version.
+  The image goContainer starts from for a Go version. The version this
+  module's tools build with is named by digest, so a container from it
+  needs no registry lookup and is the same in every session.
   """
   goImage(version: String!): String! {
-    "golang:" + version + "-alpine"
+    if (version == scannerVersion) {
+      "golang:" + version + "-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb"
+    } else {
+      "golang:" + version + "-alpine"
+    }
   }
 
   """

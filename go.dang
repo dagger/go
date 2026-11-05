@@ -97,6 +97,14 @@ type Go {
   warnings: [String!]! = []
 
   """
+  The image a Go container at version starts from, as every build here
+  names it.
+  """
+  image(version: String!): String! {
+    gomod.goImage(version)
+  }
+
+  """
   Extra workspace files mounted for Go commands, as include patterns.
   """
   includeExtraFiles: [String!]! = []
