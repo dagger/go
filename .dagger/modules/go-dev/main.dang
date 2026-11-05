@@ -2275,7 +2275,7 @@ type GoDev {
   """
   gobuildCheck(ws: Workspace!): Void @check {
     container
-      .from("golang:1.26.1-alpine")
+      .from("golang:1.27.3-alpine")
       .withDirectory("/src", ws.directory("/gobuild"))
       .withWorkdir("/src")
       .withExec(["go", "test", "./..."])
