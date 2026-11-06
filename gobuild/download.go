@@ -193,10 +193,7 @@ func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDir str
 			gate <- struct{}{}
 			defer func() { <-gate }()
 			// A download is the same whichever platform made it.
-			dir, err := declared(ctx, d.download(e), d.target.platform())
-			if err == nil {
-				dir, err = dir.Sync(ctx)
-			}
+			dir, err := d.download(e).WithPlatform(core.Platform(d.target.platform())).Sync(ctx)
 			var list string
 			if err == nil {
 				list, err = dir.File(packName(e) + ".imports").Contents(ctx)

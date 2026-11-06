@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"sync"
 
 	"dagger.io/dagger/core"
@@ -27,8 +26,8 @@ const (
 // pinned toolchain, statically, and runs in whatever image the module builds
 // with. It is one object for each image and target, so the SDK asks the
 // engine for its ID once, not once for every exec that mounts it.
-func hdrTools(ctx context.Context, image, platform string) (*dagger.Directory, error) {
-	return toolsFor(ctx, "gohdr", image, platform, func(goarch string) *dagger.File {
+func hdrTools(image, platform string) *dagger.Directory {
+	return toolsFor("gohdr", image, platform, func(goarch string) *dagger.File {
 		return core.NewContainer().From(image).
 			WithEnvVariable("CGO_ENABLED", "0").
 			WithEnvVariable("GOOS", "linux").
@@ -43,19 +42,16 @@ func hdrTools(ctx context.Context, image, platform string) (*dagger.Directory, e
 // toolsFor is machineTools' directory of the tool name, built by build in
 // image and declared for platform, made once for each name, image and
 // platform.
-func toolsFor(ctx context.Context, name, image, platform string, build func(goarch string) *dagger.File) (*dagger.Directory, error) {
+func toolsFor(name, image, platform string, build func(goarch string) *dagger.File) *dagger.Directory {
 	key := name + "\x00" + image + "\x00" + platform
 	toolsMu.Lock()
 	defer toolsMu.Unlock()
 	if dir, ok := toolsMade[key]; ok {
-		return dir, nil
+		return dir
 	}
-	dir, err := machineTools(ctx, name, platform, build)
-	if err != nil {
-		return nil, err
-	}
+	dir := machineTools(name, platform, build)
 	toolsMade[key] = dir
-	return dir, nil
+	return dir
 }
 
 var (

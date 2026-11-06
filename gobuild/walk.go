@@ -48,7 +48,7 @@ type node struct {
 	Link bool `json:"link,omitempty"`
 	// Cgo is set when the package runs the cgo tool and the C compiler,
 	// whose output depends on the machine's C toolchain: it isn't declared
-	// for its target (declared).
+	// for its target (Directory.withPlatform).
 	Cgo bool `json:"cgo,omitempty"`
 }
 
@@ -269,9 +269,7 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 			// What a package compiles is the same whichever platform's
 			// toolchain compiles it, unless it runs the C compiler.
 			if !n.Cgo {
-				if out, r.err = declared(ctx, out, w.platform); r.err != nil {
-					return
-				}
+				out = out.WithPlatform(core.Platform(w.platform))
 			}
 			if n.Link {
 				// No exec reads the link's output, so it is read from the

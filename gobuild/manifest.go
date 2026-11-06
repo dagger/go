@@ -1,8 +1,6 @@
 package main
 
 import (
-	"context"
-
 	"dagger.io/dagger/core"
 	"dagger/gobuild/internal/dagger"
 )
@@ -33,8 +31,8 @@ const (
 // manifestSource, for every machine an engine runs on (machineTools),
 // declared for platform. Like gohdr, it is built in image, gomod's pinned
 // toolchain, statically, and runs in whatever image the module builds with.
-func manifestTools(ctx context.Context, image, platform string) (*dagger.Directory, error) {
-	return toolsFor(ctx, "write-manifest", image, platform, func(goarch string) *dagger.File {
+func manifestTools(image, platform string) *dagger.Directory {
+	return toolsFor("write-manifest", image, platform, func(goarch string) *dagger.File {
 		return core.NewContainer().From(image).
 			WithEnvVariable("CGO_ENABLED", "0").
 			WithEnvVariable("GOOS", "linux").

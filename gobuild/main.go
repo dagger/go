@@ -227,10 +227,7 @@ func (m *Gobuild) Archives(
 	for _, bl := range blocks {
 		modFiles = append(modFiles, bl.modFiles...)
 	}
-	tool, err := manifestTools(ctx, b.toolImage, b.target.platform())
-	if err != nil {
-		return nil, err
-	}
+	tool := manifestTools(b.toolImage, b.target.platform())
 	ctr := b.modules.mount(b.base.
 		WithMountedDirectory(writeManifestDir, tool), modFiles).
 		WithMountedDirectory(b.roots.Src, b.src)
@@ -431,11 +428,7 @@ func (m *Gobuild) ArchiveBuilds(
 	for _, bl := range w.order {
 		dirs = append(dirs, w.results[bl.id].dir)
 	}
-	manifest, err := manifestTools(ctx, w.build.toolImage, w.build.target.platform())
-	if err != nil {
-		return nil, err
-	}
-	return &ArchiveCache{Builds: dirs, Downloads: w.build.downloads, Tool: w.build.hdr, ManifestTool: manifest, ManifestSource: manifestSource(), Tools: w.build.tools}, nil
+	return &ArchiveCache{Builds: dirs, Downloads: w.build.downloads, Tool: w.build.hdr, ManifestTool: manifestTools(w.build.toolImage, w.build.target.platform()), ManifestSource: manifestSource(), Tools: w.build.tools}, nil
 }
 
 // listFields are the fields of go list's output Archives reads: the
@@ -736,10 +729,7 @@ func newBuild(ctx context.Context, toolImage string, ctr *dagger.Container, imag
 	if err != nil {
 		return nil, err
 	}
-	hdr, err := hdrTools(ctx, toolImage, platform)
-	if err != nil {
-		return nil, err
-	}
+	hdr := hdrTools(toolImage, platform)
 	type listing struct {
 		out string
 		err error
@@ -976,7 +966,7 @@ go env GOOS GOARCH CGO_ENABLED GOVERSION > /gobuild/goenv
 	}
 	// Built by the build's own toolchain, for every machine an engine runs
 	// on.
-	if b.tools, err = machineTools(ctx, "pack", b.target.platform(), func(goarch string) *dagger.File {
+	b.tools = machineTools("pack", b.target.platform(), func(goarch string) *dagger.File {
 		return base.
 			WithEnvVariable("GOOS", "linux").
 			WithEnvVariable("GOARCH", goarch).
@@ -984,9 +974,7 @@ go env GOOS GOARCH CGO_ENABLED GOVERSION > /gobuild/goenv
 			WithEnvVariable("GOCACHE", "/gobuild/cache").
 			WithExec([]string{"go", "build", "-o", "/gobuild/pack", "cmd/pack"}, bare).
 			File("/gobuild/pack")
-	}); err != nil {
-		return nil, err
-	}
+	})
 	// Go 1.25 and later run "go tool pack" for each package with assembly,
 	// the runtime among them, so a build on them needs pack and its runtime
 	// waits for it there: it's built alongside the plan instead. Earlier Go
