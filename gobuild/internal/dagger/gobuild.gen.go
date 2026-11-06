@@ -530,8 +530,9 @@ func (r *GobuildArchiveCache) Tools() *Directory {
 	return new(Directory).WithGraphQLQuery(q)
 }
 
-func (r *Query) Gobuild() *Gobuild { // gobuild (../../:0:0)
+func (r *Query) Gobuild(toolImage string) *Gobuild { // gobuild (../../:0:0)
 	q := r.query.Select("gobuild")
+	q = q.Arg("toolImage", toolImage)
 
 	return &Gobuild{
 		query:     q,

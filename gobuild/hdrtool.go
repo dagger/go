@@ -1,8 +1,6 @@
 package main
 
 import (
-	"sync"
-
 	"dagger.io/dagger/core"
 	"dagger/gobuild/internal/dagger"
 )
@@ -15,18 +13,16 @@ import (
 // "gohdr linkid" makes a link's build ID. "gohdr manifest" describes a lint
 // target's archives for golangci-lint's export driver.
 //
-// It is one object for the whole module, so the SDK asks the engine for its
-// ID once, not once for every exec that mounts it.
-var hdrTool = sync.OnceValue(func() *dagger.File {
-	// A standalone tool, so it is built with a pinned toolchain, statically,
-	// and runs in whatever image the module builds with.
-	return core.NewContainer().From(toolImage).
+// It is a standalone tool, so it is built in image, gomod's pinned
+// toolchain, statically, and runs in whatever image the module builds with.
+func hdrTool(image string) *dagger.File {
+	return core.NewContainer().From(image).
 		WithEnvVariable("CGO_ENABLED", "0").
 		WithNewFile("/gohdr-src/go.mod", "module gohdr\n\ngo 1.26\n").
 		WithNewFile("/gohdr-src/main.go", hdrToolSrc).
 		WithWorkdir("/gohdr-src").
 		WithExec([]string{"go", "build", "-o", "/gohdr", "."}, bare).File("/gohdr")
-})
+}
 
 const hdrToolSrc = `package main
 

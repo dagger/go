@@ -98,6 +98,7 @@ func toNodes(blocks map[string]*block, outside map[string]bool, weights map[stri
 // walker runs a set of nodes, one exec each, each after its dependencies.
 type walker struct {
 	base  *dagger.Container
+	gohdr *dagger.File
 	tools *dagger.Directory
 	src   *dagger.Directory
 	// nonGo is the source's files that aren't Go, which a package with C or
@@ -234,7 +235,7 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 				ctr = ctr.WithMountedDirectory(toolsDir, w.tools, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
 			}
 			if n.Gohdr {
-				ctr = ctr.WithMountedFile("/gobuild/gohdr", hdrTool(), dagger.ContainerWithMountedFileOpts{ReadOnly: true})
+				ctr = ctr.WithMountedFile("/gobuild/gohdr", w.gohdr, dagger.ContainerWithMountedFileOpts{ReadOnly: true})
 			}
 			if n.Profile {
 				ctr = ctr.WithMountedDirectory(w.profile.path, w.profile.dir, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})

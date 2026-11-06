@@ -875,6 +875,13 @@ type GoModule {
   let lib: Gomod! { gomod(includeExtraFiles: includeExtraFiles) }
 
   """
+  The per-package builder. Its own tool is built in the image of the Go
+  version the library's tools build with, which the library pins, so a build
+  pulls one Go image, which an engine image can ship.
+  """
+  let builder: Gobuild! { gobuild(toolImage: gomod.goImage(gomod.scannerVersion)) }
+
+  """
   Whether tests are skipped for this module.
   """
   skipTest: Boolean! {
@@ -1466,7 +1473,7 @@ type GoModule {
     pkg: String!,
     name: String!,
   ): Directory! {
-    gobuild.binary(
+    builder.binary(
       base: ctr,
       # The toolchain image the base starts from, or the custom base it was
       # made from, so package execs can run in it without the base's
@@ -1558,7 +1565,7 @@ type GoModule {
         .withExec(["go", "test", "-c", "-vet=off"] + buildFlags + ["-o", "/out/" + name, packageArg(rel)])
         .file("/out/" + name)
     } else {
-      gobuild.testBinary(
+      builder.testBinary(
         base: ctr,
         image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
         from: if (baseImage == null) { null } else { baseImage.withoutEntrypoint },
@@ -1620,7 +1627,7 @@ type GoModule {
     if (gccgo(flags)) {
       raise "Go module " + path + ": a gccgo build has no archives for the export driver, which reads gc's"
     }
-    let out = gobuild.archives(
+    let out = builder.archives(
       base: ctr,
       image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
       from: if (baseImage == null) { null } else { baseImage.withoutEntrypoint },
@@ -1669,7 +1676,7 @@ type GoModule {
       raise "Go module " + path + ": a gccgo build has no archives"
     }
     {
-      let cache = gobuild.archiveBuilds(
+      let cache = builder.archiveBuilds(
         base: ctr,
         image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
         from: if (baseImage == null) { null } else { baseImage.withoutEntrypoint },

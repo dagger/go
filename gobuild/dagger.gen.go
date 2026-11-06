@@ -45,16 +45,22 @@ func convertSlice[I any, O any](in []I, f func(I) O) []O {
 }
 
 func (r Gobuild) MarshalJSON() ([]byte, error) {
-	var concrete struct{}
+	var concrete struct {
+		ToolImage string
+	}
+	concrete.ToolImage = r.ToolImage
 	return json.Marshal(&concrete)
 }
 
 func (r *Gobuild) UnmarshalJSON(bs []byte) error {
-	var concrete struct{}
+	var concrete struct {
+		ToolImage string
+	}
 	err := json.Unmarshal(bs, &concrete)
 	if err != nil {
 		return err
 	}
+	r.ToolImage = concrete.ToolImage
 	return nil
 }
 
@@ -119,8 +125,6 @@ func DaggerDispatch(ctx context.Context, parentJSON []byte, parentName string, f
 			fnName = ""
 		}
 		switch fnName {
-		case "":
-			return &Gobuild{}, nil
 		case "ArchiveBuilds":
 			var parent Gobuild
 			err = json.Unmarshal(parentJSON, &parent)
@@ -464,6 +468,20 @@ func DaggerDispatch(ctx context.Context, parentJSON []byte, parentName string, f
 				}
 			}
 			return (*Gobuild).TestBinary(&parent, ctx, base, image, from, source, headers, mountPath, workdir, pkg, flags, downloads)
+		case "":
+			var parent Gobuild
+			err = json.Unmarshal(parentJSON, &parent)
+			if err != nil {
+				panic(fmt.Errorf("%s: %w", "failed to unmarshal parent object", err))
+			}
+			var toolImage string
+			if inputArgs["toolImage"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["toolImage"]), &toolImage)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg toolImage", err))
+				}
+			}
+			return New(toolImage), nil
 		default:
 			return nil, fmt.Errorf("unknown function %s", fnName)
 		}

@@ -133,6 +133,7 @@ var downloadEnv = []string{
 // only with builds that have them.
 type downloader struct {
 	public, private *dagger.Container
+	gohdr           *dagger.File
 	privatePatterns string
 	gomodcache      string
 	sums            []sumEntry
@@ -497,7 +498,7 @@ func (d *downloader) download(e sumEntry) *dagger.Directory {
 	if d.privatePatterns != "" && matchPrefixPatterns(d.privatePatterns, e.path) {
 		ctr = d.private
 	}
-	return downloadModule(ctr, d.gomodcache, e)
+	return downloadModule(ctr, d.gohdr, d.gomodcache, e)
 }
 
 // moduleDirName is a module version's directory name in the module cache.
@@ -533,7 +534,7 @@ func packName(e sumEntry) string {
 // directory is there before the go command runs, so it takes the module as
 // extracted once it has the zip and its checksum, and gohdr packs the
 // module from the zip.
-func downloadModule(ctr *dagger.Container, gomodcache string, e sumEntry) *dagger.Directory {
+func downloadModule(ctr *dagger.Container, gohdr *dagger.File, gomodcache string, e sumEntry) *dagger.Directory {
 	q := e.path + "@" + e.version
 	meta := strings.TrimSuffix(zipPath(e), ".zip")
 	script := "set -e\nmkdir -p " + shQuote(modCacheDir+"/"+moduleDirName(e)) + " /gobuild/empty\n" +
@@ -555,7 +556,7 @@ func downloadModule(ctr *dagger.Container, gomodcache string, e sumEntry) *dagge
 		// only for the same pair of checksums.
 		"\n# go.mod " + e.mod
 	return ctr.
-		WithMountedFile("/gobuild/gohdr", hdrTool(), dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
+		WithMountedFile("/gobuild/gohdr", gohdr, dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
 		WithExec([]string{"sh", "-c", script}, bare).
 		Directory(modCacheDir)
 }

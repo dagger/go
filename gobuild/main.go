@@ -26,17 +26,21 @@ import (
 	"dagger/gobuild/internal/dagger"
 )
 
-type Gobuild struct{}
+type Gobuild struct {
+	// +private
+	ToolImage string
+}
 
-// toolImage builds gohdr, which runs in whatever image the build uses. It is
-// pinned by digest, so gohdr, which every plan and download mounts, is the
-// same input in every build: a tag moves, and a workspace's lockfile may pin
-// it to another digest than the registry serves.
-//
-// It is the image of the Go version gomod's tools build with (Gomod.goImage
-// of its scannerVersion), so a build pulls one Go image, which an engine
-// image can ship.
-const toolImage = "golang:1.27-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb"
+func New(
+	// The image gohdr, the build's own tool, is built in, which every plan and
+	// download mounts. It is the image of the Go version gomod's tools build
+	// with (Gomod.goImage of its scannerVersion), pinned by digest there, so a
+	// build pulls one Go image, which an engine image can ship, and gohdr is
+	// the same input in every build.
+	toolImage string,
+) *Gobuild {
+	return &Gobuild{ToolImage: toolImage}
+}
 
 // bare runs an exec as its command alone: none of these execs call Dagger,
 // and starting a nested session for each would cost every package; and
@@ -96,7 +100,7 @@ func (m *Gobuild) Binary(
 	// +optional
 	downloads *dagger.Container,
 ) (*dagger.Directory, error) {
-	blocks, linked, err := run(ctx, base, image, from, downloads, source, headers, mountPath, workdir, pkg, flags, false)
+	blocks, linked, err := run(ctx, m.ToolImage, base, image, from, downloads, source, headers, mountPath, workdir, pkg, flags, false)
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +155,7 @@ func (m *Gobuild) TestBinary(
 	// +optional
 	downloads *dagger.Container,
 ) (*dagger.File, error) {
-	_, linked, err := run(ctx, base, image, from, downloads, source, headers, mountPath, workdir, pkg, flags, true)
+	_, linked, err := run(ctx, m.ToolImage, base, image, from, downloads, source, headers, mountPath, workdir, pkg, flags, true)
 	if err != nil {
 		return nil, err
 	}
@@ -212,7 +216,7 @@ func (m *Gobuild) Archives(
 	// +default=true
 	tests bool,
 ) (*dagger.Directory, error) {
-	w, err := archiveWalk(ctx, base, image, from, source, headers, mountPath, workdir, flags, dependencies, downloads, packages, tests)
+	w, err := archiveWalk(ctx, m.ToolImage, base, image, from, source, headers, mountPath, workdir, flags, dependencies, downloads, packages, tests)
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +228,7 @@ func (m *Gobuild) Archives(
 		modFiles = append(modFiles, bl.modFiles...)
 	}
 	ctr := b.modules.mount(b.base.
-		WithMountedFile("/gobuild/gohdr", hdrTool()), modFiles).
+		WithMountedFile("/gobuild/gohdr", b.gohdr), modFiles).
 		WithMountedDirectory(b.roots.Src, b.src)
 	out := core.NewDirectory()
 	var entries strings.Builder
@@ -278,7 +282,7 @@ type archiveWalked struct {
 }
 
 // archiveWalk plans and walks what Archives compiles, with Archives' arguments.
-func archiveWalk(ctx context.Context, base *dagger.Container, image string, from *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir string, flags []string, dependencies bool, downloads *dagger.Container, packages []string, tests bool) (*archiveWalked, error) {
+func archiveWalk(ctx context.Context, toolImage string, base *dagger.Container, image string, from *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir string, flags []string, dependencies bool, downloads *dagger.Container, packages []string, tests bool) (*archiveWalked, error) {
 	cwd := path.Join(mountPath, workdir)
 	// Discovery follows the imports of the one package archived, as a
 	// binary's build follows its package's; of every package otherwise.
@@ -286,7 +290,7 @@ func archiveWalk(ctx context.Context, base *dagger.Container, image string, from
 	if len(packages) == 1 && !strings.Contains(packages[0], "...") {
 		pkgDir = path.Join(workdir, packages[0])
 	}
-	b, err := newBuild(ctx, base, image, from, downloads, source, headers, pkgDir, tests, mountPath, cwd, flags)
+	b, err := newBuild(ctx, toolImage, base, image, from, downloads, source, headers, pkgDir, tests, mountPath, cwd, flags)
 	if err != nil {
 		return nil, err
 	}
@@ -402,7 +406,7 @@ func (m *Gobuild) ArchiveBuilds(
 	// +default=true
 	tests bool,
 ) (*ArchiveCache, error) {
-	w, err := archiveWalk(ctx, base, image, from, source, headers, mountPath, workdir, flags, dependencies, downloads, packages, tests)
+	w, err := archiveWalk(ctx, m.ToolImage, base, image, from, source, headers, mountPath, workdir, flags, dependencies, downloads, packages, tests)
 	if err != nil {
 		return nil, err
 	}
@@ -410,7 +414,7 @@ func (m *Gobuild) ArchiveBuilds(
 	for _, bl := range w.order {
 		dirs = append(dirs, w.results[bl.id].dir)
 	}
-	return &ArchiveCache{Builds: dirs, Downloads: w.build.downloads, Tool: hdrTool(), Tools: w.build.tools}, nil
+	return &ArchiveCache{Builds: dirs, Downloads: w.build.downloads, Tool: w.build.gohdr, Tools: w.build.tools}, nil
 }
 
 // listFields are the fields of go list's output Archives reads: the
@@ -499,14 +503,14 @@ func buildTags(flags []string) []string {
 
 // run builds pkg's binary, or with test its test binary, and returns the
 // plan's blocks and the link's result.
-func run(ctx context.Context, base *dagger.Container, image string, from, downloads *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir, pkg string, flags []string, test bool) (map[string]*block, *result, error) {
+func run(ctx context.Context, toolImage string, base *dagger.Container, image string, from, downloads *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir, pkg string, flags []string, test bool) (map[string]*block, *result, error) {
 	cwd := path.Join(mountPath, workdir)
 	if test {
 		// Vet is go test's, not the binary's, and is left to the lint
 		// checks: the per-package build doesn't replay it.
 		flags = append([]string{"-vet=off"}, flags...)
 	}
-	b, err := newBuild(ctx, base, image, from, downloads, source, headers, path.Join(workdir, pkg), test, mountPath, cwd, flags)
+	b, err := newBuild(ctx, toolImage, base, image, from, downloads, source, headers, path.Join(workdir, pkg), test, mountPath, cwd, flags)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -584,7 +588,7 @@ func (b *build) walk(ctx context.Context, blocks map[string]*block, weights map[
 	mods.excludeUnread(blocks)
 	heights := heightsOf(blocks, weights)
 	mods.fetch(ctx, blocks, heights)
-	w := &walker{base: b.base, tools: b.tools, src: b.src, mods: mods, roots: b.roots, nonGo: nonGo}
+	w := &walker{base: b.base, gohdr: b.gohdr, tools: b.tools, src: b.src, mods: mods, roots: b.roots, nonGo: nonGo}
 	if prepare != nil {
 		if err := prepare(w); err != nil {
 			return nil, err
@@ -665,17 +669,25 @@ type build struct {
 	fetch func(name string) *dagger.File
 	tools *dagger.Directory
 	roots roots
+	// toolImage is the image gohdr is built in, which the build's own steps,
+	// those that run gohdr alone, run in too.
+	toolImage string
+	// gohdr is the build's tool (hdrTool), one object for the whole build, so
+	// the SDK asks the engine for its ID once, not once for every exec that
+	// mounts it.
+	gohdr *dagger.File
 }
 
 // newBuild prepares a build of the source; pkgDir is the directory of the
 // package it builds, relative to the source, or "" for every package of the
 // module, and tests whether it builds tests: they decide which modules the
 // build downloads.
-func newBuild(ctx context.Context, ctr *dagger.Container, image string, from, downloads *dagger.Container, source *dagger.Directory, headers *dagger.File, pkgDir string, tests bool, mountPath, cwd string, flags []string) (*build, error) {
+func newBuild(ctx context.Context, toolImage string, ctr *dagger.Container, image string, from, downloads *dagger.Container, source *dagger.Directory, headers *dagger.File, pkgDir string, tests bool, mountPath, cwd string, flags []string) (*build, error) {
 	// The plan's view of the source is a filtered copy, as slow on a large
 	// source as the rest of this setup, which it doesn't depend on: it's
 	// made alongside it. An error shows again where the plan mounts it.
 	go planSource(source).Sync(ctx)
+	gohdr := hdrTool(toolImage)
 	var err error
 	if image != "" {
 		from = core.NewContainer().From(image)
@@ -710,7 +722,7 @@ func newBuild(ctx context.Context, ctr *dagger.Container, image string, from, do
 	imports := make(chan listing, 1)
 	go func() {
 		out, err := public.
-			WithMountedFile("/gobuild/gohdr", hdrTool(), dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
+			WithMountedFile("/gobuild/gohdr", gohdr, dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
 			WithMountedFile("/gobuild/src.hdr", headers, dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
 			WithExec([]string{"/gobuild/gohdr", "imports", "/gobuild/src.hdr", importsMode}, bare).
 			Stdout(ctx)
@@ -773,7 +785,7 @@ func newBuild(ctx context.Context, ctr *dagger.Container, image string, from, do
 	if err := checkFlags(append(append([]string(nil), flags...), envFlags...)); err != nil {
 		return nil, err
 	}
-	b := &build{base: base, src: source, roots: roots{Src: mountPath, Mod: gomodcache, Cwd: cwd}}
+	b := &build{base: base, src: source, roots: roots{Src: mountPath, Mod: gomodcache, Cwd: cwd}, toolImage: toolImage, gohdr: gohdr}
 	// The module cache is made from the build's go.sums: the main module's,
 	// those of a go.work's modules and its go.work.sum, or the alternate
 	// go.mod a -modfile flag names, with its go.sum. The go command lists
@@ -892,7 +904,7 @@ go env GOOS GOARCH CGO_ENABLED GOVERSION > /gobuild/goenv
 	if switched, _ := first.Directory("/gobuild").Glob(ctx, "switched"); len(switched) > 0 {
 		entries = nil
 	} else {
-		d := &downloader{public: public, private: caller, gomodcache: gomodcache, sums: entries,
+		d := &downloader{public: public, private: caller, gohdr: b.gohdr, gomodcache: gomodcache, sums: entries,
 			target: newTarget(goenv, buildTags(append(append([]string(nil), envFlags...), flags...)))}
 		// The modules the go command fetches directly rather than through a
 		// proxy: GONOPROXY's, or GOPRIVATE's when it's unset or empty.
@@ -952,8 +964,8 @@ go env GOOS GOARCH CGO_ENABLED GOVERSION > /gobuild/goenv
 // copy of a large source costs more than the listing, which reruns when the
 // source changes anyway and costs one exec then.
 func (b *build) sourceSizes(ctx context.Context) (map[string]int64, error) {
-	out, err := core.NewContainer().From(toolImage).
-		WithMountedFile("/gobuild/gohdr", hdrTool(), dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
+	out, err := core.NewContainer().From(b.toolImage).
+		WithMountedFile("/gobuild/gohdr", b.gohdr, dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
 		WithMountedDirectory("/gobuild/src", b.src, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true}).
 		WithExec([]string{"/gobuild/gohdr", "sizes", "/gobuild/src"}, bare).
 		Stdout(ctx)
@@ -1091,8 +1103,8 @@ func (b *build) unpackHeaders() string {
 // in the workspace: a change to any of them, another module's included, ran
 // the plan again, and its go command, for the same plan.
 func (b *build) planHeaders(ctx context.Context, headers *dagger.File) (*dagger.File, *dagger.File, error) {
-	ctr := core.NewContainer().From(toolImage).
-		WithMountedFile("/gobuild/gohdr", hdrTool(), dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
+	ctr := core.NewContainer().From(b.toolImage).
+		WithMountedFile("/gobuild/gohdr", b.gohdr, dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
 		WithMountedFile("/gobuild/src.hdr", headers, dagger.ContainerWithMountedFileOpts{ReadOnly: true})
 	cmd := []string{"/gobuild/gohdr", "subset", "/gobuild/src.hdr", "/gobuild/hdr/plan.hdr", "/gobuild/hdr/godirs.txt"}
 	if b.planSrc != nil {
@@ -1118,7 +1130,7 @@ func (b *build) planWith(ctx context.Context, headers *dagger.File, pre, goCmd s
 		return nil, err
 	}
 	ran := b.withModules(b.base.
-		WithMountedFile("/gobuild/gohdr", hdrTool())).
+		WithMountedFile("/gobuild/gohdr", b.gohdr)).
 		WithMountedDirectory(b.roots.Src, planSource(b.src)).
 		WithMountedFile("/gobuild/src.hdr", planHdr).
 		// An empty build cache, so the plan holds every step.
@@ -1179,7 +1191,7 @@ func (b *build) testmain(ctx context.Context, headers *dagger.File, flags []stri
 		return nil, err
 	}
 	return b.withModules(b.base.
-		WithMountedFile("/gobuild/gohdr", hdrTool())).
+		WithMountedFile("/gobuild/gohdr", b.gohdr)).
 		WithMountedDirectory(b.roots.Src, planSource(b.src)).
 		WithMountedFile("/gobuild/src.hdr", planHdr).
 		WithMountedDirectory("/gobuild/tests", tests).
