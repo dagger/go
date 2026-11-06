@@ -53,6 +53,9 @@ type node struct {
 	// whose output depends on the machine's C toolchain: it isn't declared
 	// for its target (Directory.withPlatform).
 	Cgo bool `json:"cgo,omitempty"`
+	// Weight, in the dependency call, is the package's weight (heightsOf),
+	// which orders its execs there.
+	Weight int64 `json:"weight,omitempty"`
 }
 
 // toNode renders a block for a walk. A package reads its dependencies'
@@ -123,6 +126,9 @@ type walker struct {
 	// testmain is a test binary's _testmain.go, which its main package
 	// compiles; nil for a binary.
 	testmain *dagger.File
+	// links is set when a link outside the walk reads the object code of
+	// the packages it builds, as the dependency call's caller's does.
+	links bool
 }
 
 // profileOutput is the PGO profile step's output and where scripts read it.
@@ -160,9 +166,14 @@ type result struct {
 	done chan struct{}
 }
 
-func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*result, error) {
+// walk runs nodes and returns their results, with done's: the results of
+// packages already built, such as the dependency call's, which nodes import.
+func (w *walker) walk(ctx context.Context, nodes map[string]*node, done map[string]*result) (map[string]*result, error) {
 	results := map[string]*result{}
-	links := false
+	for id, r := range done {
+		results[id] = r
+	}
+	links := w.links
 	for id, n := range nodes {
 		results[id] = &result{done: make(chan struct{}), linkDone: make(chan struct{})}
 		links = links || n.Link

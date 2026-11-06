@@ -259,6 +259,34 @@ func (r *Gobuild) Binary(base *Container, source *Directory, headers *File, moun
 	return new(Directory).WithGraphQLQuery(q)
 }
 
+// Dependencies builds packages of a build that read none of its source and
+// import nothing that does, one exec per package as a build does: the
+// standard library and the build's dependencies. A build calls it through
+// the engine with exactly what those packages read, so the engine caches the
+// call: every build that compiles the same packages the same way, whatever
+// its own source, finds it in one request, instead of one or two for each
+// package, and an edit of the build's own source leaves it as it is.
+func (r *Gobuild) Dependencies(base *Container, hdr *Directory, tools *Directory, platform string, modRoot string, moduleNames []string, moduleDirs []*Directory, packages string, links bool) *GobuildDependencyBuilds {
+	assertNotNil("base", base)
+	assertNotNil("hdr", hdr)
+	assertNotNil("tools", tools)
+	q := r.query.Select("dependencies")
+	q = q.Arg("base", base)
+	q = q.Arg("hdr", hdr)
+	q = q.Arg("tools", tools)
+	q = q.Arg("platform", platform)
+	q = q.Arg("modRoot", modRoot)
+	q = q.Arg("moduleNames", moduleNames)
+	q = q.Arg("moduleDirs", moduleDirs)
+	q = q.Arg("packages", packages)
+	q = q.Arg("links", links)
+
+	return &GobuildDependencyBuilds{
+		query:     q,
+		refetchID: r.refetchID,
+	}
+}
+
 // A unique identifier for this Gobuild.
 func (r *Gobuild) ID(ctx context.Context) (ID, error) {
 	if r.id != nil {
@@ -545,6 +573,179 @@ func (r *GobuildArchiveCache) Tools() *Directory {
 	q := r.query.Select("tools")
 
 	return new(Directory).WithGraphQLQuery(q)
+}
+
+// DependencyBuilds is what the dependency call (Dependencies) built, in the
+// order of its packages.
+type GobuildDependencyBuilds struct { // gobuild (../../:0:0)
+	query *querybuilder.Selection
+	// refetchID is set when this object is built through a field marked
+	// @reevaluate: it fetches its ID on every use, so each use evaluates that
+	// field again.
+	refetchID bool
+
+	id *ID
+}
+
+func (r *GobuildDependencyBuilds) WithGraphQLQuery(q *querybuilder.Selection) *GobuildDependencyBuilds {
+	return &GobuildDependencyBuilds{
+		query: q,
+		// The query's origin is unknown: it may go through a field that
+		// must be reevaluated.
+		refetchID: true,
+	}
+}
+
+// Each package's archive, which its importers' compiles read.
+func (r *GobuildDependencyBuilds) Archives(ctx context.Context) ([]File, error) {
+	q := r.query.Select("archives")
+
+	q = q.Select("id")
+
+	type archives struct {
+		Id ID
+	}
+
+	convert := func(fields []archives) []File {
+		out := []File{}
+
+		for i := range fields {
+			val := *loaded[*File](q, fields[i].Id)
+			out = append(out, val)
+		}
+
+		return out
+	}
+	var response []archives
+
+	q = q.Bind(&response)
+
+	err := q.Execute(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return convert(response), nil
+}
+
+// Each package's work directory, which holds its archive.
+func (r *GobuildDependencyBuilds) Dirs(ctx context.Context) ([]Directory, error) {
+	q := r.query.Select("dirs")
+
+	q = q.Select("id")
+
+	type dirs struct {
+		Id ID
+	}
+
+	convert := func(fields []dirs) []Directory {
+		out := []Directory{}
+
+		for i := range fields {
+			val := *loaded[*Directory](q, fields[i].Id)
+			out = append(out, val)
+		}
+
+		return out
+	}
+	var response []dirs
+
+	q = q.Bind(&response)
+
+	err := q.Execute(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return convert(response), nil
+}
+
+// A unique identifier for this GobuildDependencyBuilds.
+func (r *GobuildDependencyBuilds) ID(ctx context.Context) (ID, error) {
+	if r.id != nil {
+		return *r.id, nil
+	}
+	q := r.query.Select("id")
+
+	var response ID
+
+	q = q.Bind(&response)
+	if r.refetchID {
+		return response, q.Execute(ctx)
+	}
+	return memoizedID(ctx, r.query, func() (ID, error) {
+		err := q.Execute(ctx)
+		return response, err
+	})
+}
+
+// XXX_GraphQLType is an internal function. It returns the native GraphQL type name
+func (r *GobuildDependencyBuilds) XXX_GraphQLType() string {
+	return "GobuildDependencyBuilds"
+}
+
+// XXX_GraphQLIDType is an internal function. It returns the native GraphQL type name for the ID of this object
+func (r *GobuildDependencyBuilds) XXX_GraphQLIDType() string {
+	return "ID"
+}
+
+// XXX_GraphQLID is an internal function. It returns the underlying type ID
+func (r *GobuildDependencyBuilds) XXX_GraphQLID(ctx context.Context) (string, error) {
+	id, err := r.ID(ctx)
+	if err != nil {
+		return "", err
+	}
+	return string(id), nil
+}
+
+func (r *GobuildDependencyBuilds) MarshalJSON() ([]byte, error) {
+	id, err := r.ID(marshalCtx)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(id)
+}
+func (r *GobuildDependencyBuilds) UnmarshalJSON(bs []byte) error {
+	var id string
+	err := json.Unmarshal(bs, &id)
+	if err != nil {
+		return err
+	}
+	*r = GobuildDependencyBuilds{query: selectNode(Connect().QueryBuilder(), id, "GobuildDependencyBuilds")}
+	return nil
+}
+
+// Each package's object code, which a link reads: its archive unless
+// the package splits. Empty when the call's caller doesn't link.
+func (r *GobuildDependencyBuilds) LinkObjects(ctx context.Context) ([]File, error) {
+	q := r.query.Select("linkObjects")
+
+	q = q.Select("id")
+
+	type linkObjects struct {
+		Id ID
+	}
+
+	convert := func(fields []linkObjects) []File {
+		out := []File{}
+
+		for i := range fields {
+			val := *loaded[*File](q, fields[i].Id)
+			out = append(out, val)
+		}
+
+		return out
+	}
+	var response []linkObjects
+
+	q = q.Bind(&response)
+
+	err := q.Execute(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return convert(response), nil
 }
 
 func (r *Query) Gobuild(toolImage string) *Gobuild { // gobuild (../../:0:0)

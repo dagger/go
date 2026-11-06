@@ -45,6 +45,9 @@ type modules struct {
 
 	mu   sync.Mutex
 	dirs map[string]*dagger.Directory
+	// ready holds the modules whose directory in dirs is synced, so it
+	// carries its ID.
+	ready map[string]bool
 }
 
 // dir is the module directory <module>@<version>, as the module cache names
@@ -213,13 +216,22 @@ func (m *modules) fetch(ctx context.Context, blocks map[string]*block, heights m
 				// The synced directory carries its ID, so a package that
 				// mounts it doesn't ask for the ID in its slot.
 				if d, err := m.dir(name).Sync(ctx); err == nil {
-					m.mu.Lock()
-					m.dirs[name] = d
-					m.mu.Unlock()
+					m.setReady(name, d)
 				}
 			}
 		}()
 	}
+}
+
+// setReady records d, synced, as the module name's directory.
+func (m *modules) setReady(name string, d *dagger.Directory) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.dirs[name] = d
+	if m.ready == nil {
+		m.ready = map[string]bool{}
+	}
+	m.ready[name] = true
 }
 
 // byHeight is need's modules, the one needed by the highest package first.

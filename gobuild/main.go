@@ -620,7 +620,14 @@ func (b *build) walk(ctx context.Context, blocks map[string]*block, weights map[
 	outside := outsideSet(blocks)
 	nodes := toNodes(blocks, outside, weights)
 	w.heights = heights
-	return w.walk(ctx, nodes)
+	done, err := b.dependencies(ctx, w, nodes, dependencySet(blocks, mods), weights)
+	if err != nil {
+		return nil, err
+	}
+	for id := range done {
+		delete(nodes, id)
+	}
+	return w.walk(ctx, nodes, done)
 }
 
 // profileStep runs the plan's PGO profile preprocessing, from the profile in
