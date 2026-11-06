@@ -701,6 +701,41 @@ type GoPlatforms @collection {
 }
 
 """
+What a Go module's archives read from the cache that every build of the
+packages with the same toolchain, flags and go.sum shares. The results are
+references the cache keeps for as long as it keeps this: a caller takes each
+one's ID in its own session, as an engine image's entries do.
+"""
+type GoArchiveBuilds {
+  """
+  Each package's build, in the order the walk ran them: a directory of what
+  its exec wrote, with its archives.
+  """
+  builds: [Directory!]!
+
+  """
+  Each module download, in the order of its module cache directory name: a
+  directory of its plan pack and zip.
+  """
+  downloads: [Directory!]!
+
+  """
+  gobuild's gohdr, the tool the builds' execs run.
+  """
+  tool: File!
+
+  """
+  Go's own tools the builds run, built by its toolchain: pack.
+  """
+  tools: Directory!
+
+  """
+  gomod's go-includes helper.
+  """
+  helper: Container!
+}
+
+"""
 A platform a Go package can be built for.
 """
 type GoPlatform {
@@ -1606,14 +1641,10 @@ type GoModule {
   }
 
   """
-  The IDs of what archives reads from the cache that every build of the
-  packages with the same toolchain, flags and go.sum shares: each package's
-  build (a directory: what its exec wrote, with its archives), each module
-  download (a directory: its plan pack and zip), and the tools the build runs
-  (gobuild's gohdr, a file, Go's pack, a directory, and gomod's go-includes
-  helper, a container). A
-  cache that is to have exactly these results, such as the cache an engine
-  image pre-warms, is filled from them. The arguments are archives'.
+  What archives reads from the cache that every build of the packages with
+  the same toolchain, flags and go.sum shares (GoArchiveBuilds). A cache
+  that is to have exactly these results, such as the cache an engine image
+  pre-warms, is filled from them. The arguments are archives'.
   """
   archiveBuilds(
     ws: Workspace!,
@@ -1631,7 +1662,7 @@ type GoModule {
     what only they import.
     """
     noTests: Boolean! = false,
-  ): [ID!]! {
+  ): GoArchiveBuilds! {
     let ctr = platformBase(ws, gomod.hostPlatform)
     let flags = buildFlags + (ctr.envVariable("GOFLAGS") ?? "").split(" ").filter { f => f != "" }
     if (gccgo(flags)) {
@@ -1652,9 +1683,15 @@ type GoModule {
         packages: packages,
         tests: noTests == false,
       )
-      cache.builds.{{id}}.map { build => build.id } +
-        cache.downloads.{{id}}.map { download => download.id } +
-        [cache.tool.id, cache.tools.id, gomod.includesHelper.id]
+      # A list of objects from a call becomes a list by a selection on
+      # each: sync gives back the object it's selected on.
+      GoArchiveBuilds(
+        builds: cache.builds.{{sync}}.map { build => build.sync },
+        downloads: cache.downloads.{{sync}}.map { download => download.sync },
+        tool: cache.tool,
+        tools: cache.tools,
+        helper: gomod.includesHelper,
+      )
     } rescue {
       err: Error => raise "Go archive builds of module " + path + ": " + err.message
     }
