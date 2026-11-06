@@ -905,6 +905,51 @@ type GoDev {
   }
 
   """
+  A build builds Go's pack tool only when its toolchain runs it: Go 1.25 and
+  later run "go tool pack" for each package with assembly, the runtime among
+  them, so a build on Go 1.27 builds pack once, and Go 1.24, which runs its
+  own pack, builds none. The base's go command writes a line to a cache
+  volume of the run's own each time it builds pack, and the base carries the
+  run's name, so no earlier run's cached build stands in for it.
+  """
+  packToolCheck: Void @check {
+    let run = Random.string
+    let old = packBuilds("1.24", run)
+    let current = packBuilds("1.27.3", run)
+    assert(old == "", "a build on Go 1.24 built pack: " + old)
+    assert(current == "pack\n", "a build on Go 1.27 built pack other than once: " + current)
+    null
+  }
+
+  # The lines the base's go command wrote for each build of pack, in a
+  # build of a package on Go version, after the build.
+  let packBuilds(version: String!, run: String!): String! {
+    let witness = cacheVolume("go-dev-pack-builds-" + version + "-" + run)
+    let counting = container
+      .from("golang:" + version + "-alpine")
+      .withNewFile(
+        "/count/go",
+        "#!/bin/sh\nfor a in \"$@\"; do\n\tif [ \"$a\" = cmd/pack ]; then\n\t\techo pack >> /witness/builds\n\tfi\ndone\nexec /usr/local/go/bin/go \"$@\"\n",
+        permissions: 493,
+      )
+      .withEnvVariable("PATH", "/count:/go/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+      .withEnvVariable("GO_DEV_PACK_RUN", run)
+      .withMountedCache("/witness", witness)
+    let ws = directory
+      .withNewFile("go.mod", "module example.com/packs\n\ngo 1.24\n")
+      .withNewFile("main.go", "package main\n\nfunc main() { println(\"packs\") }\n")
+      .asWorkspace
+    let built = go(base: counting).modules(ws).get(key: ".").packages(ws).get(key: ".").binary(ws)
+    assert(built.size > 0, "the build on Go " + version + " made an empty binary")
+    container
+      .from("alpine:3.23")
+      .withEnvVariable("GO_DEV_PACK_RUN", run)
+      .withMountedCache("/witness", witness)
+      .withExec(["sh", "-c", "cat /witness/builds 2>/dev/null || true"])
+      .stdout
+  }
+
+  """
   A module on Go 1.27 that uses a generic method, which no earlier Go can
   parse, is scanned, built and tested: its binary runs and its test passes.
   """

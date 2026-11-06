@@ -26,6 +26,7 @@
 ["","oci-sha",["docker.io/library/alpine:3.23"],"sha256:ff7f0c727dd796aa36787bfcd9a64bf35a6ce72a73451b3359fde849b6703d63"]
 ["","oci-sha",["docker.io/library/busybox:1.37.0"],"sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e"]
 ["","oci-sha",["docker.io/library/busybox:1.38.0"],"sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e"]
+["","oci-sha",["docker.io/library/golang:1.24-alpine"],"sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064ed54cfd245b7191"]
 ["","oci-sha",["docker.io/library/golang:1.25-alpine"],"sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59"]
 ["","oci-sha",["docker.io/library/golang:1.25.0-alpine"],"sha256:f18a072054848d87a8077455f0ac8a25886f2397f88bfdd222d6fafbb5bba440"]
 ["","oci-sha",["docker.io/library/golang:1.26-alpine"],"sha256:27f2d3b83cfc5803c8078f8e730af0f7c431bf067afaec8f60a36fb763187cba"]

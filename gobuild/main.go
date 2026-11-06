@@ -584,12 +584,6 @@ func (b *build) walk(ctx context.Context, blocks map[string]*block, weights map[
 	mods.excludeUnread(blocks)
 	heights := heightsOf(blocks, weights)
 	mods.fetch(ctx, blocks, heights)
-	// Go 1.25 and later run "go tool pack" for packages with assembly, the
-	// runtime among the first: build the tool now, not when the runtime
-	// waits for it. An error shows again where it's used.
-	if needsTools(blocks) {
-		go b.tools.Sync(ctx)
-	}
 	w := &walker{base: b.base, tools: b.tools, src: b.src, mods: mods, roots: b.roots, nonGo: nonGo}
 	if prepare != nil {
 		if err := prepare(w); err != nil {
@@ -891,13 +885,13 @@ go env GOOS GOARCH CGO_ENABLED GOVERSION > /gobuild/goenv
 	}()
 	entries := parseGoSums([]string{sumFile})
 	b.mods = start
+	goenv, err := first.File("/gobuild/goenv").Contents(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if switched, _ := first.Directory("/gobuild").Glob(ctx, "switched"); len(switched) > 0 {
 		entries = nil
 	} else {
-		goenv, err := first.File("/gobuild/goenv").Contents(ctx)
-		if err != nil {
-			return nil, err
-		}
 		d := &downloader{public: public, private: caller, gomodcache: gomodcache, sums: entries,
 			target: newTarget(goenv, buildTags(append(append([]string(nil), envFlags...), flags...)))}
 		// The modules the go command fetches directly rather than through a
@@ -943,10 +937,13 @@ go env GOOS GOARCH CGO_ENABLED GOVERSION > /gobuild/goenv
 		WithEnvVariable("GOCACHE", "/gobuild/cache").
 		WithExec([]string{"go", "build", "-o", toolsDir + "/", "cmd/pack"}, bare).
 		Directory(toolsDir)
-	// A build that compiles the runtime needs pack, and waits for it there:
-	// it's built alongside the plan instead. An error shows again where it's
-	// used.
-	go b.tools.Sync(ctx)
+	// Go 1.25 and later run "go tool pack" for each package with assembly,
+	// the runtime among them, so a build on them needs pack and its runtime
+	// waits for it there: it's built alongside the plan instead. Earlier Go
+	// runs the toolchain's own pack. An error shows again where it's used.
+	if newTarget(goenv, nil).goMinor >= 25 {
+		go b.tools.Sync(ctx)
+	}
 	return b, nil
 }
 
@@ -1232,17 +1229,6 @@ func (b *build) planError(ctx context.Context, err error) error {
 	// Not wrapped: a module's error that wraps an ExecError reaches the
 	// caller as the exec's error alone, "exit code: N", without the message.
 	return fmt.Errorf("%s: %s", strings.Join(lines, "\n"), err.Error())
-}
-
-func needsTools(blocks map[string]*block) bool {
-	for _, b := range blocks {
-		for _, l := range b.lines {
-			if strings.Contains(l, "go tool pack ") {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // checkFlags rejects the go build flags, from the call and GOFLAGS, that
