@@ -76,3 +76,8 @@ name = "gobuild"
 [sdks.go.scopes."gobuild".settings]
 dangEntrypoint = true
 unifiedClients = true
+# gobuild's binary is built for a given platform and declared for it
+# (Directory.withPlatform), so that an engine image ships it for an image of
+# another platform: the entrypoint go-sdk generates for a target of the
+# release that has the field.
+targetVersion = "v1.0.0-beta.26"
