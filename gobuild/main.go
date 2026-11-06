@@ -681,7 +681,7 @@ func newBuild(ctx context.Context, ctr *dagger.Container, image string, from, do
 	// The plan's view of the source is a filtered copy, as slow on a large
 	// source as the rest of this setup, which it doesn't depend on: it's
 	// made alongside it. An error shows again where the plan mounts it.
-	go planSource(source).ID(ctx)
+	go planSource(source).Sync(ctx)
 	var err error
 	if image != "" {
 		from = core.NewContainer().From(image)

@@ -169,9 +169,11 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 			defer wg.Done()
 			r := results[id]
 			defer close(r.done)
-			// The source a package reads doesn't depend on its imports, so its
-			// ID is fetched while they build rather than in the package's
-			// slot. An error shows again where it's mounted.
+			// The source a package reads doesn't depend on its imports, so it
+			// is synced while they build rather than in the package's slot.
+			// The synced directory carries its ID, so the package's exec
+			// doesn't ask for it either. An error shows again where it's
+			// mounted.
 			var srcDir *dagger.Directory
 			var at string
 			if len(n.SrcFiles) > 0 {
@@ -180,7 +182,9 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 					srcDir = w.nonGo.WithDirectory(path.Join(".", at), srcDir)
 					at = ""
 				}
-				srcDir.ID(ctx)
+				if d, err := srcDir.Sync(ctx); err == nil {
+					srcDir = d
+				}
 			}
 			asyncLink := false
 			defer func() {
