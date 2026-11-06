@@ -18,6 +18,9 @@ import (
 // the go command runs in-process.
 const toolsDir = "/gobuild/tools"
 
+// scriptPath is where a package's exec reads its script.
+const scriptPath = "/gobuild/build.sh"
+
 // node is one exec: a block rendered for the walk that runs it.
 type node struct {
 	ID         string   `json:"id"`
@@ -251,15 +254,16 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 				ctr = ctr.WithMountedDirectory(path.Join(w.roots.Src, at), srcDir, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
 			}
 			ctr = w.mods.mount(ctr, n.ModFiles)
-			// The script goes in on the exec's standard input, and the exec
-			// names the package instead: its arguments are its title
-			// wherever the build is shown, such as over a compile error, and
-			// a script runs to tens of KB with the link's import config. As
-			// one group, the shell reads the whole script before it runs
-			// any of it, and no command reads the rest as its input.
-			opts := pkgExec
-			opts.Stdin = "{\n" + n.Script + "} </dev/null\n"
-			ran := ctr.WithExec([]string{"sh", "-s", n.ImportPath}, opts)
+			// The script goes in as a file the step's container writes, and
+			// the exec names the package instead: its arguments and options
+			// are its title wherever the build is shown, such as over a
+			// compile error, and a script runs to tens of KB with the link's
+			// import config. Written in the step's own query, the file costs
+			// no request of its own, as a file object passed in would, for
+			// its ID.
+			ran := ctr.
+				WithNewFile(scriptPath, n.Script).
+				WithExec([]string{"sh", scriptPath, n.ImportPath}, pkgExec)
 			if !first[id] {
 				slots.acquire(w.heights[id])
 			}
