@@ -1308,6 +1308,40 @@ type GoDev {
   }
 
   """
+  A module the go command fetches directly, as GONOPROXY names it, downloads
+  in the downloads container, with its git configuration, even when
+  GOPRIVATE, which GONOPROXY overrides, doesn't name it: only that
+  configuration finds the module's repository, and the binary runs.
+  """
+  noProxyDownloadsCheck: Void @check {
+    let dep = directory
+      .withNewFile("go.mod", "module git.internal/dep.git\n\ngo 1.25\n")
+      .withNewFile("dep.go", "package dep\n\nconst Answer = 42\n")
+    let main = directory
+      .withNewFile("go.mod", "module example.com/noproxy\n\ngo 1.25\n\nrequire git.internal/dep.git v1.0.0\n")
+      .withNewFile("main.go", "package main\n\nimport (\n\t\"fmt\"\n\n\t\"git.internal/dep.git\"\n)\n\nfunc main() { fmt.Println(dep.Answer) }\n")
+    # The repository is reached only through the downloads container's git
+    # configuration, which maps its URL to a local path.
+    let downloads = container
+      .from("golang:1.27.3-alpine")
+      .withExec(["apk", "add", "--no-cache", "git"])
+      .withDirectory("/src/dep", dep)
+      .withExec(["sh", "-c", "set -e; cd /src/dep; git init -q; git add -A; git -c user.name=t -c user.email=t@example.com commit -qm v1; git tag v1.0.0; git clone -q --bare /src/dep /repos/dep.git; git config --global url./repos/.insteadOf https://git.internal/"])
+      .withEnvVariable("GOPRIVATE", "example.com/none")
+      .withEnvVariable("GONOPROXY", "git.internal")
+      .withEnvVariable("GOSUMDB", "off")
+    let made = downloads
+      .withDirectory("/ws", main)
+      .withWorkdir("/ws")
+      .withExec(["go", "mod", "tidy"])
+    let ws = made.directory("/ws").asWorkspace
+    let built = go(version: "1.27.3", downloads: downloads).modules(ws).get(key: ".").packages(ws).get(key: ".").binary(ws)
+    let out = container.from("golang:1.27.3-alpine").withFile("/usr/local/bin/noproxy", built).withExec(["noproxy"]).stdout
+    assert(out == "42\n", "the binary built with the directly fetched module printed: " + out)
+    null
+  }
+
+  """
   A failed compile says why: its error carries the compiler's message, not
   only the exec's exit code.
   """

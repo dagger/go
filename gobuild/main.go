@@ -900,7 +900,9 @@ go env GOOS GOARCH CGO_ENABLED GOVERSION > /gobuild/goenv
 		}
 		d := &downloader{public: public, private: caller, gomodcache: gomodcache, sums: entries,
 			target: newTarget(goenv, buildTags(append(append([]string(nil), envFlags...), flags...)))}
-		if d.privatePatterns, err = firstEnv(ctx, caller, "GOPRIVATE", "GONOPROXY"); err != nil {
+		// The modules the go command fetches directly rather than through a
+		// proxy: GONOPROXY's, or GOPRIVATE's when it's unset or empty.
+		if d.privatePatterns, err = firstEnv(ctx, caller, "GONOPROXY", "GOPRIVATE"); err != nil {
 			return nil, err
 		}
 		listed := <-imports

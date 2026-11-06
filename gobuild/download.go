@@ -127,9 +127,10 @@ var downloadEnv = []string{
 
 // downloader downloads, once each, the module versions in sums whose zips a
 // build reads. public runs a public module's download: the build's toolchain
-// with downloadEnv alone. private runs one GOPRIVATE or GONOPROXY names, in
-// the caller's own container, with its credentials, so its download is
-// shared only with builds that have them.
+// with downloadEnv alone. private runs one the go command fetches directly,
+// as GONOPROXY names it, or GOPRIVATE when GONOPROXY is unset, in the
+// caller's own container, with its credentials, so its download is shared
+// only with builds that have them.
 type downloader struct {
 	public, private *dagger.Container
 	privatePatterns string
