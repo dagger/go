@@ -227,8 +227,9 @@ func (m *Gobuild) Archives(
 	for _, bl := range blocks {
 		modFiles = append(modFiles, bl.modFiles...)
 	}
+	tool := manifestTool(b.toolImage)
 	ctr := b.modules.mount(b.base.
-		WithMountedFile("/gobuild/gohdr", b.gohdr), modFiles).
+		WithMountedFile("/gobuild/write-manifest", tool), modFiles).
 		WithMountedDirectory(b.roots.Src, b.src)
 	out := core.NewDirectory()
 	var entries strings.Builder
@@ -238,8 +239,8 @@ func (m *Gobuild) Archives(
 		archives = append(archives, r.file)
 		entries.WriteString(bl.importPath + "\tarchives/" + bl.output())
 		if bl.cgo {
-			at := "/gobuild/cgo/" + bl.name
-			ctr = ctr.WithMountedDirectory(at, r.dir)
+			at := "cgo/" + bl.name
+			ctr = ctr.WithMountedDirectory("/gobuild/"+at, r.dir)
 			var generated []*dagger.File
 			for _, f := range bl.cgoOutputs() {
 				entries.WriteString("\t" + at + "/" + f)
@@ -249,15 +250,22 @@ func (m *Gobuild) Archives(
 		}
 		entries.WriteString("\n")
 	}
+	// The settings the manifest records are the go command's where the plan
+	// ran it, as the plan left it: the toolchain it switched to, with the
+	// module cache it set up for it.
+	env := p.ran.
+		WithMountedFile("/gobuild/write-manifest", tool).
+		WithExec([]string{"sh", "-c", "cd " + shQuote(b.roots.Cwd) + " && /gobuild/write-manifest env > /gobuild/env.json"}, bare).
+		File("/gobuild/env.json")
 	// The manifest is read from its exec's evaluated output, so it is keyed
 	// by its content: the exec reads the whole listing, which any edit
 	// changes.
 	manifestDir, err := ctr.
 		WithMountedFile("/gobuild/list.json", p.ran.File("/gobuild/list.json")).
-		WithMountedFile("/gobuild/env.json", p.ran.File("/gobuild/env.json")).
+		WithMountedFile("/gobuild/env.json", env).
 		WithNewFile("/gobuild/entries.txt", entries.String()).
-		WithExec([]string{"sh", "-c", "mkdir -p /gobuild/manifest && /gobuild/gohdr manifest /gobuild/list.json /gobuild/env.json /gobuild/entries.txt " +
-			shQuote(strings.Join(buildTags(append(envFlags, flags...)), ",")) + " > /gobuild/manifest/manifest.json"}, bare).
+		WithExec([]string{"sh", "-c", "mkdir -p /gobuild/manifest && /gobuild/write-manifest /gobuild/list.json /gobuild/env.json /gobuild/entries.txt " +
+			shQuote(strings.Join(buildTags(append(envFlags, flags...)), ",")) + " /gobuild > /gobuild/manifest/manifest.json"}, bare).
 		Directory("/gobuild/manifest").Sync(ctx)
 	if err != nil {
 		return nil, err
@@ -304,7 +312,6 @@ func archiveWalk(ctx context.Context, toolImage string, base *dagger.Container, 
 	}
 	// go list -export prints the plan of what it compiles, as go build -n
 	// does, and its listing of the packages.
-	pre := "go env -json GOVERSION GOOS GOARCH CGO_ENABLED GOMODCACHE " + strings.Join(cgoVars, " ") + " > /gobuild/env.json && "
 	listCmd := []string{"go", "list", "-export", "-deps", "-n", "-json=" + listFields}
 	if tests {
 		listCmd = append(listCmd, "-test")
@@ -313,7 +320,7 @@ func archiveWalk(ctx context.Context, toolImage string, base *dagger.Container, 
 		packages = []string{"./..."}
 	}
 	goCmd := shJoin(append(append(listCmd, flags...), packages...)) + " > /gobuild/list.json"
-	p, err := b.planWith(ctx, headers, pre, goCmd)
+	p, err := b.planWith(ctx, headers, goCmd)
 	if err != nil {
 		return nil, err
 	}
@@ -361,6 +368,11 @@ type ArchiveCache struct {
 	Downloads []*dagger.Directory
 	// gohdr, the tool the build's execs run.
 	Tool *dagger.File
+	// golangci-lint's write-manifest, which writes the archives' manifest,
+	// and the source it is built from, which a fresh engine would otherwise
+	// fetch to find the build.
+	ManifestTool   *dagger.File
+	ManifestSource *dagger.Directory
 	// Go's own tools the build's execs run, built by its toolchain: pack,
 	// which packages with assembly run.
 	Tools *dagger.Directory
@@ -368,8 +380,8 @@ type ArchiveCache struct {
 
 // ArchiveBuilds compiles what Archives compiles, with its arguments, and
 // returns what it read from the cache instead of the export driver's
-// directory: each package's build, each module download, gohdr, and Go's
-// pack. A cache that is to have exactly these results, such as the cache an
+// directory: each package's build, each module download, gohdr,
+// write-manifest and its source, and Go's pack. A cache that is to have exactly these results, such as the cache an
 // engine image pre-warms, is filled from them.
 func (m *Gobuild) ArchiveBuilds(
 	ctx context.Context,
@@ -414,17 +426,13 @@ func (m *Gobuild) ArchiveBuilds(
 	for _, bl := range w.order {
 		dirs = append(dirs, w.results[bl.id].dir)
 	}
-	return &ArchiveCache{Builds: dirs, Downloads: w.build.downloads, Tool: w.build.gohdr, Tools: w.build.tools}, nil
+	return &ArchiveCache{Builds: dirs, Downloads: w.build.downloads, Tool: w.build.gohdr, ManifestTool: manifestTool(w.build.toolImage), ManifestSource: manifestSource(), Tools: w.build.tools}, nil
 }
 
 // listFields are the fields of go list's output Archives reads: the
-// packages, their names and modules, and the files their digests cover.
+// packages and their names, and what write-manifest reads, the manifest
+// module's ListFields: their modules and the files their digests cover.
 const listFields = "ImportPath,Name,Dir,ForTest,Module,GoFiles,CgoFiles,CFiles,CXXFiles,MFiles,HFiles,FFiles,SFiles,SwigFiles,SwigCXXFiles,SysoFiles,EmbedFiles"
-
-// cgoVars are the go command's settings cgo's output depends on, which the
-// manifest records, with the C compiler's version, for the export driver to
-// compare with its own.
-var cgoVars = []string{"CC", "CXX", "CGO_CFLAGS", "CGO_CPPFLAGS", "CGO_CXXFLAGS", "CGO_FFLAGS", "CGO_LDFLAGS"}
 
 // listedIDs is the set of package IDs in a "go list -json" listing, and the
 // set of its main packages, by import path, and of the packages of the main
@@ -1045,7 +1053,7 @@ func (b *build) plan(ctx context.Context, headers *dagger.File, flags []string, 
 	}
 	cmd = append(cmd, flags...)
 	cmd = append(cmd, "-o", planOut+"/out", pkg)
-	p, err := b.planWith(ctx, headers, "", shJoin(cmd))
+	p, err := b.planWith(ctx, headers, shJoin(cmd))
 	if err != nil {
 		return "", nil, ccInfo{}, nil, err
 	}
@@ -1131,8 +1139,8 @@ func (b *build) planHeaders(ctx context.Context, headers *dagger.File) (*dagger.
 }
 
 // planWith makes a plan as plan does, with goCmd the go command that prints
-// it, run after pre, which may be empty or a command ending in "&&".
-func (b *build) planWith(ctx context.Context, headers *dagger.File, pre, goCmd string) (*planned, error) {
+// it.
+func (b *build) planWith(ctx context.Context, headers *dagger.File, goCmd string) (*planned, error) {
 	planHdr, goDirs, err := b.planHeaders(ctx, headers)
 	if err != nil {
 		return nil, err
@@ -1148,7 +1156,7 @@ func (b *build) planWith(ctx context.Context, headers *dagger.File, pre, goCmd s
 		// end of go build's output, where it writes the error, and not the
 		// plan before it, which a large build makes hundreds of KB long.
 		WithExec([]string{"sh", "-c", b.unpackHeaders() +
-			" && cd " + shQuote(b.roots.Cwd) + " && " + pre + "{ " + goCmd + " 2> /gobuild/plan.txt" +
+			" && cd " + shQuote(b.roots.Cwd) + " && { " + goCmd + " 2> /gobuild/plan.txt" +
 			" || { status=$?; tail -n 40 /gobuild/plan.txt >&2; exit $status; }; }" +
 			" && /gobuild/gohdr weigh /gobuild/plan.txt > /gobuild/weights.txt" +
 			" && /gobuild/gohdr cc /gobuild/plan.txt > /gobuild/cc.txt"}, bare)

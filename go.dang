@@ -725,6 +725,17 @@ type GoArchiveBuilds {
   tool: File!
 
   """
+  golangci-lint's write-manifest, which writes the archives' manifest.
+  """
+  manifestTool: File!
+
+  """
+  The source write-manifest is built from, golangci-lint's manifest module at
+  gobuild's pin, which a fresh engine would otherwise fetch to find its build.
+  """
+  manifestSource: Directory!
+
+  """
   Go's own tools the builds run, built by its toolchain: pack.
   """
   tools: Directory!
@@ -1696,6 +1707,8 @@ type GoModule {
         builds: cache.builds.{{sync}}.map { build => build.sync },
         downloads: cache.downloads.{{sync}}.map { download => download.sync },
         tool: cache.tool,
+        manifestTool: cache.manifestTool,
+        manifestSource: cache.manifestSource,
         tools: cache.tools,
         helper: gomod.includesHelper,
       )

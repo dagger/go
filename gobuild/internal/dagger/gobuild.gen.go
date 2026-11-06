@@ -54,8 +54,8 @@ type GobuildArchiveBuildsOpts struct {
 
 // ArchiveBuilds compiles what Archives compiles, with its arguments, and
 // returns what it read from the cache instead of the export driver's
-// directory: each package's build, each module download, gohdr, and Go's
-// pack. A cache that is to have exactly these results, such as the cache an
+// directory: each package's build, each module download, gohdr,
+// write-manifest and its source, and Go's pack. A cache that is to have exactly these results, such as the cache an
 // engine image pre-warms, is filled from them.
 func (r *Gobuild) ArchiveBuilds(base *Container, source *Directory, headers *File, mountPath string, opts ...GobuildArchiveBuildsOpts) *GobuildArchiveCache {
 	assertNotNil("base", base)
@@ -513,6 +513,21 @@ func (r *GobuildArchiveCache) UnmarshalJSON(bs []byte) error {
 	}
 	*r = GobuildArchiveCache{query: selectNode(Connect().QueryBuilder(), id, "GobuildArchiveCache")}
 	return nil
+}
+
+func (r *GobuildArchiveCache) ManifestSource() *Directory {
+	q := r.query.Select("manifestSource")
+
+	return new(Directory).WithGraphQLQuery(q)
+}
+
+// golangci-lint's write-manifest, which writes the archives' manifest,
+// and the source it is built from, which a fresh engine would otherwise
+// fetch to find the build.
+func (r *GobuildArchiveCache) ManifestTool() *File {
+	q := r.query.Select("manifestTool")
+
+	return new(File).WithGraphQLQuery(q)
 }
 
 // gohdr, the tool the build's execs run.

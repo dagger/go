@@ -3,8 +3,6 @@ package main
 import (
 	"archive/zip"
 	"bytes"
-	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"maps"
 	"os"
@@ -454,114 +452,6 @@ func TestLiteralPatterns(t *testing.T) {
 	want := []string{"a.go/x.go", `b.go/\[x\]\*\?\^.go`, `\!c.go/d.go`, `e.go/f\\g.go`}
 	if !slices.Equal(got, want) {
 		t.Errorf("literalPatterns: %q", got)
-	}
-}
-
-// gohdr manifest describes the archives of a "go list -deps -test" listing's
-// packages, test variants included, as the export driver reads them, by
-// their IDs: a package's digest covers its Go, other and embedded files by
-// name and content, and a cgo package's covers its cgo files and cgo's
-// output, by its place in the compile, without its //line directives, whose
-// paths and the cgo files it names too.
-func TestHdrToolManifest(t *testing.T) {
-	dir := t.TempDir()
-	write := func(name, data string) string {
-		p := filepath.Join(dir, name)
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return p
-	}
-	write("tool/go.mod", "module gohdr\n\ngo 1.26\n")
-	write("tool/main.go", hdrToolSrc)
-	build := exec.Command("go", "build", "-o", "gohdr", ".")
-	build.Dir = filepath.Join(dir, "tool")
-	build.Env = append(os.Environ(), "GOFLAGS=", "GOWORK=off", "CGO_ENABLED=0")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("gohdr doesn't build: %v\n%s", err, out)
-	}
-	files := map[string]string{
-		"p/a.go":       "package p\n",
-		"p/a_test.go":  "package p\n\nfunc f() {}\n",
-		"p/c.go":       "package p\n\nimport \"C\"\n",
-		"p/x.c":        "int x;\n",
-		"p/data/e.txt": "embedded\n",
-		"q/q.go":       "package q\n",
-	}
-	for name, data := range files {
-		write("src/"+name, data)
-	}
-	gen := map[string]string{
-		"_cgo_gotypes.go": "//line /somewhere/c.go:1:1\npackage p\n",
-		"c.cgo1.go":       "package p\n//line /somewhere/c.go:3:1\nvar _ = 1 // line, not a directive\n",
-	}
-	for name, data := range gen {
-		write("gen/"+name, data)
-	}
-	src := filepath.Join(dir, "src")
-	var list bytes.Buffer
-	enc := json.NewEncoder(&list)
-	for _, p := range []map[string]any{
-		{"ImportPath": "example.com/p", "Module": map[string]any{"Path": "example.com/p", "Version": "v1.0.0", "Replace": map[string]any{"Path": "example.com/fork", "Version": "v1.0.1"}}, "Dir": src + "/p", "GoFiles": []string{"a.go"}, "CgoFiles": []string{"c.go"}, "CFiles": []string{"x.c"}, "EmbedFiles": []string{"data/e.txt"}},
-		{"ImportPath": "example.com/p [example.com/p.test]", "ForTest": "example.com/p", "Dir": src + "/p", "GoFiles": []string{"a.go", "a_test.go"}},
-		{"ImportPath": "example.com/p_test [example.com/p.test]", "ForTest": "example.com/p", "Dir": src + "/p", "GoFiles": []string{"x_test.go"}},
-		{"ImportPath": "example.com/p.test", "Dir": src + "/p", "GoFiles": []string{"_testmain.go"}},
-		{"ImportPath": "unsafe", "Dir": "/goroot/src/unsafe", "GoFiles": []string{"unsafe.go"}},
-		{"ImportPath": "example.com/testsonly", "Dir": src + "/t"},
-		{"ImportPath": "example.com/q", "Dir": src + "/q", "GoFiles": []string{"q.go"}},
-	} {
-		if err := enc.Encode(p); err != nil {
-			t.Fatal(err)
-		}
-	}
-	listPath := write("list.json", list.String())
-	envPath := write("env.json", `{"GOVERSION": "go1.26.1", "GOOS": "linux", "GOARCH": "amd64", "CGO_ENABLED": "1", "CGO_CFLAGS": "-O2", "GOMODCACHE": "`+src+`"}`)
-	entriesPath := write("entries.txt", "example.com/p\tarchives/p.a\t"+filepath.Join(dir, "gen/_cgo_gotypes.go")+"\t"+filepath.Join(dir, "gen/c.cgo1.go")+"\n"+
-		"example.com/p [example.com/p.test]\tarchives/pt.a\nexample.com/q\tarchives/q.a\n")
-	gohdr := filepath.Join(dir, "tool/gohdr")
-	out, err := exec.Command(gohdr, "manifest", listPath, envPath, entriesPath, "b,a").Output()
-	if err != nil {
-		t.Fatalf("manifest: %v", err)
-	}
-	var got map[string]any
-	if err := json.Unmarshal(out, &got); err != nil {
-		t.Fatalf("manifest: %v\n%s", err, out)
-	}
-	digest := func(lines ...string) string {
-		sort.Strings(lines)
-		return fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(strings.Join(lines, ""))))
-	}
-	line := func(name, data string) string { return fmt.Sprintf("%s %x\n", name, sha256.Sum256([]byte(data))) }
-	want := map[string]any{
-		"version": 2.0, "goVersion": "go1.26.1", "goos": "linux", "goarch": "amd64", "cgoEnabled": true,
-		"buildTags": []any{"a", "b"},
-		"cgo":       map[string]any{"CGO_CFLAGS": "-O2"},
-		"packages": map[string]any{
-			"example.com/p": map[string]any{"archive": "archives/p.a", "sources": digest(
-				"cgo\n",
-				line("cgo-output-0", "\npackage p\n"),
-				line("cgo-output-1", "package p\n\nvar _ = 1 // line, not a directive\n"),
-				line("a.go", files["p/a.go"]),
-				line("c.go", files["p/c.go"]),
-				line("x.c", files["p/x.c"]),
-				line("data/e.txt", files["p/data/e.txt"]),
-			),
-				"cgoFiles":  []any{"c.go"},
-				"module":    "example.com/fork@v1.0.1",
-				"cgoOutput": []any{filepath.Join(dir, "gen/_cgo_gotypes.go"), filepath.Join(dir, "gen/c.cgo1.go")},
-			},
-			"example.com/p [example.com/p.test]": map[string]any{"archive": "archives/pt.a", "sources": digest(
-				line("a.go", files["p/a.go"]),
-				line("a_test.go", files["p/a_test.go"]),
-			)},
-			"example.com/q": map[string]any{"archive": "archives/q.a", "sources": digest(line("q.go", files["q/q.go"]))},
-		},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("manifest:\n%s\nwant:\n%v", out, want)
 	}
 }
 

@@ -837,7 +837,8 @@ type GoDev {
   A module whose go directive asks for a newer Go than the base's builds with
   the toolchain the go command switches to, as go build would, and the
   binary reports that Go; so does a dependency that asks for it too, served
-  from a file proxy in the base, the toolchain from the default proxy.
+  from a file proxy in the base, the toolchain from the default proxy. The
+  module's archives are that Go's too, as their manifest says.
   """
   toolchainSwitchCheck: Void @check {
     let dep = directory
@@ -864,6 +865,10 @@ type GoDev {
     let built = go(base: base).modules(ws).get(key: ".").packages(ws).get(key: ".").binary(ws)
     let out = base.withFile("/usr/local/bin/switch", built).withExec(["switch"]).stdout
     assert(out == "go1.26.1 42\n", "the binary's Go and its dependency: " + out)
+    # The archives' manifest records the Go that compiled them, the one the
+    # go command switched to.
+    let manifest = go(base: base).module(ws, ".").archives(ws).file("manifest.json").contents
+    assert(manifest.contains("\"goVersion\": \"go1.26.1\""), "the archives' manifest: " + manifest)
     null
   }
 
@@ -1146,8 +1151,8 @@ type GoDev {
   """
   A module's archive builds are what its archives read from the cache: a
   build per package the archives hold, each its own, a download per module
-  version the build read, and the build's three tools: gohdr, pack and the
-  includes helper.
+  version the build read, and the build's four tools: gohdr, write-manifest
+  with its source, pack and the includes helper.
   """
   archiveBuildsCheck(ws: Workspace!): Void @check {
     let mod = go(version: "1.27.3").module(ws, downloadsFixturePath)
@@ -1163,6 +1168,8 @@ type GoDev {
     let distinct = builds.reduce([]) { seen, d => if (seen.contains(d)) { seen } else { seen + [d] } }
     assert(distinct.length == builds.length, "archive builds repeat a build")
     assert(built.tool.name == "gohdr", "archive builds: the tool is " + built.tool.name + ", not gohdr")
+    assert(built.manifestTool.name == "write-manifest", "archive builds: the manifest tool is " + built.manifestTool.name + ", not write-manifest")
+    assert(built.manifestSource.entries.contains("go.mod"), "archive builds: the manifest tool's source is " + built.manifestSource.entries.join(", ") + ", without go.mod")
     assert(built.tools.entries.contains("pack"), "archive builds: the tools are " + built.tools.entries.join(", ") + ", without pack")
   }
 
