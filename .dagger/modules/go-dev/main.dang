@@ -914,8 +914,9 @@ type GoDev {
   """
   A build builds Go's pack tool only when its toolchain runs it: Go 1.25 and
   later run "go tool pack" for each package with assembly, the runtime among
-  them, so a build on Go 1.27 builds pack once, and Go 1.24, which runs its
-  own pack, builds none. The base's go command writes a line to a cache
+  them, so a build on Go 1.27 builds pack once for each machine an engine
+  runs on, which its tools directory holds, and Go 1.24, which runs its own
+  pack, builds none. The base's go command writes a line to a cache
   volume of the run's own each time it builds pack, and the base carries the
   run's name, so no earlier run's cached build stands in for it.
   """
@@ -924,7 +925,7 @@ type GoDev {
     let old = packBuilds("1.24", run)
     let current = packBuilds("1.27.3", run)
     assert(old == "", "a build on Go 1.24 built pack: " + old)
-    assert(current == "pack\n", "a build on Go 1.27 built pack other than once: " + current)
+    assert(current == "pack\npack\n", "a build on Go 1.27 built pack other than once for each of the two machines: " + current)
     null
   }
 
@@ -1169,8 +1170,8 @@ type GoDev {
     assert(downloads.length == 1, "archive builds: " + toString(downloads.length) + " downloads, for 1 module download")
     let distinct = builds.reduce([]) { seen, d => if (seen.contains(d)) { seen } else { seen + [d] } }
     assert(distinct.length == builds.length, "archive builds repeat a build")
-    assert(built.tool.name == "gohdr", "archive builds: the tool is " + built.tool.name + ", not gohdr")
-    assert(built.manifestTool.name == "write-manifest", "archive builds: the manifest tool is " + built.manifestTool.name + ", not write-manifest")
+    assert(built.tool.entries.contains("gohdr"), "archive builds: the tool is " + built.tool.entries.join(", ") + ", without gohdr")
+    assert(built.manifestTool.entries.contains("write-manifest"), "archive builds: the manifest tool is " + built.manifestTool.entries.join(", ") + ", without write-manifest")
     assert(built.manifestSource.entries.contains("go.mod"), "archive builds: the manifest tool's source is " + built.manifestSource.entries.join(", ") + ", without go.mod")
     assert(built.tools.entries.contains("pack"), "archive builds: the tools are " + built.tools.entries.join(", ") + ", without pack")
   }

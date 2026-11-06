@@ -133,12 +133,13 @@ var downloadEnv = []string{
 // only with builds that have them.
 type downloader struct {
 	public, private *dagger.Container
-	gohdr           *dagger.File
 	privatePatterns string
 	gomodcache      string
 	sums            []sumEntry
 	// target is what discover evaluates build constraints against.
 	target target
+	// hdr is gohdr, for every machine an engine runs on (hdrTools).
+	hdr *dagger.Directory
 }
 
 // discover downloads the modules a build of the source may read, as the go
@@ -191,7 +192,11 @@ func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDir str
 			defer close(m.done)
 			gate <- struct{}{}
 			defer func() { <-gate }()
-			dir, err := d.download(e).Sync(ctx)
+			// A download is the same whichever platform made it.
+			dir, err := declared(ctx, d.download(e), d.target.platform())
+			if err == nil {
+				dir, err = dir.Sync(ctx)
+			}
 			var list string
 			if err == nil {
 				list, err = dir.File(packName(e) + ".imports").Contents(ctx)
@@ -498,7 +503,7 @@ func (d *downloader) download(e sumEntry) *dagger.Directory {
 	if d.privatePatterns != "" && matchPrefixPatterns(d.privatePatterns, e.path) {
 		ctr = d.private
 	}
-	return downloadModule(ctr, d.gohdr, d.gomodcache, e)
+	return downloadModule(ctr, d.hdr, d.gomodcache, e)
 }
 
 // moduleDirName is a module version's directory name in the module cache.
@@ -534,7 +539,7 @@ func packName(e sumEntry) string {
 // directory is there before the go command runs, so it takes the module as
 // extracted once it has the zip and its checksum, and gohdr packs the
 // module from the zip.
-func downloadModule(ctr *dagger.Container, gohdr *dagger.File, gomodcache string, e sumEntry) *dagger.Directory {
+func downloadModule(ctr *dagger.Container, hdr *dagger.Directory, gomodcache string, e sumEntry) *dagger.Directory {
 	q := e.path + "@" + e.version
 	meta := strings.TrimSuffix(zipPath(e), ".zip")
 	script := "set -e\nmkdir -p " + shQuote(modCacheDir+"/"+moduleDirName(e)) + " /gobuild/empty\n" +
@@ -544,7 +549,7 @@ func downloadModule(ctr *dagger.Container, gohdr *dagger.File, gomodcache string
 		"cd /gobuild/empty\ngo mod download -json " + shQuote(q) + " >/gobuild/download.json || { cat /gobuild/download.json >&2; exit 1; }\n" +
 		"[ \"$(cat " + shQuote(modCacheDir+"/"+meta+".ziphash") + ")\" = " + shQuote(e.zip) + " ] || { echo " +
 		shQuote(q+": checksum mismatch: go.sum has "+e.zip) + " >&2; exit 1; }\n" +
-		"/gobuild/gohdr packmod " + modCacheDir + " " + shQuote(modCacheDir+"/"+packName(e)) + " " +
+		hdrBin + " packmod " + modCacheDir + " " + shQuote(modCacheDir+"/"+packName(e)) + " " +
 		shQuote(zipPath(e)) + " " + shQuote(moduleDirName(e)) + " " + shQuote(meta+".mod") + " " + shQuote(meta+".info") + " " + shQuote(meta+".ziphash") + "\n" +
 		// Not part of the module version: its directory, which a build
 		// extracts from the zip on its own; the go command's locks; and its
@@ -556,7 +561,7 @@ func downloadModule(ctr *dagger.Container, gohdr *dagger.File, gomodcache string
 		// only for the same pair of checksums.
 		"\n# go.mod " + e.mod
 	return ctr.
-		WithMountedFile("/gobuild/gohdr", gohdr, dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
+		WithMountedDirectory(hdrDir, hdr, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true}).
 		WithExec([]string{"sh", "-c", script}, bare).
 		Directory(modCacheDir)
 }

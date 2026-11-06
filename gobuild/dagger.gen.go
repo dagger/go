@@ -68,8 +68,8 @@ func (r ArchiveCache) MarshalJSON() ([]byte, error) {
 	var concrete struct {
 		Builds         []*dagger.Directory
 		Downloads      []*dagger.Directory
-		Tool           *dagger.File
-		ManifestTool   *dagger.File
+		Tool           *dagger.Directory
+		ManifestTool   *dagger.Directory
 		ManifestSource *dagger.Directory
 		Tools          *dagger.Directory
 	}
@@ -86,8 +86,8 @@ func (r *ArchiveCache) UnmarshalJSON(bs []byte) error {
 	var concrete struct {
 		Builds         []*dagger.Directory
 		Downloads      []*dagger.Directory
-		Tool           *dagger.File
-		ManifestTool   *dagger.File
+		Tool           *dagger.Directory
+		ManifestTool   *dagger.Directory
 		ManifestSource *dagger.Directory
 		Tools          *dagger.Directory
 	}

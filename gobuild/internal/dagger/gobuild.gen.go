@@ -522,23 +522,25 @@ func (r *GobuildArchiveCache) ManifestSource() *Directory {
 }
 
 // golangci-lint's write-manifest, which writes the archives' manifest,
-// and the source it is built from, which a fresh engine would otherwise
-// fetch to find the build.
-func (r *GobuildArchiveCache) ManifestTool() *File {
+// for every machine an engine runs on (machineTools), and the source it
+// is built from, which a fresh engine would otherwise fetch to find the
+// build.
+func (r *GobuildArchiveCache) ManifestTool() *Directory {
 	q := r.query.Select("manifestTool")
 
-	return new(File).WithGraphQLQuery(q)
+	return new(Directory).WithGraphQLQuery(q)
 }
 
-// gohdr, the tool the build's execs run.
-func (r *GobuildArchiveCache) Tool() *File {
+// gohdr, the tool the build's execs run, for every machine an engine
+// runs on (machineTools).
+func (r *GobuildArchiveCache) Tool() *Directory {
 	q := r.query.Select("tool")
 
-	return new(File).WithGraphQLQuery(q)
+	return new(Directory).WithGraphQLQuery(q)
 }
 
-// Go's own tools the build's execs run, built by its toolchain: pack,
-// which packages with assembly run.
+// Go's own tools the build's execs run, built by its toolchain for every
+// machine an engine runs on: pack, which packages with assembly run.
 func (r *GobuildArchiveCache) Tools() *Directory {
 	q := r.query.Select("tools")
 
