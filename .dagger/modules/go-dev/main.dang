@@ -15,6 +15,8 @@ type GoDev {
   let vendoredFixturePath: String! = "testdata/go-module-vendored"
   let downloadsFixturePath: String! = "testdata/go-module-downloads"
   let unreadableFixturePath: String! = "fixtures/go-module-unreadable"
+  # The golangci-lint archivesCheck lints with, a release that lints Go 1.27.
+  let lintVersion: String! = "2.15.0"
   # The other modules in this repository keep their own fixtures, and several
   # of theirs fail on purpose: golangci-lint's does not even compile.
   let siblingFixtures: [String!]! = ["!golangci-lint", "!staticcheck"]
@@ -1181,9 +1183,10 @@ type GoDev {
   go list's files, cgo's output for a cgo package, which the archives carry;
   and the module's packages type-check against the archives' export data.
   The dependencies' archives alone leave out the module's packages, and stay
-  the same across an edit of them. archivescheck, a copy of the driver's digest, checks
-  them against the go command in a container that mounts the source
-  elsewhere.
+  the same across an edit of them. golangci-lint, through its export driver at
+  the commit go-dev pins, lints the module from the archives alone: the driver
+  takes every package's export data from them, its digest matching what each
+  archive was compiled from, and compiles nothing.
   """
   archivesCheck: Void @check {
     let source = directory
@@ -1200,20 +1203,17 @@ type GoDev {
     let ws = source.asWorkspace
     let archives = go(base: cgoCxxBase).module(ws, ".").archives(ws)
     let manifest = archives.file("manifest.json").contents
-    let checked = cgoCxxBase
-      .withDirectory("/check", currentModule.source.directory("archivescheck"))
-      .withNewFile("/check/go.mod", "module archivescheck\n\ngo 1.26\n")
-      .withWorkdir("/check")
-      .withExec(["go", "build", "-o", "/usr/local/bin/archivescheck", "."])
-      .withDirectory("/elsewhere", source)
-      .withDirectory("/archives", archives)
-      .withWorkdir("/elsewhere")
-      .withExec(["archivescheck", "/archives"])
-      .stdout
-    assert(
-      checked.trimSpace.split("\n").length == 1 and checked.hasPrefix("checked "),
-      "the archives: " + checked,
-    )
+    # The archives are built in the lint's own image, so that the driver
+    # finds the C settings cgo's output was made with.
+    let lintBase = golangciLint(version: lintVersion, goVersion: "1.27.3").base
+    let lintArchives = go(base: lintBase).module(ws, ".").archives(ws)
+    let report = golangciLint(version: lintVersion, goVersion: "1.27.3", exportArchives: lintArchives)
+      .module(ws, ".")
+      .lintReport(ws)
+    assert(report.hasPrefix("exit code: 0\n"), "golangci-lint through the archives: " + report)
+    assert(report.contains("\"prebuilt\":"), "the export driver served no archive: " + report)
+    let unserved = ["\"declined\"", "\"compiled\"", "\"golist\"", "\"missing\"", "\"compileErrors\""].filter { k => report.contains(k) }
+    assert(unserved.length == 0, "the export driver didn't serve every package from the archives (" + unserved.join(", ") + "): " + report)
     let wanted = ["\"example.com/archives/cmd/tool\"", "\"example.com/archives/testonly\"", "\"net/http/httptest\"", "\"runtime/cgo\"", "\"example.com/archives/cg_test [example.com/archives/cg.test]\""]
     let missing = wanted.filter { p => manifest.contains(p + ": {") == false }
     assert(missing.length == 0, "the manifest lacks " + missing.join(", ") + ": " + manifest)
