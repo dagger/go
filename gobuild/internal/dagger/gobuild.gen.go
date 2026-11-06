@@ -409,7 +409,7 @@ func (r *GobuildArchiveCache) Builds(ctx context.Context) ([]Directory, error) {
 		out := []Directory{}
 
 		for i := range fields {
-			val := *new(Directory).WithGraphQLQuery(selectNode(q.Root(), fields[i].Id, "Directory"))
+			val := *loaded[*Directory](q, fields[i].Id)
 			out = append(out, val)
 		}
 
@@ -442,7 +442,7 @@ func (r *GobuildArchiveCache) Downloads(ctx context.Context) ([]Directory, error
 		out := []Directory{}
 
 		for i := range fields {
-			val := *new(Directory).WithGraphQLQuery(selectNode(q.Root(), fields[i].Id, "Directory"))
+			val := *loaded[*Directory](q, fields[i].Id)
 			out = append(out, val)
 		}
 

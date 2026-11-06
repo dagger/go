@@ -58,4 +58,4 @@ replace go.opentelemetry.io/otel/sdk/log => go.opentelemetry.io/otel/sdk/log v0.
 // v1.0.0-beta.26 is the release in flight, whose library isn't published yet: until it is, gobuild builds
 // with that release's library from the engine's pull request, at this commit. The follow-up pull request
 // after the release requires the published library instead and drops this.
-replace dagger.io/dagger v1.0.0-beta.26 => github.com/dagger/dagger/sdk/go v0.21.5-0.20261106200414-871f1e8a2388
+replace dagger.io/dagger v1.0.0-beta.26 => github.com/dagger/dagger/sdk/go v0.21.5-0.20261106210403-1aaeba312050
