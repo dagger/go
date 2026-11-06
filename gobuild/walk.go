@@ -151,8 +151,7 @@ type result struct {
 	link     *dagger.File
 	linkErr  error
 	linkDone chan struct{}
-	// dir is the package's work directory, which holds file: evaluated, but
-	// for the link's.
+	// dir is the package's work directory, which holds file.
 	dir  *dagger.Directory
 	err  error // set before done closes; dependents read it
 	done chan struct{}
@@ -280,17 +279,12 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 				r.err = execFailure(r.err)
 				return
 			}
-			// Evaluate the output directory first, then read the file from
-			// it: only a file read from an evaluated directory is keyed by its
+			// The request that runs the exec reads the archive, keyed by its
 			// content, so a package whose archive came out unchanged leaves
 			// its dependents' execs cached.
-			out, err := out.Sync(ctx)
-			if err != nil {
-				r.err = execFailure(err)
-				return
-			}
 			r.dir = out
-			r.file, r.err = out.File(n.Output).Sync(ctx)
+			r.file, r.err = out.File(n.Output).Sync(ctx, core.FileSyncOpts{KeyByContent: true})
+			r.err = execFailure(r.err)
 			switch {
 			case r.err != nil || !links:
 			case n.LinkOutput == n.Output:
@@ -299,7 +293,7 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 				asyncLink = true
 				go func() {
 					defer close(r.linkDone)
-					r.link, r.linkErr = out.File(n.LinkOutput).Sync(ctx)
+					r.link, r.linkErr = out.File(n.LinkOutput).Sync(ctx, core.FileSyncOpts{KeyByContent: true})
 				}()
 			}
 		}()
