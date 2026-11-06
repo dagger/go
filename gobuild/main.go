@@ -750,11 +750,13 @@ func newBuild(ctx context.Context, toolImage string, ctr *dagger.Container, imag
 			ctr = ctr.WithoutMount(m)
 		}
 	}
-	if callerMounts, err := caller.Mounts(ctx); err == nil {
-		for _, m := range callerMounts {
-			if caches[m] {
-				caller = caller.WithoutMount(m)
-			}
+	callerMounts, err := caller.Mounts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, m := range callerMounts {
+		if caches[m] {
+			caller = caller.WithoutMount(m)
 		}
 	}
 	gomodcache, err := ctr.EnvVariable(ctx, "GOMODCACHE")
@@ -887,13 +889,14 @@ go env GOOS GOARCH CGO_ENABLED GOVERSION > /gobuild/goenv
 	start := first.Directory(modCacheDir)
 	// What the go command downloaded before any module, such as a
 	// toolchain, is recorded in the module cache it starts from.
-	startSums := make(chan map[string]string, 1)
+	type sumsListing struct {
+		sums map[string]string
+		err  error
+	}
+	startSums := make(chan sumsListing, 1)
 	go func() {
 		sums, err := moduleSums(ctx, base, start)
-		if err != nil {
-			sums = nil
-		}
-		startSums <- sums
+		startSums <- sumsListing{sums, err}
 	}()
 	entries := parseGoSums([]string{sumFile})
 	b.mods = start
@@ -901,7 +904,11 @@ go env GOOS GOARCH CGO_ENABLED GOVERSION > /gobuild/goenv
 	if err != nil {
 		return nil, err
 	}
-	if switched, _ := first.Directory("/gobuild").Glob(ctx, "switched"); len(switched) > 0 {
+	switched, err := first.Directory("/gobuild").Glob(ctx, "switched")
+	if err != nil {
+		return nil, err
+	}
+	if len(switched) > 0 {
 		entries = nil
 	} else {
 		d := &downloader{public: public, private: caller, gohdr: b.gohdr, gomodcache: gomodcache, sums: entries,
@@ -932,10 +939,11 @@ go env GOOS GOARCH CGO_ENABLED GOVERSION > /gobuild/goenv
 		}
 		b.fetch = d.lazyZip
 	}
-	b.sums = map[string]string{}
-	for k, v := range <-startSums {
-		b.sums[k] = v
+	listedSums := <-startSums
+	if listedSums.err != nil {
+		return nil, fmt.Errorf("start module cache checksums: %w", listedSums.err)
 	}
+	b.sums = listedSums.sums
 	for _, e := range entries {
 		if e.zip != "" {
 			b.sums[escapeModule(e.path)+"@"+escapeModule(e.version)] = e.zip
