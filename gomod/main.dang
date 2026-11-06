@@ -841,18 +841,9 @@ type GoMod {
   let scanned(ws: Workspace!, test: Boolean!, generate: Boolean!): Directory! {
     let testFlags = if (test) { ["--test"] } else { [] }
     let generateFlags = if (generate) { ["--generate"] } else { [] }
-    # Gomod.includesHelper, in process, which Gomod.scanner builds; as there,
-    # the helper builds while the workspace syncs.
+    # As in Gomod.scanner, the helper builds while the workspace syncs.
     let parts = {{
-      helper: container
-        .from(gomod.goImage(gomod.scannerVersion))
-        # The same download retry as withGoCaches.
-        .withEnvVariable("GOPROXY", "https://proxy.golang.org|https://proxy.golang.org|direct")
-        .withoutEntrypoint
-        .withWorkdir("/helpers/go-includes")
-        .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
-        .withExec(["go", "build", "-gcflags=std=-l", "-o", "/usr/local/bin/go-includes", "."])
-        .sync,
+      helper: gomod.includesHelper.sync,
       source: ws.directory("/", include: gomod.goSourceInclude).sync,
     }}
     parts.helper
