@@ -460,8 +460,8 @@ type Gomod {
   The image goContainer starts from for a Go version. The version this
   module's tools build with is named by digest, so a container from it
   needs no registry lookup and is the same in every session. This is the
-  one place that digest is written: go builds gobuild's own tool in this
-  image too, so a build pulls one Go image.
+  only definition of that image: go builds gobuild's own tool in it too,
+  so the tools of this workspace and gobuild's share one Go image.
   """
   goImage(version: String!): String! {
     if (version == scannerVersion) {
