@@ -331,6 +331,9 @@ type goFileFacts struct {
 	// kinds and tests are what the file marks its directory as in discovery.
 	kinds string
 	tests []string
+	// toolchain is which of the toolchain's own build tags the file's build
+	// constraints name.
+	toolchain toolchainTags
 	// generates reports a go:generate command line, as go generate reads one.
 	generates bool
 }
@@ -401,6 +404,7 @@ func readGoFile(full, rel string) *goFileFacts {
 	}
 
 	facts.kinds, facts.tests = fileKinds(rel, data, strings.HasSuffix(rel, "_test.go"))
+	facts.toolchain = constraintToolchainTags(rel, data)
 	for line := range strings.SplitSeq(string(data), "\n") {
 		if strings.HasPrefix(line, "//go:generate ") || strings.HasPrefix(line, "//go:generate\t") {
 			facts.generates = true

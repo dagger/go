@@ -2472,7 +2472,8 @@ type GoDev {
   Test discovery lists only what go test runs: tests in files that build for
   the engine's platform with the test container's Go version, cgo and GOFLAGS
   build tags, and examples with an output comment. A custom base supplies its
-  own toolchain, cgo and GOFLAGS.
+  own toolchain, cgo and GOFLAGS; its go is asked only when a test file's
+  constraints name a Go release, or cgo while CGO_ENABLED is unset.
   """
   buildConstraintsCheck: Void @check {
     let fixture = directory
@@ -2505,6 +2506,36 @@ type GoDev {
     assert(
       raced.get(key: "c").tests.keys == ["TestBuilt", "TestCgo", "TestNewerGo", "TestRace"],
       "discovery did not follow -race's build tag",
+    )
+    # With no Go release or cgo named, GOFLAGS comes from the base's
+    # environment, and the base's go, which isn't on this base's PATH, never
+    # runs.
+    let tagsOnly = directory
+      .withNewFile("d/go.mod", "module example.com/d\n\ngo 1.22\n")
+      .withNewFile("d/d_test.go", "package d\nimport \"testing\"\nfunc TestBuilt(t *testing.T) {}\n")
+      .withNewFile("d/never_test.go", "//go:build never\n\npackage d\nimport \"testing\"\nfunc TestNever(t *testing.T) {}\n")
+      .withNewFile("d/norace_test.go", "//go:build !race\n\npackage d\nimport \"testing\"\nfunc TestNoRace(t *testing.T) {}\n")
+      .withNewFile("d/tagged_test.go", "//go:build integration\n\npackage d\nimport \"testing\"\nfunc TestTagged(t *testing.T) {}\n")
+      .asWorkspace
+    let noGo = base
+      .withEnvVariable("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+      .withEnvVariable("GOFLAGS", "-count=1 -tags=integration")
+    let fromEnv = go(base: noGo).module(tagsOnly, "d").packages(tagsOnly)
+    assert(
+      fromEnv.get(key: "d").tests.keys == ["TestBuilt", "TestNoRace", "TestTagged"],
+      "discovery did not take the custom base's GOFLAGS from its environment",
+    )
+    # An empty CGO_ENABLED is unset to go, which then turns cgo on for a base
+    # with a C compiler, so its go is asked.
+    let cgoOnly = directory
+      .withNewFile("e/go.mod", "module example.com/e\n\ngo 1.22\n")
+      .withNewFile("e/e_test.go", "package e\nimport \"testing\"\nfunc TestBuilt(t *testing.T) {}\n")
+      .withNewFile("e/cgo_test.go", "//go:build cgo\n\npackage e\nimport \"testing\"\nfunc TestCgo(t *testing.T) {}\n")
+      .asWorkspace
+    let emptyCgo = go(base: cgoCxxBase.withEnvVariable("CGO_ENABLED", "")).module(cgoOnly, "e").packages(cgoOnly)
+    assert(
+      emptyCgo.get(key: "e").tests.keys == ["TestCgo", "TestBuilt"],
+      "discovery read an empty CGO_ENABLED as cgo off",
     )
     null
   }
