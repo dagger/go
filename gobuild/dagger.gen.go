@@ -639,7 +639,14 @@ func DaggerDispatch(ctx context.Context, parentJSON []byte, parentName string, f
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg planImports", err))
 				}
 			}
-			return (*Gobuild).Discover(&parent, ctx, public, private, privatePatterns, hdr, gomodcache, sums, goenv, tags, imports, planImports)
+			var own []string
+			if inputArgs["own"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["own"]), &own)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg own", err))
+				}
+			}
+			return (*Gobuild).Discover(&parent, ctx, public, private, privatePatterns, hdr, gomodcache, sums, goenv, tags, imports, planImports, own)
 		case "TestBinary":
 			var parent Gobuild
 			err = json.Unmarshal(parentJSON, &parent)

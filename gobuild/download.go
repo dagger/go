@@ -140,6 +140,10 @@ type downloader struct {
 	target target
 	// hdr is gohdr, for every machine an engine runs on (hdrTools).
 	hdr *dagger.Directory
+	// own is the paths of modules the build's source provides, whose
+	// packages discover follows into the source when it has it, and
+	// otherwise, in the discovery call, neither downloads nor follows.
+	own []string
 }
 
 // discover downloads the modules a build of the source may read, as the go
@@ -248,6 +252,10 @@ func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDir str
 				continue
 			}
 			seenPkgs[ip] = true
+			if inModules(ip, d.own) {
+				mu.Unlock()
+				continue
+			}
 			var ms []*module
 			for _, e := range providers(byPath, ip) {
 				ms = append(ms, start(e))
@@ -494,6 +502,27 @@ func (src sourceImports) outside(pkgDir string) (imports, plan, dirs []string) {
 	return imports, plan, srcDirs.src
 }
 
+// ownModules is the paths of the source's modules that go.sum's entries
+// may also provide a package of: a module go.sum names a version of, or one
+// within it or around it. A dependency's import of such a module's package
+// is the source's to follow when the source has the package, and otherwise
+// the download's: so the discovery call is given them, and downloads
+// neither. A source's other modules, nearly always all of them, are left out,
+// and so is its module paths' part of the call's key.
+func (src sourceImports) ownModules(entries []sumEntry) []string {
+	own := []string{}
+	for _, m := range src.mods {
+		for _, e := range entries {
+			if e.zip != "" && (inModules(e.path, []string{m.path}) || inModules(m.path, []string{e.path})) {
+				own = append(own, m.path)
+				break
+			}
+		}
+	}
+	sort.Strings(own)
+	return own
+}
+
 // dirsOf is every source directory that may hold the package with import
 // path ip, by any module of the source whose path is a prefix of it, or any
 // directory a go.mod replaces such a module with, whatever module path its
@@ -562,6 +591,18 @@ func providers(byPath map[string][]sumEntry, ip string) []sumEntry {
 		}
 		p = p[:i]
 	}
+}
+
+// inModules reports whether the package with import path ip is in one of
+// the modules with paths mods: it is one of them, or under one by path
+// elements.
+func inModules(ip string, mods []string) bool {
+	for _, m := range mods {
+		if ip == m || strings.HasPrefix(ip, m+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // inModule reports whether a module may provide the package with import

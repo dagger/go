@@ -307,7 +307,7 @@ type GobuildDiscoverOpts struct {
 // go.sums, finds it in one request, instead of two for each module, and an
 // edit of the build's own source that changes none of those imports leaves
 // it as it is.
-func (r *Gobuild) Discover(public *Container, hdr *Directory, gomodcache string, sums string, goenv string, imports []string, planImports []string, opts ...GobuildDiscoverOpts) *GobuildDiscovery {
+func (r *Gobuild) Discover(public *Container, hdr *Directory, gomodcache string, sums string, goenv string, imports []string, planImports []string, own []string, opts ...GobuildDiscoverOpts) *GobuildDiscovery {
 	assertNotNil("public", public)
 	assertNotNil("hdr", hdr)
 	q := r.query.Select("discover")
@@ -332,6 +332,7 @@ func (r *Gobuild) Discover(public *Container, hdr *Directory, gomodcache string,
 	q = q.Arg("goenv", goenv)
 	q = q.Arg("imports", imports)
 	q = q.Arg("planImports", planImports)
+	q = q.Arg("own", own)
 
 	return &GobuildDiscovery{
 		query:     q,

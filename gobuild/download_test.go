@@ -344,3 +344,36 @@ func TestGoSum(t *testing.T) {
 		t.Errorf("goSum of its own output = %q, want %q", got, want)
 	}
 }
+
+// The discovery call is given only the source's modules that go.sum may
+// also provide a package of: a version of the module itself, of one within
+// it, or of one around it. Any other, such as a module named only by its
+// source, is left out of the call.
+func TestOwnModules(t *testing.T) {
+	src := parseSourceImports(newTarget("linux\namd64\n0\ngo1.27.3\n", nil), "mod . example.com/app\n"+
+		"mod tools example.com/app/tools\n"+
+		"mod lib example.com/lib\n"+
+		"mod nested example.com/outer/nested\n"+
+		"mod inner example.com/inner\n")
+	entries := parseGoSums([]string{
+		"example.com/lib v1.0.0 h1:lib=\n" +
+			"example.com/outer v1.0.0 h1:outer=\n" +
+			"example.com/inner/sub v1.0.0 h1:sub=\n" +
+			"example.com/app/tools v0.1.0/go.mod h1:toolsmod=\n" +
+			"example.com/apple v1.0.0 h1:apple=\n",
+	})
+	want := []string{"example.com/inner", "example.com/lib", "example.com/outer/nested"}
+	if got := src.ownModules(entries); !reflect.DeepEqual(got, want) {
+		t.Errorf("ownModules = %q, want %q", got, want)
+	}
+	for ip, want := range map[string]bool{
+		"example.com/lib":         true,
+		"example.com/lib/pkg":     true,
+		"example.com/library":     false,
+		"example.com/inner/sub/x": true,
+	} {
+		if got := inModules(ip, []string{"example.com/inner", "example.com/lib"}); got != want {
+			t.Errorf("inModules(%q) = %v, want %v", ip, got, want)
+		}
+	}
+}
