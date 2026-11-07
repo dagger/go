@@ -176,10 +176,10 @@ type Go {
   # tool shares. The default containers have no C compiler, so no cgo.
   let discoveryScan(ws: Workspace!): Directory! {
     if (base == null) {
-      lib.scan(ws, goflags: goflags ?? "", goVersion: version ?? "")
+      lib.scan(ws, test: true, goflags: goflags ?? "", goVersion: version ?? "")
     } else {
       let env = baseGoEnv
-      lib.scan(ws, goflags: env.GOFLAGS, goVersion: env.GOVERSION, cgo: env.CGO_ENABLED == "1")
+      lib.scan(ws, test: true, goflags: env.GOFLAGS, goVersion: env.GOVERSION, cgo: env.CGO_ENABLED == "1")
     }
   }
 
@@ -739,6 +739,7 @@ type GoModule {
       if (next != paths.length) { raise "package catalogue does not contain every selected path" }
       selected
     }
+    let inputs = if (records.any { pkg => pkg.tests.length > 0 }) { testInputs(ws) } else { null }
     GoPackages(
       paths: paths,
       mountPath: mountPath,
@@ -752,6 +753,7 @@ type GoModule {
             names: pkg.tests.uniq,
             directory: dir,
             module: self,
+            inputs: inputs,
           ),
         )
       },
@@ -974,9 +976,13 @@ type GoModule {
   Go container for this module, before source is added.
   """
   base(ws: Workspace!): Container! {
+    baseFor(if (baseImage == null) { toolchainVersion(ws) } else { "" })
+  }
+
+  let baseFor(version: String!): Container! {
     prepareBase(
       if (baseImage == null) {
-        gomod.goContainer(toolchainVersion(ws))
+        gomod.goContainer(version)
       } else {
         gomod.withGoCaches(baseImage.withoutEntrypoint)
       },
@@ -1172,20 +1178,35 @@ type GoModule {
       .file("/usr/local/bin/otelgotest")
   }
 
+  # Form source views during input preparation, without setting up tools.
+  let testInputs(ws: Workspace!): GoTestInputs! {
+    GoTestInputs(
+      source: lib.at(path).sourceFromScan(ws, tool.discoveryScan(ws)),
+      testData: testData(ws),
+      configs: gomod.daggerConfigs(ws),
+      version: if (baseImage == null) { toolchainVersion(ws) } else { "" },
+      importPath: importPath(ws),
+    )
+  }
+
   """
   Test container with this module's sources, testdata, and otelgotest in
   place, before any test command runs.
   """
   let testEnv(ws: Workspace!): Container! {
+    testEnvFrom(base(ws), source(ws, test: true), testData(ws), gomod.daggerConfigs(ws))
+  }
+
+  let testEnvFrom(base: Container!, source: Directory!, testData: Directory!, configs: Directory!): Container! {
     gomod
-      .withTool(base(ws), "otelgotest", testRunner)
-      .withDirectory(".", source(ws, test: true))
-      .withDirectory(".", testData(ws))
+      .withTool(base, "otelgotest", testRunner)
+      .withDirectory(".", source)
+      .withDirectory(".", testData)
       # A test that serves a Dagger module needs that module's config, which is
       # not a Go file and so is not in the source mount. Without it the serve
       # fails with "does not contain a dagger config file" even though the
       # module's Go code is right there.
-      .withDirectory(".", gomod.daggerConfigs(ws))
+      .withDirectory(".", configs)
       # Nested Dagger clients find the workspace boundary by walking up to .git.
       .withNewFile(".git/HEAD", "ref: refs/heads/main\n")
   }
@@ -1229,8 +1250,8 @@ type GoModule {
   """
   One command and report shared by every selected test in this Go module.
   """
-  let runTests(ws: Workspace!, packages: GoPackages!): GoTestResults! {
-    let moduleImportPath = importPath(ws)
+  let runTests(inputs: GoTestInputs!, packages: GoPackages!): GoTestResults! {
+    let moduleImportPath = inputs.importPath
     let discovered = packages
       .entries
       .filter { entry => packages.paths.contains(entry.directory) }
@@ -1257,7 +1278,7 @@ type GoModule {
       let names = tool.sorted(selected.reduce(empty) { all, tests => all + tests.names }.uniq)
       ["-run", "^(" + names.join("|") + ")$"]
     } else { empty }
-    let executed = testEnv(ws)
+    let executed = testEnvFrom(baseFor(inputs.version), inputs.source, inputs.testData, inputs.configs)
       .withWorkdir(path)
       .withEnvVariable("_EXPERIMENTAL_DAGGER_CLI_BIN", "/dev/.dagger/dagger")
       .withExec(
@@ -1584,12 +1605,13 @@ type GoTests @collection {
   let directory: String!
 
   let module: GoModule!
+  let inputs: GoTestInputs
 
   """
   The test function with this name.
   """
   function(name: String!): GoTest! @get {
-    GoTest(name: name, directory: directory, module: module)
+    GoTest(name: name, directory: directory, module: module, inputs: inputs!)
   }
 
   """
@@ -1625,13 +1647,23 @@ type GoTest {
   let directory: String!
 
   let module: GoModule!
+  let inputs: GoTestInputs!
 
   """
   Run go tests
   """
-  test(ws: Workspace!, selection: GoPackages!): Void @check {
-    module.runTests(ws, selection).assertPassed(directory, module.packagePath(directory), name)
+  test(selection: GoPackages!): Void @check {
+    module.runTests(inputs, selection).assertPassed(directory, module.packagePath(directory), name)
   }
+}
+
+# Source inputs shared by the tests in one module. Tool setup stays in evaluation.
+type GoTestInputs {
+  let source: Directory!
+  let testData: Directory!
+  let configs: Directory!
+  let version: String!
+  let importPath: String!
 }
 
 # Carry workspace files across changes in the generation container.
