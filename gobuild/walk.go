@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"runtime"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"dagger.io/dagger/core"
 	"dagger/gobuild/internal/dagger"
 )
 
@@ -16,15 +18,22 @@ import (
 // the go command runs in-process.
 const toolsDir = "/gobuild/tools"
 
+// scriptPath is where a package's exec reads its script.
+const scriptPath = "/gobuild/build.sh"
+
 // node is one exec: a block rendered for the walk that runs it.
 type node struct {
 	ID         string   `json:"id"`
 	Name       string   `json:"name"`
 	ImportPath string   `json:"importPath"`
 	Deps       []string `json:"deps"`
-	SrcFiles   []string `json:"srcFiles,omitempty"`
-	ModFiles   []string `json:"modFiles,omitempty"`
-	Tools      bool     `json:"tools,omitempty"`
+	// CompileDeps, for the main package that links, are the dependencies
+	// its own compile imports, whose export data it mounts; the link mounts
+	// every dependency's object code.
+	CompileDeps []string `json:"compileDeps,omitempty"`
+	SrcFiles    []string `json:"srcFiles,omitempty"`
+	ModFiles    []string `json:"modFiles,omitempty"`
+	Tools       bool     `json:"tools,omitempty"`
 	// SrcNonGo is set when the package also reads every file in the
 	// source that isn't Go (block.srcNonGo).
 	SrcNonGo bool `json:"srcNonGo,omitempty"`
@@ -32,7 +41,10 @@ type node struct {
 	// does for its build ID.
 	Gohdr  bool   `json:"gohdr,omitempty"`
 	Output string `json:"output"`
-	Script string `json:"script"`
+	// LinkOutput is the archive of the package's object code, which a link
+	// reads: Output, unless the package splits (block.splits).
+	LinkOutput string `json:"linkOutput"`
+	Script     string `json:"script"`
 	// Profile is set when the package's compile reads the PGO profile.
 	Profile bool `json:"profile,omitempty"`
 	// Link is set for the main package, which links.
@@ -40,15 +52,19 @@ type node struct {
 }
 
 // toNode renders a block for a walk. A package reads its dependencies'
-// archives from /work/lib, which holds those and nothing else.
+// archives from /work/lib, which holds those and nothing else, and a link
+// reads their object code from /work/linklib.
 func toNode(b *block, blocks map[string]*block, conc string) *node {
 	// Dependencies in the order of their stable names, not of the plan's
 	// step numbers, which an edit elsewhere in the plan can renumber.
 	deps := append([]string(nil), b.deps...)
 	sort.Slice(deps, func(i, j int) bool { return blocks[deps[i]].name < blocks[deps[j]].name })
 	n := &node{ID: b.id, Name: b.name, ImportPath: b.importPath, Deps: deps,
-		SrcFiles: b.srcFiles, SrcNonGo: b.srcNonGo, ModFiles: b.modFiles, Output: b.output(),
+		SrcFiles: b.srcFiles, SrcNonGo: b.srcNonGo, ModFiles: b.modFiles, Output: b.output(), LinkOutput: b.linkOutput(),
 		Script: b.script(blocks, conc), Profile: b.profile != "", Link: b.isLink}
+	if b.isLink {
+		n.CompileDeps = b.compileDeps()
+	}
 	n.Tools = strings.Contains(n.Script, toolsDir+"/")
 	n.Gohdr = strings.Contains(n.Script, "/gobuild/gohdr ")
 	return n
@@ -82,6 +98,7 @@ func toNodes(blocks map[string]*block, outside map[string]bool, weights map[stri
 // walker runs a set of nodes, one exec each, each after its dependencies.
 type walker struct {
 	base  *dagger.Container
+	gohdr *dagger.File
 	tools *dagger.Directory
 	src   *dagger.Directory
 	// nonGo is the source's files that aren't Go, which a package with C or
@@ -121,7 +138,14 @@ func packageConcurrency() int {
 }
 
 type result struct {
-	file *dagger.File
+	// file is the package's archive its importers' compiles read, and link
+	// the one a link reads: the same file unless the package splits, when
+	// it is read after done closes, by the time linkDone closes, and only
+	// in a walk that links, so that importers don't wait for it.
+	file     *dagger.File
+	link     *dagger.File
+	linkErr  error
+	linkDone chan struct{}
 	// dir is the package's work directory, which holds file: evaluated, but
 	// for the link's.
 	dir  *dagger.Directory
@@ -131,8 +155,10 @@ type result struct {
 
 func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*result, error) {
 	results := map[string]*result{}
-	for id := range nodes {
-		results[id] = &result{done: make(chan struct{})}
+	links := false
+	for id, n := range nodes {
+		results[id] = &result{done: make(chan struct{}), linkDone: make(chan struct{})}
+		links = links || n.Link
 	}
 	limit := packageConcurrency()
 	first := firstSlots(nodes, w.heights, limit)
@@ -144,9 +170,11 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 			defer wg.Done()
 			r := results[id]
 			defer close(r.done)
-			// The source a package reads doesn't depend on its imports, so its
-			// ID is fetched while they build rather than in the package's
-			// slot. An error shows again where it's mounted.
+			// The source a package reads doesn't depend on its imports, so it
+			// is synced while they build rather than in the package's slot.
+			// The synced directory carries its ID, so the package's exec
+			// doesn't ask for it either. An error shows again where it's
+			// mounted.
 			var srcDir *dagger.Directory
 			var at string
 			if len(n.SrcFiles) > 0 {
@@ -155,10 +183,18 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 					srcDir = w.nonGo.WithDirectory(path.Join(".", at), srcDir)
 					at = ""
 				}
-				srcDir.ID(ctx)
+				if d, err := srcDir.Sync(ctx); err == nil {
+					srcDir = d
+				}
 			}
+			asyncLink := false
+			defer func() {
+				if !asyncLink {
+					close(r.linkDone)
+				}
+			}()
 			ctr := w.base
-			var depFiles []*dagger.File
+			var depFiles, linkFiles []*dagger.File
 			for _, d := range n.Deps {
 				dr, ok := results[d]
 				if !ok {
@@ -169,7 +205,22 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 					r.err = fmt.Errorf("%s: %w", nodes[d].ImportPath, dr.err)
 					return
 				}
-				depFiles = append(depFiles, dr.file)
+				if !n.Link {
+					depFiles = append(depFiles, dr.file)
+					continue
+				}
+				<-dr.linkDone
+				if dr.linkErr != nil {
+					r.err = fmt.Errorf("%s: %w", nodes[d].ImportPath, dr.linkErr)
+					return
+				}
+				linkFiles = append(linkFiles, dr.link)
+			}
+			// The link's own compile reads only its imports' export data.
+			for _, d := range n.CompileDeps {
+				if dr, ok := results[d]; ok {
+					depFiles = append(depFiles, dr.file)
+				}
 			}
 			// A package's exec writes only its own directory. Its inputs are
 			// mounted read-only: a writable mount is one of the exec's
@@ -177,11 +228,14 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 			if len(depFiles) > 0 {
 				ctr = ctr.WithMountedFiles("/work/lib", depFiles)
 			}
+			if n.Link && len(linkFiles) > 0 {
+				ctr = ctr.WithMountedFiles("/work/linklib", linkFiles)
+			}
 			if n.Tools {
 				ctr = ctr.WithMountedDirectory(toolsDir, w.tools, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
 			}
 			if n.Gohdr {
-				ctr = ctr.WithMountedFile("/gobuild/gohdr", hdrTool(), dagger.ContainerWithMountedFileOpts{ReadOnly: true})
+				ctr = ctr.WithMountedFile("/gobuild/gohdr", w.gohdr, dagger.ContainerWithMountedFileOpts{ReadOnly: true})
 			}
 			if n.Profile {
 				ctr = ctr.WithMountedDirectory(w.profile.path, w.profile.dir, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
@@ -193,14 +247,15 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 				ctr = ctr.WithMountedDirectory(path.Join(w.roots.Src, at), srcDir, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
 			}
 			ctr = w.mods.mount(ctr, n.ModFiles)
-			// A script past the kernel's argument-size limit (the link's
-			// import config at a large project's scale) goes in as a file.
-			var ran *dagger.Container
-			if len(n.Script) > 64<<10 {
-				ran = ctr.WithNewFile("/gobuild/run.sh", n.Script).WithExec([]string{"sh", "/gobuild/run.sh"}, bare)
-			} else {
-				ran = ctr.WithExec([]string{"sh", "-c", n.Script}, bare)
-			}
+			// The script goes in as a mounted file, and the exec names the
+			// package instead: its arguments are its title wherever the
+			// build is shown, such as over a compile error, and a script
+			// runs to tens of KB with the link's import config. A mounted
+			// file adds no layer to the step's root filesystem.
+			script := core.NewDirectory().WithNewFile("build.sh", n.Script).File("build.sh")
+			ran := ctr.
+				WithMountedFile(scriptPath, script, dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
+				WithExec([]string{"sh", scriptPath, n.ImportPath}, pkgExec)
 			if !first[id] {
 				slots.acquire(w.heights[id])
 			}
@@ -211,6 +266,7 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 				// a hash of the whole binary on every link.
 				r.dir = ran.Directory("/work/" + n.Name)
 				r.file, r.err = r.dir.File(n.Output).Sync(ctx)
+				r.err = execFailure(r.err)
 				return
 			}
 			// Evaluate the output directory first, then read the file from
@@ -219,11 +275,22 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 			// its dependents' execs cached.
 			out, err := ran.Directory("/work/" + n.Name).Sync(ctx)
 			if err != nil {
-				r.err = err
+				r.err = execFailure(err)
 				return
 			}
 			r.dir = out
 			r.file, r.err = out.File(n.Output).Sync(ctx)
+			switch {
+			case r.err != nil || !links:
+			case n.LinkOutput == n.Output:
+				r.link = r.file
+			default:
+				asyncLink = true
+				go func() {
+					defer close(r.linkDone)
+					r.link, r.linkErr = out.File(n.LinkOutput).Sync(ctx)
+				}()
+			}
 		}()
 	}
 	wg.Wait()
@@ -285,7 +352,7 @@ func fileTree(dir *dagger.Directory, files []string) *dagger.Directory {
 		dirs = append(dirs, d)
 	}
 	sort.Strings(dirs)
-	tree := dag.Directory()
+	tree := core.NewDirectory()
 	for _, d := range dirs {
 		tree = tree.WithFiles(d, byDir[d])
 	}
@@ -487,4 +554,25 @@ func literalPatterns(paths []string) []string {
 		out[i] = b.String()
 	}
 	return out
+}
+
+// execFailure is a package exec's failure with what the exec printed: the
+// compiler's or the linker's own messages, which they write to stdout, and
+// the script's, on stderr. The SDK's error says only the exit code, and the
+// exec's output would otherwise reach a user only in the exec's span.
+func execFailure(err error) error {
+	var execErr *dagger.ExecError
+	if !errors.As(err, &execErr) {
+		return err
+	}
+	var out []string
+	for _, o := range []string{execErr.Stdout, execErr.Stderr} {
+		if o = strings.TrimSpace(o); o != "" {
+			out = append(out, o)
+		}
+	}
+	if len(out) == 0 {
+		return err
+	}
+	return fmt.Errorf("%s: %s", strings.Join(out, "\n"), err.Error())
 }

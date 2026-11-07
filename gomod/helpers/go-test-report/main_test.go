@@ -43,8 +43,6 @@ func TestSummarizeAttribution(t *testing.T) {
 			{Action: "pass", Package: "example.com/p", Test: "TestBad"},
 			{Action: "fail", Package: "example.com/p"},
 		}, map[check]string{{"example.com/p", "TestOK"}: "outside a selected test check", {"example.com/p", "TestBad"}: "outside a selected test check", {"example.com/q", "TestOther"}: ""}},
-		{"package without checks", []event{{Action: "fail", Package: "example.com/unchecked"}},
-			map[check]string{{"example.com/p", "TestOK"}: "without selected test checks", {"example.com/q", "TestOther"}: "without selected test checks"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := summarize(report(append(append([]event{}, base...), tc.events...)...), selected, 1, strings.NewReader(""))
@@ -61,10 +59,11 @@ func TestSummarizeAttribution(t *testing.T) {
 	}
 }
 
-// Discovery includes build-excluded tests, while the report contains only
-// tests present in the binary. Do not confuse an absent test with an aborted one.
+// A selected test with no events in a package that failed by a named test,
+// as -failfast leaves the tests after the first failure, did not run. One that
+// started and never finished has no result either.
 func TestAbsentAndInterruptedTests(t *testing.T) {
-	selected := []selection{{"example.com/p", []string{"TestBad", "TestTagged", "TestInterrupted", "TestOK"}}}
+	selected := []selection{{"example.com/p", []string{"TestBad", "TestAfterFailure", "TestInterrupted", "TestOK"}}}
 	got, err := summarize(report(
 		event{Action: "pass", Package: "example.com/p", Test: "TestOK"},
 		event{Action: "fail", Package: "example.com/p", Test: "TestBad"},
@@ -75,10 +74,10 @@ func TestAbsentAndInterruptedTests(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, want := range map[string]string{
-		"TestBad":         "TestBad failed",
-		"TestTagged":      "",
-		"TestInterrupted": "no successful result for TestInterrupted",
-		"TestOK":          "",
+		"TestBad":          "TestBad failed",
+		"TestAfterFailure": "TestAfterFailure did not run: go test failed example.com/p without running it",
+		"TestInterrupted":  "no successful result for TestInterrupted",
+		"TestOK":           "",
 	} {
 		message, ok := got[check{"example.com/p", name}]
 		if !ok || (want == "" && message != "") || (want != "" && !strings.Contains(message, want)) {
@@ -103,6 +102,22 @@ func TestSelectedTestThatNeverRan(t *testing.T) {
 	}
 	if message := got[check{"example.com/p", "TestExcluded"}]; !strings.Contains(message, "TestExcluded did not run") {
 		t.Errorf("TestExcluded: %q, want it reported as not run", message)
+	}
+}
+
+// With -failfast, go test starts no further package once one fails, and a
+// package it never started has no events at all. Its selected tests did not run.
+func TestPackageNeverStarted(t *testing.T) {
+	selected := []selection{{"example.com/p", []string{"TestBad"}}, {"example.com/q", []string{"TestLater"}}}
+	got, err := summarize(report(
+		event{Action: "fail", Package: "example.com/p", Test: "TestBad"},
+		event{Action: "fail", Package: "example.com/p"},
+	), selected, 1, strings.NewReader(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message := got[check{"example.com/q", "TestLater"}]; !strings.Contains(message, "TestLater did not run: go test stopped before starting example.com/q, after a failure") {
+		t.Errorf("TestLater: %q, want it reported as not run", message)
 	}
 }
 

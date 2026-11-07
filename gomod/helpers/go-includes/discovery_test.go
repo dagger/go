@@ -218,6 +218,70 @@ func TestDiscoveryListsOnlyTestsGoTestBuilds(t *testing.T) {
 	}
 }
 
+// The index says whether any test file with tests names a Go release or cgo in
+// its build constraints: with a custom base, only then does discovery need the
+// base's go, rather than its environment.
+func TestDiscoveryIndexNamesToolchainTags(t *testing.T) {
+	test := func(name string) string { return "func " + name + "(t *testing.T) {}\n" }
+	head := "package c\nimport \"testing\"\n"
+	for name, tc := range map[string]struct {
+		files map[string]string
+		want  toolchainTags
+	}{
+		"platform and custom tags only": {map[string]string{
+			"a_test.go":       "//go:build linux && !windows\n\n" + head + test("TestA"),
+			"b_test.go":       "//go:build integration || amd64\n\n" + head + test("TestB"),
+			"c_linux_test.go": head + test("TestC"),
+		}, toolchainTags{}},
+		"a release tag": {map[string]string{
+			"a_test.go": "// Copyright\n\n//go:build !go1.23\n\n" + head + test("TestA"),
+		}, toolchainTags{Release: true}},
+		"cgo in an old-style line": {map[string]string{
+			"a_test.go": "/* a block\n   comment */\n// +build cgo\n\n" + head + test("TestA"),
+		}, toolchainTags{Cgo: true}},
+		"files without tests don't count": {map[string]string{
+			"a.go":           "//go:build cgo\n\npackage c\n",
+			"helper_test.go": "//go:build go1.23\n\n" + head + "func helper() {}\n",
+			"a_test.go":      head + test("TestA"),
+		}, toolchainTags{}},
+		"a constraint after the package clause doesn't count": {map[string]string{
+			"a_test.go": head + test("TestA") + "//go:build cgo\n",
+		}, toolchainTags{}},
+		"after a byte order mark": {map[string]string{
+			"a_test.go": "\ufeff//go:build go1.26\n\n" + head + test("TestA"),
+		}, toolchainTags{Release: true}},
+		"after block comments ending and starting on one line": {map[string]string{
+			"a_test.go": "/* one\n*/ /* two */\n//go:build cgo\n\n" + head + test("TestA"),
+		}, toolchainTags{Cgo: true}},
+		"an unparsable header asks the toolchain": {map[string]string{
+			"a_test.go": "//go:build linux\n\npackage\n" + test("TestA"),
+		}, toolchainTags{Release: true, Cgo: true}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			files := map[string]string{"go.mod": "module example.com/c\n\ngo 1.22\n"}
+			for file, src := range tc.files {
+				files[file] = src
+			}
+			root := writeTree(t, files)
+			output := t.TempDir()
+			if err := runAll([]string{"--root", root, "--output-dir", output}); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(filepath.Join(output, discoveryCatalogFile))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var catalog discoveryCatalog
+			if err := json.Unmarshal(data, &catalog); err != nil {
+				t.Fatal(err)
+			}
+			if catalog.Toolchain != tc.want {
+				t.Errorf("toolchain %+v; want %+v", catalog.Toolchain, tc.want)
+			}
+		})
+	}
+}
+
 // GOFLAGS is split as cmd/go splits it, and its last -tags is parsed as
 // cmd/go's -tags flag parses it.
 func TestTestConfigReadsGOFLAGSTags(t *testing.T) {
@@ -452,5 +516,29 @@ func TestHeaderPackHoldsEmbeddable(t *testing.T) {
 	}
 	if want := fmt.Sprintf("link_test.go\n%o\n9\nx_test.go\n", uint32(fs.ModeSymlink|0o777)); !strings.Contains(pack, want) {
 		t.Errorf("the test file symlink is not in the pack as one:\n%s", pack)
+	}
+}
+
+// The header pack holds a go.work whole, as it holds go.mod files: the plan
+// follows its replacements to the source's directories.
+func TestHeaderPackHoldsGoWork(t *testing.T) {
+	work := "go 1.25\n\nuse ./app\n\nreplace example.com/original => ./fork\n"
+	root := writeTree(t, map[string]string{
+		"go.work":      work,
+		"app/go.mod":   "module example.com/app\n\ngo 1.25\n",
+		"app/main.go":  "package main\n\nimport _ \"example.com/original\"\n\nfunc main() {}\n",
+		"fork/go.mod":  "module example.com/fork\n\ngo 1.25\n",
+		"fork/fork.go": "package fork\n",
+	})
+	output := t.TempDir()
+	if err := runAll([]string{"--root", root, "--output-dir", output}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(output, headerPackFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf("go.work\n644\n%d\n%s\n", len(work), work); !strings.Contains(string(data), want) {
+		t.Errorf("the header pack doesn't hold go.work whole:\n%s", data)
 	}
 }

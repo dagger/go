@@ -63,9 +63,9 @@ type testResult struct {
 }
 
 type packageResult struct {
-	passed, failed, namedFailure, uncheckedTestFailure bool
-	tests                                              map[string]*testResult
-	log                                                tail
+	started, passed, failed, namedFailure, uncheckedTestFailure bool
+	tests                                                       map[string]*testResult
+	log                                                         tail
 }
 
 func summarize(report io.Reader, selections []selection, exitCode int, stderr io.Reader) (map[check]string, error) {
@@ -108,6 +108,7 @@ func summarize(report io.Reader, selections []selection, exitCode int, stderr io
 			p = &packageResult{}
 			packages[pkg] = p
 		}
+		p.started = true
 		p.log.add(e.Output)
 		if e.Action == "fail" {
 			anyFailure = true
@@ -136,21 +137,8 @@ func summarize(report io.Reader, selections []selection, exitCode int, stderr io
 	if _, err := io.Copy(&stderrTail, stderr); err != nil {
 		return nil, fmt.Errorf("read test stderr: %w", err)
 	}
-	var unchecked []string
-	for pkg, p := range packages {
-		if p.failed && len(p.tests) == 0 {
-			unchecked = append(unchecked, pkg)
-		}
-	}
-	sort.Strings(unchecked)
 	globalFailure := ""
-	if len(unchecked) > 0 {
-		var output tail
-		for _, pkg := range unchecked {
-			output.add(packages[pkg].log.String())
-		}
-		globalFailure = "failures in packages without selected test checks: " + strings.Join(unchecked, ", ") + "\n" + output.String() + stderrTail.String()
-	} else if exitCode != 0 && !anyFailure {
+	if exitCode != 0 && !anyFailure {
 		globalFailure = fmt.Sprintf("shared test command failed (go test exit %d)\n%s", exitCode, stderrTail.String())
 	}
 	results := make(map[check]string)
@@ -171,9 +159,13 @@ func summarize(report io.Reader, selections []selection, exitCode int, stderr io
 					// declaring it, or TestMain never called m.Run.
 					failure = fmt.Sprintf("%s did not run: go test passed %s without it\n%s", name, s.Pkg, p.log.String())
 				case !t.observed && p.failed && p.namedFailure:
-					// -failfast stops the package at a represented failure, so later
-					// tests have no events. That failure does not make them fail.
-					// Tests that started but did not finish still fail below.
+					// -failfast stopped the package at a represented failure before
+					// this test started, or the test binary left it out.
+					failure = fmt.Sprintf("%s did not run: go test failed %s without running it\n%s", name, s.Pkg, p.log.String())
+				case !p.started && anyFailure:
+					// With -failfast, go test starts no further package once one
+					// fails, and a package it never starts has no events at all.
+					failure = fmt.Sprintf("%s did not run: go test stopped before starting %s, after a failure\n", name, s.Pkg)
 				default:
 					failure = fmt.Sprintf("no successful result for %s (go test exit %d)\n%s%s", name, exitCode, p.log.String(), stderrTail.String())
 				}

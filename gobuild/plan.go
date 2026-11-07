@@ -130,6 +130,139 @@ func parseArchivePlan(plan string, r roots) (map[string]*block, error) {
 	return parseBlocks(plan, r, true)
 }
 
+// identifyVariants names each block of a "go list -export -deps -test -n"
+// plan by its package's ID in the listing, ids: "p" for a plain package,
+// "p [p.test]" for one compiled with its test files, "p_test [p.test]" for
+// an external test package, and "q [p.test]" for a package recompiled
+// against p's test variant. The plan's headers name only the import path, so
+// a block compiled with test files is a test package, and a block whose
+// imports were compiled for a test is that test's too. A main package with
+// tests (mains) is compiled for them a second time, as a library, even when
+// only its external tests need it: of its two steps, the one that compiles
+// it as main, or with -buildmode=plugin, which compiles both alike, the
+// first by step, is the plain package. The test
+// mains, which compile a _testmain.go no plan holds, are left out: nothing
+// imports them. Each block's name follows its ID, so variants of a package
+// don't share one.
+func identifyVariants(blocks map[string]*block, ids, mains map[string]bool) error {
+	for id, b := range blocks {
+		if strings.HasSuffix(b.importPath, ".test") {
+			delete(blocks, id)
+		}
+	}
+	for _, b := range blocks {
+		b.deps = slices.DeleteFunc(b.deps, func(d string) bool { return blocks[d] == nil })
+	}
+	// The second step of each main package, its test variant.
+	second := map[string]bool{}
+	byMain := map[string][]*block{}
+	for _, b := range blocks {
+		if mains[b.importPath] {
+			byMain[b.importPath] = append(byMain[b.importPath], b)
+		}
+	}
+	for _, bs := range byMain {
+		sort.Slice(bs, func(i, j int) bool {
+			if mi, mj := bs[i].compiledAs() == "main", bs[j].compiledAs() == "main"; mi != mj {
+				return mi
+			}
+			return stepNumber(bs[i].id) < stepNumber(bs[j].id)
+		})
+		if len(bs) > 1 {
+			second[bs[1].id] = true
+		}
+	}
+	resolved := map[string]string{}
+	var resolve func(id string) (string, error)
+	resolve = func(id string) (string, error) {
+		if v, ok := resolved[id]; ok {
+			return v, nil
+		}
+		b := blocks[id]
+		if b.isProfile {
+			return b.importPath, nil
+		}
+		forTest := ""
+		for _, d := range b.deps {
+			dv, err := resolve(d)
+			if err != nil {
+				return "", err
+			}
+			if _, t, ok := strings.Cut(dv, " ["); ok {
+				if forTest != "" && forTest != t {
+					return "", fmt.Errorf("%s imports packages compiled for two tests, [%s and [%s", b.importPath, forTest, t)
+				}
+				forTest = t
+			}
+		}
+		v := b.importPath
+		switch {
+		case second[id]:
+			v += " [" + v + ".test]"
+		case b.compilesTests() && ids[v+" ["+v+".test]"]:
+			v += " [" + v + ".test]"
+		case b.compilesTests():
+			v += " [" + strings.TrimSuffix(v, "_test") + ".test]"
+		case forTest != "":
+			v += " [" + forTest
+		}
+		if !ids[v] {
+			return "", fmt.Errorf("plan step %s, %s, is no package the listing has", id, v)
+		}
+		resolved[id] = v
+		return v, nil
+	}
+	for id, b := range blocks {
+		v, err := resolve(id)
+		if err != nil {
+			return err
+		}
+		if !b.isProfile {
+			b.importPath, b.name = v, stableName(v)
+		}
+	}
+	return nil
+}
+
+// stepNumber is a plan step's number, from its id "bNNN": at least three
+// digits, so "b1000" comes after "b999".
+func stepNumber(id string) int {
+	n, _ := strconv.Atoi(strings.TrimPrefix(id, "b"))
+	return n
+}
+
+// compiledAs is the package name a block's compile gives its package with
+// -p: "main" for a main package, its import path otherwise.
+func (b *block) compiledAs() string {
+	for _, l := range b.lines {
+		if !reCompile.MatchString(l) {
+			continue
+		}
+		w := shellWords(l)
+		for i := 0; i+1 < len(w); i++ {
+			if w[i] == "-p" {
+				return w[i+1]
+			}
+		}
+	}
+	return ""
+}
+
+// compilesTests reports whether a block's compile reads _test.go files.
+func (b *block) compilesTests() bool {
+	for _, l := range b.lines {
+		if !reCompile.MatchString(l) {
+			continue
+		}
+		for _, w := range shellWords(l) {
+			if strings.HasSuffix(w, "_test.go") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func parseBlocks(plan string, r roots, archives bool) (map[string]*block, error) {
 	blocks := map[string]*block{}
 	var cur *block
@@ -644,13 +777,26 @@ func compileC(outside bool, weight int64) string {
 // archive is read from /work/lib. Archives get no Go build ID: the plan's are
 // temporary, and leaving them out lets early cutoff compare archives by
 // their bytes. The link gets one made from what it reads (gohdr linkid).
+//
+// A package that splits (splits) compiles its export data, all its
+// importers' compiles read, to its output and its object code, which only a
+// link reads, to linkOutput, where its pack steps add assembly and C
+// objects too. The link reads its dependencies' object code from
+// /work/linklib.
 func (b *block) script(blocks map[string]*block, conc string) string {
 	dirs := []string{"/work/" + b.name}
 	var body strings.Builder
 	var heredoc []string
 	heredocTarget := ""
+	linkCfg := false
 	needed := cdNeeded(b.lines)
 	for i, l := range b.lines {
+		// The link's import config names the archives it reads.
+		if m := reHeredoc.FindStringSubmatch(l); m != nil {
+			linkCfg = strings.HasSuffix(m[1], "/importcfg.link")
+		} else if l == "EOF" {
+			linkCfg = false
+		}
 		// A cgo package's C compiles name its files by bare names in its
 		// directory, so it keeps every change the plan prints to it; any
 		// other change stays only when needed, as elsewhere, such as the
@@ -667,18 +813,30 @@ func (b *block) script(blocks map[string]*block, conc string) string {
 		// put in one place on every compile rather than replaced.
 		if reCompile.MatchString(l) {
 			l = reConc.ReplaceAllString(l, "")
-			l = reCompile.ReplaceAllString(l, "${1} -c="+conc+gcStart(l)+" ")
+			flags := " -c=" + conc + gcStart(l) + " "
+			if b.splits() {
+				flags += "-linkobj /work/" + b.name + "/" + b.linkOutput() + " "
+			}
+			l = reCompile.ReplaceAllString(l, "${1}"+flags)
 		}
 		// The go command packs archives in-process; "go tool pack" would
 		// build the pack tool from source in every fresh container.
 		l = strings.Replace(l, "go tool pack ", toolsDir+"/pack ", 1)
+		pack := strings.Contains(l, "/pack r ")
 		l = reDepArchive.ReplaceAllStringFunc(l, func(s string) string {
 			id := reDepArchive.FindStringSubmatch(s)[1]
-			name := blocks[id].name
-			if id == b.id {
-				return "/work/" + name + "/" + name + ".a"
+			dep := blocks[id]
+			// A package's own archive, even in the exec that links it, where
+			// output is the binary.
+			switch {
+			case id == b.id && pack && b.splits():
+				return "/work/" + dep.name + "/" + dep.linkOutput()
+			case id == b.id:
+				return "/work/" + dep.name + "/" + dep.name + ".a"
+			case linkCfg:
+				return "/work/linklib/" + dep.linkOutput()
 			}
-			return "/work/lib/" + name + ".a"
+			return "/work/lib/" + dep.output()
 		})
 		l = reWorkRef.ReplaceAllStringFunc(l, func(s string) string {
 			return "/work/" + blocks[strings.TrimPrefix(s, "$WORK/")].name
@@ -1015,7 +1173,8 @@ func (b *block) exportsHeader() bool {
 	return false
 }
 
-// output is the file a block's exec produces, under /work/<name>.
+// output is the file a block's exec produces, under /work/<name>: for a
+// package, the archive its importers' compiles read.
 func (b *block) output() string {
 	switch {
 	case b.isLink:
@@ -1024,6 +1183,61 @@ func (b *block) output() string {
 		return "pgo.preprofile"
 	}
 	return b.name + ".a"
+}
+
+// compileDeps are the dependencies a block reads outside its link's import
+// config: for the main package that links, those its own compile imports.
+func (b *block) compileDeps() []string {
+	seen := map[string]bool{}
+	var deps []string
+	linkCfg := false
+	for i, l := range b.lines {
+		if m := reHeredoc.FindStringSubmatch(l); m != nil {
+			linkCfg = strings.HasSuffix(m[1], "/importcfg.link")
+			continue
+		}
+		if l == "EOF" {
+			linkCfg = false
+			continue
+		}
+		if linkCfg || i == b.linkAt-1 {
+			continue
+		}
+		for _, m := range reDepArchive.FindAllStringSubmatch(l, -1) {
+			if m[1] != b.id && !seen[m[1]] {
+				seen[m[1]] = true
+				deps = append(deps, m[1])
+			}
+		}
+	}
+	sort.Strings(deps)
+	return deps
+}
+
+// splits reports whether a package's compile writes its export data and its
+// object code to two archives, output and linkOutput, as gc's -linkobj does:
+// an edit that changes only object code, such as a line number, then leaves
+// its importers' compiles cached. A main package that links in its own exec,
+// and a gccgo compile, which has no such flag, write one archive.
+func (b *block) splits() bool {
+	if b.isLink || b.isProfile {
+		return false
+	}
+	for _, l := range b.lines {
+		if reCompile.MatchString(l) {
+			return true
+		}
+	}
+	return false
+}
+
+// linkOutput is the archive of a package's object code under /work/<name>,
+// which the link reads: output, unless the package splits.
+func (b *block) linkOutput() string {
+	if b.splits() {
+		return b.name + ".link.a"
+	}
+	return b.output()
 }
 
 func shQuote(s string) string {

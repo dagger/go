@@ -1,16 +1,17 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
-	"crypto/sha256"
-	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -79,111 +80,378 @@ func TestHdrToolUnpackList(t *testing.T) {
 	}
 }
 
+// With a list of directories, gohdr unpack writes only the Go files there
+// and below a listed directory that embeds, and every file that isn't Go.
+func TestHdrToolUnpackPlanDirs(t *testing.T) {
+	dir := buildHdrTool(t)
+	files := map[string]string{
+		"go.mod":              "module m\n",
+		"main.go":             "package main\n\nimport \"m/lib\"\n",
+		"lib/lib.go":          "package lib\n",
+		"lib/lib.s":           "TEXT x(SB)\n",
+		"other/other.go":      "package other\n",
+		"other/data.txt":      "data\n",
+		"tmpl/tmpl.go":        "package tmpl\n\nimport _ \"embed\"\n\n//go:embed skel\nvar skel string\n",
+		"tmpl/skel/x.go":      "package skel\n",
+		"tmpl/skel/sub/y.go":  "package sub\n",
+		"unread/deep/deep.go": "package deep\n",
+	}
+	var pack bytes.Buffer
+	pack.WriteString("gohdr 1\n")
+	names := make([]string, 0, len(files))
+	for f := range files {
+		names = append(names, f)
+	}
+	sort.Strings(names)
+	for _, f := range names {
+		fmt.Fprintf(&pack, "%s\n644\n%d\n%s\n", f, len(files[f]), files[f])
+	}
+	packPath := filepath.Join(dir, "src.hdr")
+	if err := os.WriteFile(packPath, pack.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dirs := filepath.Join(dir, "dirs")
+	if err := os.WriteFile(dirs, []byte(".\nlib\ntmpl"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "src")
+	if b, err := exec.Command(filepath.Join(dir, "gohdr"), "unpack", packPath, out, os.DevNull, dirs).CombinedOutput(); err != nil {
+		t.Fatalf("unpack: %v\n%s", err, b)
+	}
+	var got []string
+	filepath.WalkDir(out, func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			rel, _ := filepath.Rel(out, p)
+			got = append(got, rel)
+		}
+		return err
+	})
+	want := []string{"go.mod", "lib/lib.go", "lib/lib.s", "main.go", "other/data.txt", "tmpl/skel/sub/y.go", "tmpl/skel/x.go", "tmpl/tmpl.go"}
+	if !slices.Equal(got, want) {
+		t.Errorf("unpacked %q, want %q", got, want)
+	}
+}
+
+// gohdr packmod packs a downloaded module from its zip as a plan reads it,
+// as the go command would extract it: Go files as their headers, C and
+// assembly as their leading comments, the module's metadata whole, any other
+// file empty, and no test file nor anything in a testdata directory.
+// gohdr subset writes, as a pack, exactly what gohdr unpack writes with the
+// plan's directories, and the whole pack's list of Go files in directories
+// named like Go files. A plan mounts it in place of the whole pack, so it
+// must change when a file the plan reads changes, and only then.
+func TestHdrToolSubset(t *testing.T) {
+	dir := buildHdrTool(t)
+	gohdr := filepath.Join(dir, "gohdr")
+	type entry struct{ mode, data string }
+	base := map[string]entry{
+		"go.mod":              {"644", "module m\n"},
+		"main.go":             {"644", "package main\n\nimport \"m/lib\"\n"},
+		"lib/lib.go":          {"755", "package lib\n"},
+		"lib/lib.s":           {"644", "TEXT x(SB)\n"},
+		"lib/link.go":         {strconv.FormatUint(uint64(os.ModeSymlink|0o777), 8), "lib.go"},
+		"other/other.go":      {"644", "package other\n"},
+		"other/data.txt":      {"644", "data\n"},
+		"tmpl/tmpl.go":        {"644", "package tmpl\n\nimport _ \"embed\"\n\n//go:embed skel\nvar skel string\n"},
+		"tmpl/skel/x.go":      {"644", "package skel\n"},
+		"tmpl/skel/shared.go": {"644", "package tmpl\n"},
+		"tmpl/shared.go":      {strconv.FormatUint(uint64(os.ModeSymlink|0o777), 8), "skel/shared.go"},
+		"gen.go/inner.go":     {"644", "package gen\n"},
+		"unread/deep/deep.go": {"644", "package deep\n"},
+	}
+	writePack := func(name string, files map[string]entry) string {
+		var pack bytes.Buffer
+		pack.WriteString("gohdr 1\n")
+		names := make([]string, 0, len(files))
+		for f := range files {
+			names = append(names, f)
+		}
+		sort.Strings(names)
+		for _, f := range names {
+			fmt.Fprintf(&pack, "%s\n%s\n%d\n%s\n", f, files[f].mode, len(files[f].data), files[f].data)
+		}
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, pack.Bytes(), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	run := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command(gohdr, args...).CombinedOutput(); err != nil {
+			t.Fatalf("gohdr %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	read := func(path string) string {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	// tree is every file and symlink under root: its mode and its contents
+	// or target.
+	tree := func(root string) map[string]string {
+		t.Helper()
+		got := map[string]string{}
+		err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			rel, _ := filepath.Rel(root, p)
+			info, err := os.Lstat(p)
+			if err != nil {
+				return err
+			}
+			content := ""
+			if info.Mode()&os.ModeSymlink != 0 {
+				content, err = os.Readlink(p)
+			} else {
+				var data []byte
+				data, err = os.ReadFile(p)
+				content = string(data)
+			}
+			got[rel] = info.Mode().String() + " " + content
+			return err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	dirs := filepath.Join(dir, "dirs")
+	if err := os.WriteFile(dirs, []byte(".\nlib\ntmpl"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pack := writePack("src.hdr", base)
+
+	// What a plan unpacks from the subset is what it unpacked from the
+	// whole pack with its directories, and the list is the whole pack's.
+	run("unpack", pack, filepath.Join(dir, "direct"), filepath.Join(dir, "direct.txt"), dirs)
+	run("subset", pack, filepath.Join(dir, "plan.hdr"), filepath.Join(dir, "subset.txt"), dirs)
+	run("unpack", filepath.Join(dir, "plan.hdr"), filepath.Join(dir, "staged"), os.DevNull)
+	if got, want := tree(filepath.Join(dir, "staged")), tree(filepath.Join(dir, "direct")); !reflect.DeepEqual(got, want) {
+		t.Errorf("unpacked from the subset:\n%v\nwant:\n%v", got, want)
+	}
+	if got := read(filepath.Join(dir, "staged/tmpl/skel/x.go")); got != "" {
+		t.Errorf("an embedded Go file the plan doesn't read was unpacked with %q, want it empty", got)
+	}
+	if got, want := read(filepath.Join(dir, "staged/tmpl/shared.go")), base["tmpl/skel/shared.go"].data; got != want {
+		t.Errorf("a Go file read through a symlink was unpacked with %q, want %q", got, want)
+	}
+	if got, want := read(filepath.Join(dir, "subset.txt")), read(filepath.Join(dir, "direct.txt")); got != want || want != "gen.go/inner.go\n" {
+		t.Errorf("subset listed %q, unpack %q, want %q", got, want, "gen.go/inner.go\n")
+	}
+
+	// Without directories, the subset is the whole pack.
+	run("subset", pack, filepath.Join(dir, "all.hdr"), os.DevNull)
+	if got, want := read(filepath.Join(dir, "all.hdr")), read(pack); got != want {
+		t.Errorf("subset without directories:\n%s\nwant the pack:\n%s", got, want)
+	}
+
+	// With an absolute symlink in the pack, whose target depends on where
+	// the source is mounted, every embedded Go file stays whole.
+	abs := maps.Clone(base)
+	abs["lib/abs.go"] = entry{strconv.FormatUint(uint64(os.ModeSymlink|0o777), 8), "/ws/tmpl/skel/x.go"}
+	run("subset", writePack("abs.hdr", abs), filepath.Join(dir, "abs-plan.hdr"), os.DevNull, dirs)
+	run("unpack", filepath.Join(dir, "abs-plan.hdr"), filepath.Join(dir, "abs"), os.DevNull)
+	if got, want := read(filepath.Join(dir, "abs/tmpl/skel/x.go")), base["tmpl/skel/x.go"].data; got != want {
+		t.Errorf("with an absolute symlink, an embedded Go file was unpacked with %q, want %q", got, want)
+	}
+
+	// The subset changes with a header the plan reads, an embedded file
+	// included, and not with one it doesn't.
+	planned := read(filepath.Join(dir, "plan.hdr"))
+	for _, c := range []struct {
+		file    string
+		changes bool
+	}{
+		{"unread/deep/deep.go", false},
+		{"other/other.go", false},
+		{"lib/lib.go", true},
+		// An embedded Go file is read by its name alone.
+		{"tmpl/skel/x.go", false},
+		{"tmpl/skel/new.go", true},
+		// One a package the plan reads links to is read whole.
+		{"tmpl/skel/shared.go", true},
+		{"other/data.txt", true},
+		{"go.mod", true},
+	} {
+		files := maps.Clone(base)
+		e, ok := files[c.file]
+		if !ok {
+			e.mode = "644"
+		}
+		e.data += "import _ \"fmt\"\n"
+		files[c.file] = e
+		changed := writePack("changed.hdr", files)
+		run("subset", changed, filepath.Join(dir, "changed-plan.hdr"), os.DevNull, dirs)
+		if got := read(filepath.Join(dir, "changed-plan.hdr")) != planned; got != c.changes {
+			t.Errorf("a change to %s changed the subset: %v, want %v", c.file, got, c.changes)
+		}
+	}
+}
+
+func TestHdrToolPackmod(t *testing.T) {
+	dir := buildHdrTool(t)
+	root := filepath.Join(dir, "mc")
+	meta := "cache/download/example.com/!m/@v/v1.0.0.mod"
+	if err := os.MkdirAll(filepath.Join(root, filepath.Dir(meta)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, meta), []byte("module example.com/M\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The zip names the module path as it is; the module cache escapes it.
+	var zipped bytes.Buffer
+	zw := zip.NewWriter(&zipped)
+	for _, f := range []struct{ name, data string }{
+		{"example.com/M@v1.0.0/go.mod", "module example.com/M\n"},
+		{"example.com/M@v1.0.0/m.go", "package m\n\nimport \"fmt\"\n\nfunc F() { fmt.Println() }\n"},
+		{"example.com/M@v1.0.0/m_amd64.s", "//go:build !purego\n\n#include \"textflag.h\"\nTEXT x(SB)\n"},
+		{"example.com/M@v1.0.0/unused.c", "/* Copyright notice\n   continued */\n//go:build ignore\n\nint unused;\n"},
+		{"example.com/M@v1.0.0/closed.c", "//go:build ignore\n\n/* Explanation\n*/ int unused;\n"},
+		{"example.com/M@v1.0.0/api.json", "{\"big\": true}\n"},
+		{"example.com/M@v1.0.0/m_test.go", "package m\n"},
+		{"example.com/M@v1.0.0/sub/testdata/fixture.go", "package fixture\n"},
+	} {
+		w, err := zw.Create(f.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(f.data)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	zipRel := "cache/download/example.com/!m/@v/v1.0.0.zip"
+	if err := os.WriteFile(filepath.Join(root, zipRel), zipped.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pack := filepath.Join(dir, "m.gohdr")
+	if out, err := exec.Command(filepath.Join(dir, "gohdr"), "packmod", root, pack, zipRel, "example.com/!m@v1.0.0", meta).CombinedOutput(); err != nil {
+		t.Fatalf("packmod: %v\n%s", err, out)
+	}
+	out := filepath.Join(dir, "out")
+	if b, err := exec.Command(filepath.Join(dir, "gohdr"), "unpack", pack, out, os.DevNull).CombinedOutput(); err != nil {
+		t.Fatalf("unpack: %v\n%s", err, b)
+	}
+	for name, want := range map[string]string{
+		meta:                              "module example.com/M\n",
+		"example.com/!m@v1.0.0/go.mod":    "module example.com/M\n",
+		"example.com/!m@v1.0.0/m.go":      "package m\n\nimport \"fmt\"\n",
+		"example.com/!m@v1.0.0/m_amd64.s": "//go:build !purego\n\n",
+		"example.com/!m@v1.0.0/unused.c":  "/* Copyright notice\n   continued */\n//go:build ignore\n\n",
+		"example.com/!m@v1.0.0/closed.c":  "//go:build ignore\n\n/* Explanation\n*/ ",
+		"example.com/!m@v1.0.0/api.json":  "",
+	} {
+		got, err := os.ReadFile(filepath.Join(out, name))
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		if string(got) != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+	for _, name := range []string{"example.com/!m@v1.0.0/m_test.go", "example.com/!m@v1.0.0/sub/testdata/fixture.go"} {
+		if _, err := os.Stat(filepath.Join(out, name)); err == nil {
+			t.Errorf("%s was packed", name)
+		}
+	}
+}
+
+// gohdr packmod refuses a zip the go command would refuse to extract: one
+// with a path that leaves the module's directory, two paths that differ
+// only in case, a file outside the module's directory, or a go.mod outside
+// the module's root or named in upper case. A plan unpacks
+// the pack, so such a path would be written there.
+func TestHdrToolPackmodRefuses(t *testing.T) {
+	dir := buildHdrTool(t)
+	for name, files := range map[string][]string{
+		"traversal": {"example.com/m@v1.0.0/go.mod", "example.com/m@v1.0.0/../../../src/go.sum"},
+		"collision": {"example.com/m@v1.0.0/go.mod", "example.com/m@v1.0.0/a.go", "example.com/m@v1.0.0/A.go"},
+		"outside":   {"example.com/m@v1.0.0/go.mod", "example.com/other@v1.0.0/x.go"},
+		"nested":    {"example.com/m@v1.0.0/go.mod", "example.com/m@v1.0.0/m.go", "example.com/m@v1.0.0/nested/go.mod"},
+		"upper":     {"example.com/m@v1.0.0/GO.MOD", "example.com/m@v1.0.0/m.go"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := filepath.Join(dir, name)
+			zipRel := "cache/download/example.com/m/@v/v1.0.0.zip"
+			if err := os.MkdirAll(filepath.Join(root, filepath.Dir(zipRel)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			var zipped bytes.Buffer
+			zw := zip.NewWriter(&zipped)
+			for _, f := range files {
+				w, err := zw.Create(f)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := w.Write([]byte("package m\n")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := zw.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, zipRel), zipped.Bytes(), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			pack := filepath.Join(root, "m.gohdr")
+			out, err := exec.Command(filepath.Join(dir, "gohdr"), "packmod", root, pack, zipRel, "example.com/m@v1.0.0").CombinedOutput()
+			if err == nil {
+				t.Fatalf("packmod packed it:\n%s", out)
+			}
+			if _, err := os.Stat(pack); err == nil {
+				t.Errorf("packmod wrote a pack")
+			}
+		})
+	}
+}
+
+// gohdr imports lists each go.mod's replacements of a module by a directory,
+// by the directory's path in the pack, and no other replacement.
+func TestHdrToolImportsReplace(t *testing.T) {
+	dir := buildHdrTool(t)
+	files := map[string]string{
+		"go.work": "go 1.22\n\nuse ./app\n\nreplace example.com/worked => ./workfork\n",
+		"app/go.mod": "module example.com/app\n\ngo 1.22\n\n" +
+			"replace example.com/original => ../fork // a fork\n\n" +
+			"replace (\n\texample.com/sub v1.0.0 => ./sub\n\texample.com/versioned => example.com/other v1.2.3\n)\n",
+		"app/main.go": "package main\n",
+	}
+	var pack bytes.Buffer
+	pack.WriteString("gohdr 1\n")
+	for _, f := range []string{"app/go.mod", "app/main.go", "go.work"} {
+		fmt.Fprintf(&pack, "%s\n644\n%d\n%s\n", f, len(files[f]), files[f])
+	}
+	packPath := filepath.Join(dir, "src.hdr")
+	if err := os.WriteFile(packPath, pack.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(filepath.Join(dir, "gohdr"), "imports", packPath, "build").Output()
+	if err != nil {
+		t.Fatalf("imports: %v", err)
+	}
+	for _, want := range []string{"mod app example.com/app\n", "repl fork example.com/original\n", "repl app/sub example.com/sub\n", "repl workfork example.com/worked\n"} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("imports output lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(string(out), "versioned") {
+		t.Errorf("imports output lists a module replacement:\n%s", out)
+	}
+}
+
 func TestLiteralPatterns(t *testing.T) {
 	got := literalPatterns([]string{"a.go/x.go", "b.go/[x]*?^.go", "!c.go/d.go", `e.go/f\g.go`})
 	want := []string{"a.go/x.go", `b.go/\[x\]\*\?\^.go`, `\!c.go/d.go`, `e.go/f\\g.go`}
 	if !slices.Equal(got, want) {
 		t.Errorf("literalPatterns: %q", got)
-	}
-}
-
-// gohdr scope lists the plain packages of a "go list -deps -test" listing
-// that compile, and gohdr manifest describes their archives as the export
-// driver reads them: a package's digest covers its Go, other and embedded
-// files by name and content, and a cgo package's covers cgo's output, by its
-// place in the compile, without its //line directives, instead of its cgo
-// files.
-func TestHdrToolManifest(t *testing.T) {
-	dir := t.TempDir()
-	write := func(name, data string) string {
-		p := filepath.Join(dir, name)
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return p
-	}
-	write("tool/go.mod", "module gohdr\n\ngo 1.26\n")
-	write("tool/main.go", hdrToolSrc)
-	build := exec.Command("go", "build", "-o", "gohdr", ".")
-	build.Dir = filepath.Join(dir, "tool")
-	build.Env = append(os.Environ(), "GOFLAGS=", "GOWORK=off", "CGO_ENABLED=0")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("gohdr doesn't build: %v\n%s", err, out)
-	}
-	files := map[string]string{
-		"p/a.go":       "package p\n",
-		"p/c.go":       "package p\n\nimport \"C\"\n",
-		"p/x.c":        "int x;\n",
-		"p/data/e.txt": "embedded\n",
-		"q/q.go":       "package q\n",
-	}
-	for name, data := range files {
-		write("src/"+name, data)
-	}
-	gen := map[string]string{
-		"_cgo_gotypes.go": "//line /somewhere/c.go:1:1\npackage p\n",
-		"c.cgo1.go":       "package p\n//line /somewhere/c.go:3:1\nvar _ = 1 // line, not a directive\n",
-	}
-	for name, data := range gen {
-		write("gen/"+name, data)
-	}
-	src := filepath.Join(dir, "src")
-	var list bytes.Buffer
-	enc := json.NewEncoder(&list)
-	for _, p := range []map[string]any{
-		{"ImportPath": "example.com/p", "Dir": src + "/p", "GoFiles": []string{"a.go"}, "CgoFiles": []string{"c.go"}, "CFiles": []string{"x.c"}, "EmbedFiles": []string{"data/e.txt"}},
-		{"ImportPath": "example.com/p [example.com/p.test]", "ForTest": "example.com/p", "Dir": src + "/p", "GoFiles": []string{"a.go"}},
-		{"ImportPath": "example.com/p_test [example.com/p.test]", "ForTest": "example.com/p", "Dir": src + "/p", "GoFiles": []string{"x_test.go"}},
-		{"ImportPath": "example.com/p.test", "Dir": src + "/p", "GoFiles": []string{"_testmain.go"}},
-		{"ImportPath": "unsafe", "Dir": "/goroot/src/unsafe", "GoFiles": []string{"unsafe.go"}},
-		{"ImportPath": "example.com/testsonly", "Dir": src + "/t"},
-		{"ImportPath": "example.com/q", "Dir": src + "/q", "GoFiles": []string{"q.go"}},
-	} {
-		if err := enc.Encode(p); err != nil {
-			t.Fatal(err)
-		}
-	}
-	listPath := write("list.json", list.String())
-	envPath := write("env.json", `{"GOVERSION": "go1.26.1", "GOOS": "linux", "GOARCH": "amd64", "CGO_ENABLED": "1"}`)
-	entriesPath := write("entries.txt", "example.com/p archives/p.a "+filepath.Join(dir, "gen/_cgo_gotypes.go")+" "+filepath.Join(dir, "gen/c.cgo1.go")+"\nexample.com/q archives/q.a\n")
-	gohdr := filepath.Join(dir, "tool/gohdr")
-	out, err := exec.Command(gohdr, "scope", listPath).CombinedOutput()
-	if err != nil || string(out) != "example.com/p\nexample.com/q\n" {
-		t.Errorf("scope: %q, %v", out, err)
-	}
-	out, err = exec.Command(gohdr, "manifest", listPath, envPath, entriesPath, "b,a").Output()
-	if err != nil {
-		t.Fatalf("manifest: %v", err)
-	}
-	var got map[string]any
-	if err := json.Unmarshal(out, &got); err != nil {
-		t.Fatalf("manifest: %v\n%s", err, out)
-	}
-	digest := func(lines ...string) string {
-		sort.Strings(lines)
-		return fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(strings.Join(lines, ""))))
-	}
-	line := func(name, data string) string { return fmt.Sprintf("%s %x\n", name, sha256.Sum256([]byte(data))) }
-	want := map[string]any{
-		"version": 1.0, "goVersion": "go1.26.1", "goos": "linux", "goarch": "amd64", "cgoEnabled": true,
-		"buildTags": []any{"a", "b"},
-		"packages": map[string]any{
-			"example.com/p": map[string]any{"archive": "archives/p.a", "sources": digest(
-				"cgo\n",
-				line("cgo-output-0", "\npackage p\n"),
-				line("cgo-output-1", "package p\n\nvar _ = 1 // line, not a directive\n"),
-				line("a.go", files["p/a.go"]),
-				line("x.c", files["p/x.c"]),
-				line("data/e.txt", files["p/data/e.txt"]),
-			)},
-			"example.com/q": map[string]any{"archive": "archives/q.a", "sources": digest(line("q.go", files["q/q.go"]))},
-		},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("manifest:\n%s\nwant:\n%v", out, want)
 	}
 }
 
