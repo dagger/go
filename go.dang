@@ -351,21 +351,6 @@ type Go {
       and excluding.any { p => paths.any { at => selectedBy(at, [p]) == false } } == false
   }
 
-  # Workspace directories holding Go files that patterns match, in Dagger's own
-  # glob syntax, as the generate setting is matched.
-  let matchingDirectories(ws: Workspace!, patterns: [String!]!): [String!]! {
-    let empty: [String!]! = []
-    patterns.reduce(empty) { dirs, pattern =>
-      dirs + ws
-        .glob(pattern.trimSuffix("/") + "/*.go")
-        .filter { file => file.hasSuffix("/") == false }
-        .map { file =>
-          let dir = file.split("/").dropLast(1).join("/")
-          if (dir == "") { "." } else { dir }
-        }
-    }
-  }
-
   # Workspace paths of the packages with something to do: tests to run in a
   # module the test setting selects, a main package the build setting selects,
   # or go:generate commands the generate setting selects.
@@ -374,18 +359,10 @@ type Go {
     let generateAll = generate.length == 1 and generate.contains("**")
     let included = generate.filter { p => p.hasPrefix("!") == false }
     let excluded = generate.filter { p => p.hasPrefix("!") }.map { p => p.trimPrefix("!") }
-    let includeDirs = if (generateAll) { empty } else {
-      matchingDirectories(
-        ws,
-        included,
-      )
-    }
-    let excludeDirs = if (generateAll) { empty } else {
-      matchingDirectories(
-        ws,
-        excluded,
-      )
-    }
+    # One gomod call, which every module's listing shares, rather than a glob
+    # of the workspace per module.
+    let includeDirs = if (generateAll) { empty } else { lib.goFileDirectories(ws, included) }
+    let excludeDirs = if (generateAll) { empty } else { lib.goFileDirectories(ws, excluded) }
     # Split once per line: each field taken is work for every package line,
     # which counts on every build.
     moduleDiscoveryLines(ws, modulePath)
