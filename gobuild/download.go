@@ -156,7 +156,7 @@ type downloader struct {
 // the plan reads that discover missed, such as one a replace renames, the
 // plan fetches itself, and the build downloads its zip on its own (lazyZip).
 // With them come the directories whose Go files the plan reads (planDirs).
-func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDir string) (*dagger.Directory, map[string]*dagger.File, []*dagger.Directory, planDirs, error) {
+func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDir string) (*discovered, error) {
 	byPath := map[string][]sumEntry{}
 	for _, e := range d.sums {
 		if e.zip != "" {
@@ -278,7 +278,7 @@ func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDir str
 	names := make([]string, 0, len(modules))
 	for name, m := range modules {
 		if m.err != nil {
-			return nil, nil, nil, planDirs{}, m.err
+			return nil, m.err
 		}
 		names = append(names, name)
 	}
@@ -286,24 +286,45 @@ func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDir str
 	for name, m := range modules {
 		pkgs[name] = m.pkgs
 	}
-	dirs := planDirsOf(src, pkgDir, byPath, pkgs)
+	out := &discovered{names: names, zips: map[string]*dagger.File{}}
+	out.dirs, out.planFollowed = planDirsOf(src, pkgDir, byPath, pkgs)
+	for ip := range seenPkgs {
+		out.followed = append(out.followed, ip)
+	}
+	sort.Strings(out.followed)
 	sort.Strings(names)
 	packs := make([]*dagger.File, len(names))
-	zips := map[string]*dagger.File{}
-	downloads := make([]*dagger.Directory, len(names))
+	out.downloads = make([]*dagger.Directory, len(names))
 	for i, name := range names {
 		m := modules[name]
 		packs[i] = m.dir.File(packName(m.e))
-		zips[name] = m.dir.File(zipPath(m.e))
-		downloads[i] = m.dir
+		out.zips[name] = m.dir.File(zipPath(m.e))
+		out.downloads[i] = m.dir
 	}
 	if len(packs) == 0 {
-		return nil, zips, downloads, dirs, nil
+		return out, nil
 	}
 	// One directory of every pack, made in one step: merged one by one,
 	// hundreds of them would stack a layer each, past what a mount takes.
-	dir, err := core.NewDirectory().WithFiles(".", packs).Sync(ctx)
-	return dir, zips, downloads, dirs, err
+	var err error
+	out.packs, err = core.NewDirectory().WithFiles(".", packs).Sync(ctx)
+	return out, err
+}
+
+// discovered is what discover found: the downloaded modules' plan packs, as
+// one directory, nil without any; each one's zip, by its module cache
+// directory name; their downloads and names, in name order; and the
+// directories whose Go files the plan reads.
+type discovered struct {
+	packs     *dagger.Directory
+	zips      map[string]*dagger.File
+	downloads []*dagger.Directory
+	names     []string
+	dirs      planDirs
+	// followed and planFollowed are the import paths discover followed that
+	// the source doesn't provide, of the source's packages and the modules',
+	// by the target's build constraints and by none (planDirsOf).
+	followed, planFollowed []string
 }
 
 // inTestdata reports whether a source directory is in a testdata directory,
@@ -331,9 +352,9 @@ type modulePackages struct {
 // from the package in pkgDir, or every package of the source, through the
 // source's packages and the downloaded modules', pkgs by module cache
 // directory name, followed whatever their files' build constraints, so
-// never fewer than the go command loads for the build's target.
-func planDirsOf(src sourceImports, pkgDir string, byPath map[string][]sumEntry, pkgs map[string]modulePackages) planDirs {
-	var dirs planDirs
+// never fewer than the go command loads for the build's target; and the
+// import paths it followed that the source doesn't provide.
+func planDirsOf(src sourceImports, pkgDir string, byPath map[string][]sumEntry, pkgs map[string]modulePackages) (dirs planDirs, followed []string) {
 	seenSrc, seenPkg := map[string]bool{}, map[string]bool{}
 	var queue []string
 	addSource := func(dir string) {
@@ -365,6 +386,7 @@ func planDirsOf(src sourceImports, pkgDir string, byPath map[string][]sumEntry, 
 			}
 			continue
 		}
+		followed = append(followed, ip)
 		for _, e := range providers(byPath, ip) {
 			if dir, ok := pkgs[moduleDirName(e)].dirs[ip]; ok {
 				dirs.mods = append(dirs.mods, dir)
@@ -374,7 +396,8 @@ func planDirsOf(src sourceImports, pkgDir string, byPath map[string][]sumEntry, 
 	}
 	sort.Strings(dirs.src)
 	sort.Strings(dirs.mods)
-	return dirs
+	sort.Strings(followed)
+	return dirs, followed
 }
 
 // sourceImports is what the source's packages import, from "gohdr imports":
@@ -420,6 +443,55 @@ func (src sourceImports) dirOf(ip string) (string, bool) {
 		return dir, ok
 	}
 	return "", false
+}
+
+// outside is what the source's packages import from outside the source:
+// the import paths that their imports, followed through the source alone,
+// from the package in pkgDir or with none, every package of the source,
+// reach and no package of the source provides, by the target's build
+// constraints, as discover follows them (imports), and whatever their
+// constraints, as planDirsOf does (plan); with the source's directories
+// planDirsOf reaches that way (dirs). A standard library package, which no
+// module provides, is left out.
+func (src sourceImports) outside(pkgDir string) (imports, plan, dirs []string) {
+	imports, plan = []string{}, []string{}
+	seenDirs, seenPkgs := map[string]bool{}, map[string]bool{}
+	var queue []string
+	addSource := func(dir string) {
+		if !seenDirs[dir] {
+			seenDirs[dir] = true
+			queue = append(queue, src.pkgs[dir]...)
+		}
+	}
+	if _, ok := src.pkgs[path.Clean(pkgDir)]; pkgDir != "" && ok {
+		addSource(path.Clean(pkgDir))
+	} else {
+		for dir := range src.pkgs {
+			if !inTestdata(dir) {
+				addSource(dir)
+			}
+		}
+	}
+	for len(queue) > 0 {
+		ip := queue[0]
+		queue = queue[1:]
+		if dir, ok := src.dirOf(ip); ok {
+			addSource(dir)
+		} else if !seenPkgs[ip] {
+			seenPkgs[ip] = true
+			if inModule(ip) {
+				imports = append(imports, ip)
+			}
+		}
+	}
+	sort.Strings(imports)
+	srcDirs, followed := planDirsOf(src, pkgDir, nil, nil)
+	for _, ip := range followed {
+		if inModule(ip) {
+			plan = append(plan, ip)
+		}
+	}
+	return imports, plan, srcDirs.src
 }
 
 // dirsOf is every source directory that may hold the package with import
@@ -477,8 +549,7 @@ func (d *downloader) lazyZip(name string) *dagger.File {
 // path elements. A standard library package, whose first element has no
 // dot, has none.
 func providers(byPath map[string][]sumEntry, ip string) []sumEntry {
-	first, _, _ := strings.Cut(ip, "/")
-	if !strings.Contains(first, ".") {
+	if !inModule(ip) {
 		return nil
 	}
 	for p := ip; ; {
@@ -491,6 +562,14 @@ func providers(byPath map[string][]sumEntry, ip string) []sumEntry {
 		}
 		p = p[:i]
 	}
+}
+
+// inModule reports whether a module may provide the package with import
+// path ip: one whose first element has a dot, unlike a standard library
+// package's.
+func inModule(ip string) bool {
+	first, _, _ := strings.Cut(ip, "/")
+	return strings.Contains(first, ".")
 }
 
 // download is the download of one module version (downloadModule), in the

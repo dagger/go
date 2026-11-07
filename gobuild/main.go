@@ -926,7 +926,8 @@ go env GOOS GOARCH CGO_ENABLED GOVERSION > /gobuild/goenv
 	if err != nil {
 		return nil, err
 	}
-	b.target = newTarget(goenv, buildTags(append(append([]string(nil), envFlags...), flags...)))
+	tags := buildTags(append(append([]string(nil), envFlags...), flags...))
+	b.target = newTarget(goenv, tags)
 	switched, err := first.Directory("/gobuild").Glob(ctx, "switched")
 	if err != nil {
 		return nil, err
@@ -944,10 +945,12 @@ go env GOOS GOARCH CGO_ENABLED GOVERSION > /gobuild/goenv
 		if listed.err != nil {
 			return nil, fmt.Errorf("source imports: %w", listed.err)
 		}
-		var dirs planDirs
-		if b.packs, b.zips, b.downloads, dirs, err = d.discover(ctx, parseSourceImports(d.target, listed.out), pkgDir); err != nil {
+		found, err := d.discoverOnce(ctx, toolImage, goenv, tags, parseSourceImports(d.target, listed.out), pkgDir)
+		if err != nil {
 			return nil, fmt.Errorf("go mod download: %w", err)
 		}
+		b.packs, b.zips, b.downloads = found.packs, found.zips, found.downloads
+		dirs := found.dirs
 		mods := strings.Join(dirs.mods, "\n")
 		b.planMods = &mods
 		// In vendor mode a package outside the source's modules is in its

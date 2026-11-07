@@ -102,6 +102,21 @@ type Entrypoint implements ModuleEntrypoint {
             .withArg("links", typeDef.withKind(TypeDefKind.BOOLEAN_KIND), description: "Whether the caller links, and so reads each package's object code.", sourceMap: sourceMap("deps.go", 53, 2))
         )
         .withFunction(
+          function("Discover", typeDef.withObject("Discovery"))
+            .withDescription("Discover downloads, as discover does, the modules a build may read, from\nthe import paths of packages outside the build's source that the source's\npackages import (sourceImports.outside), and returns what it found. A\nbuild calls it through the engine with exactly what discover reads of the\nbuild, none of its own source, so the engine caches the call: every build\nwhose source imports the same packages from outside it, with the same\ngo.sums, finds it in one request, instead of two for each module, and an\nedit of the build's own source that changes none of those imports leaves\nit as it is.")
+            .withSourceMap(sourceMap("discovery.go", 39, 1))
+            .withArg("public", typeDef.withObject("Container"), description: "The container a public module downloads in.", sourceMap: sourceMap("discovery.go", 42, 2))
+            .withArg("private", typeDef.withObject("Container").withOptional(true), description: "The container a private module downloads in, with the caller's\ncredentials.", sourceMap: sourceMap("discovery.go", 46, 2))
+            .withArg("privatePatterns", typeDef.withKind(TypeDefKind.STRING_KIND).withOptional(true), description: "The modules private downloads, as GONOPROXY or GOPRIVATE names them.", sourceMap: sourceMap("discovery.go", 49, 2))
+            .withArg("hdr", typeDef.withObject("Directory"), description: "gohdr, for every machine an engine runs on (hdrTools).", sourceMap: sourceMap("discovery.go", 51, 2))
+            .withArg("gomodcache", typeDef.withKind(TypeDefKind.STRING_KIND), description: "The caller's GOMODCACHE, a module cache its image may come with.", sourceMap: sourceMap("discovery.go", 53, 2))
+            .withArg("sums", typeDef.withKind(TypeDefKind.STRING_KIND), description: "The module versions the build may read, as a go.sum lists them (goSum).", sourceMap: sourceMap("discovery.go", 55, 2))
+            .withArg("goenv", typeDef.withKind(TypeDefKind.STRING_KIND), description: "The build's target, as `go env GOOS GOARCH CGO_ENABLED GOVERSION`\nprints it, and its build tags.", sourceMap: sourceMap("discovery.go", 58, 2))
+            .withArg("tags", typeDef.withListOf(typeDef.withKind(TypeDefKind.STRING_KIND)).withOptional(true), sourceMap: sourceMap("discovery.go", 60, 2))
+            .withArg("imports", typeDef.withListOf(typeDef.withKind(TypeDefKind.STRING_KIND)), description: "The packages to follow, by the target's build constraints and by none,\nas sourceImports.outside lists them.", sourceMap: sourceMap("discovery.go", 63, 2))
+            .withArg("planImports", typeDef.withListOf(typeDef.withKind(TypeDefKind.STRING_KIND)), sourceMap: sourceMap("discovery.go", 64, 2))
+        )
+        .withFunction(
           function("TestBinary", typeDef.withObject("File"))
             .withDescription("TestBinary builds the test binary of package pkg as \"go test -c\" would,\none exec per package as Binary builds a binary: the package compiled with\nits test files, its external test package, the packages it is imported\nthrough recompiled against it, and the test main the go command writes,\nlinked. Unlike go test -c, it does not run go vet, which is left to the\nlint checks. The binary's Go build ID is a hash of what its link reads,\nnot the one go test computes.")
             .withSourceMap(sourceMap("main.go", 129, 1))
@@ -131,7 +146,14 @@ type Entrypoint implements ModuleEntrypoint {
       typeDef.withObject("DependencyBuilds", description: "DependencyBuilds is what the dependency call (Dependencies) built, in the\norder of its packages.", sourceMap: sourceMap("deps.go", 15, 6))
         .withField("Archives", typeDef.withListOf(typeDef.withObject("File")), description: "Each package's archive, which its importers' compiles read.", sourceMap: sourceMap("deps.go", 17, 2))
         .withField("LinkObjects", typeDef.withListOf(typeDef.withObject("File")), description: "Each package's object code, which a link reads: its archive unless\nthe package splits. Empty when the call's caller doesn't link.", sourceMap: sourceMap("deps.go", 20, 2))
-        .withField("Dirs", typeDef.withListOf(typeDef.withObject("Directory")), description: "Each package's work directory, which holds its archive.", sourceMap: sourceMap("deps.go", 22, 2))
+        .withField("Dirs", typeDef.withListOf(typeDef.withObject("Directory")), description: "Each package's work directory, which holds its archive.", sourceMap: sourceMap("deps.go", 22, 2)),
+      typeDef.withObject("Discovery", description: "Discovery is what the discovery call (Discover) found: the modules a\nbuild downloads and what its plan reads of them.", sourceMap: sourceMap("discovery.go", 14, 6))
+        .withField("Names", typeDef.withListOf(typeDef.withKind(TypeDefKind.STRING_KIND)), description: "Each downloaded module's directory name in the module cache, in name\norder.", sourceMap: sourceMap("discovery.go", 17, 2))
+        .withField("Downloads", typeDef.withListOf(typeDef.withObject("Directory")), description: "Each one's download (downloadModule), in the same order.", sourceMap: sourceMap("discovery.go", 19, 2))
+        .withField("Packs", typeDef.withObject("Directory"), description: "Their plan packs, in one directory.", sourceMap: sourceMap("discovery.go", 21, 2))
+        .withField("PlanMods", typeDef.withListOf(typeDef.withKind(TypeDefKind.STRING_KIND)), description: "The directories of the module cache whose Go files the plan reads.", sourceMap: sourceMap("discovery.go", 23, 2))
+        .withField("Followed", typeDef.withListOf(typeDef.withKind(TypeDefKind.STRING_KIND)), description: "The import paths discover followed, by the target's build constraints\nand by none: the caller checks that its source provides none of them.", sourceMap: sourceMap("discovery.go", 26, 2))
+        .withField("PlanFollowed", typeDef.withListOf(typeDef.withKind(TypeDefKind.STRING_KIND)), sourceMap: sourceMap("discovery.go", 27, 2))
     ]
   }
 
