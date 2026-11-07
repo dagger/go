@@ -257,7 +257,6 @@ type GoDev {
     tests.subset(keys: [one]).test(ws)
     run(
       tests.get(key: one).test(
-        ws,
         selection: tool.module(ws, modPath).packages(ws).subset(keys: [modPath]),
       ),
     )
@@ -331,7 +330,6 @@ type GoDev {
     let failed = {
       run(
         sharedPackages.get(key: "sub").tests.get(key: "TestShared").test(
-          shared,
           selection: sharedTool.modules(shared).get(key: ".").packages(shared).subset(keys: ["sub"]),
         ),
       )

@@ -882,7 +882,10 @@ type GoMod {
     generate: Boolean!,
     suffix: String!,
   ): [String!]! {
-    let output = scanned(ws, test, generate)
+    scanLines(scanned(ws, test, generate), suffix)
+  }
+
+  let scanLines(output: Directory!, suffix: String!): [String!]! {
     let failure = output.file(outputStem + ".err").contents.trimSpace
     if (failure != "") {
       raise failure
@@ -1009,7 +1012,14 @@ type GoMod {
     generate: Boolean! = false,
     extra: [String!]! = [],
   ): Directory! {
-    ws.directory("/", include: include(ws, test: test, generate: generate, extra: extra))
+    sourceFromScan(ws, scanned(ws, test, generate), extra: extra)
+  }
+
+  """
+  Source from an existing scan with the required test/generate mode.
+  """
+  sourceFromScan(ws: Workspace!, scan: Directory!, extra: [String!]! = []): Directory! {
+    ws.directory("/", include: includeExtraFiles + scanLines(scan, ".inc") + extra)
   }
 
   """
