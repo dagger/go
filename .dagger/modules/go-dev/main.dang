@@ -2252,27 +2252,55 @@ type GoDev {
     null
   }
 
-  # Only the unindented CHECKS header counts. Nested TESTS summaries can
-  # report correct Go results even when Dagger attributes the checks incorrectly.
+  # The selected tests are one collection's items. Engines before
+  # dagger/dagger#15088 list the items as top-level checks, tallied in the one
+  # unindented CHECKS header. Later engines list the collection as one check,
+  # passed only when every item passed, with a CHECKS header nested under it
+  # that tallies the items. Only those headers count. Nested TESTS summaries
+  # can report correct Go results even when Dagger attributes the checks
+  # incorrectly.
   let checkSummaryMatches(output: String!, passed: Int!, failed: Int!): Boolean! {
-    let headers = output.split("\n").filter { line =>
-      line.hasPrefix("CHECKS ") or line.hasPrefix("== CHECKS ==")
-    }
+    let lines = output.split("\n")
+    let top = lines.filter { line => checkHeaderAt(line, "") }
+    let items = lines.filter { line => checkHeaderAt(line, "  ") }
     let expected = (if (failed > 0) { ["✘", `${failed}`, "failed"] } else { [] })
       + (if (passed > 0) { ["✔", `${passed}`, "passed"] } else { [] })
-    headers.length == 1 and headers[0]!.trimPrefix("== ").trimPrefix("CHECKS").trimPrefix(" ==")
-      .trimSpace.split(" ").filter { word => word != "" } == expected
+    let collection = if (failed > 0) { ["✘", "1", "failed"] } else { ["✔", "1", "passed"] }
+    let flat = top.length == 1 and items.length == 0 and checkTally(top[0]!) == expected
+    flat or (top.length == 1 and items.length == 1 and checkTally(top[0]!) == collection and checkTally(items[0]!) == expected)
+  }
+
+  let checkHeaderAt(line: String!, indent: String!): Boolean! {
+    line.hasPrefix(indent + "CHECKS ") or line.hasPrefix(indent + "== CHECKS ==")
+  }
+
+  let checkTally(header: String!): [String!]! {
+    header.trimSpace.trimPrefix("== ").trimPrefix("CHECKS").trimPrefix(" ==")
+      .trimSpace.split(" ").filter { word => word != "" }
   }
 
   selectedSummaryCheck: Void @check {
-    let wrong = "CHECKS  ✘ 8 failed\n  TESTS\n    ✘ 1 failed\n    ✔ 7 passed\n"
+    let failing = "CHECKS  ✘ 1 failed\n✘ go/modules/packages/tests/test 1.0s ERROR\n  CHECKS  ✘ 1 failed  ✔ 7 passed\n"
+    assert(checkSummaryMatches(failing, 7, 1), "mixed counts were not recognized")
+    let wrong = "CHECKS  ✘ 1 failed\n✘ go/modules/packages/tests/test 1.0s ERROR\n  CHECKS  ✘ 8 failed\n    ✘ dag://?check=test 1.0s ERROR\n      TESTS\n        ✘ 1 failed\n        ✔ 7 passed\n"
     assert(checkSummaryMatches(wrong, 7, 1) == false, "nested test counts hid failed checks")
     assert(checkSummaryMatches(wrong, 0, 8), "zero passing checks were not recognized")
-    assert(checkSummaryMatches("CHECKS  ✔ 18 passed\n", 8, 0) == false, "accepted a partial count")
-    assert(checkSummaryMatches("CHECKS  ✘ 1 failed  ✔ 7 passed\n", 7, 1), "mixed counts were not recognized")
-    assert(checkSummaryMatches("== CHECKS ==  ✔ 8 passed\n", 8, 0), "agent report was not recognized")
-    assert(checkSummaryMatches("  CHECKS  ✔ 8 passed\n", 8, 0) == false, "accepted a nested header")
-    assert(checkSummaryMatches("CHECKS  ✔ 8 passed\nCHECKS  ✔ 8 passed\n", 8, 0) == false, "accepted duplicate headers")
+    assert(checkSummaryMatches("CHECKS  ✔ 1 passed\n  CHECKS  ✔ 8 passed\n", 8, 0), "passing counts were not recognized")
+    assert(checkSummaryMatches("CHECKS  ✔ 1 passed\n  CHECKS  ✔ 8 passed\n", 1, 0) == false, "read the collection as the item totals")
+    assert(checkSummaryMatches("CHECKS  ✔ 1 passed\nCHECKS  ✔ 1 passed\n  CHECKS  ✔ 8 passed\n", 8, 0) == false, "accepted duplicate collection headers")
+    assert(checkSummaryMatches("CHECKS  ✔ 1 passed\n  CHECKS  ✔ 18 passed\n", 8, 0) == false, "accepted a partial count")
+    assert(checkSummaryMatches("CHECKS  ✔ 1 passed\n  CHECKS  ✘ 1 failed  ✔ 7 passed\n", 7, 1) == false, "accepted a passing collection with failed items")
+    assert(checkSummaryMatches("== CHECKS ==  ✔ 1 passed\n  == CHECKS ==  ✔ 8 passed\n", 8, 0), "agent report was not recognized")
+    let flat = "CHECKS  ✘ 8 failed\n  TESTS\n    ✘ 1 failed\n    ✔ 7 passed\n"
+    assert(checkSummaryMatches(flat, 7, 1) == false, "nested test counts hid failed checks in a flat report")
+    assert(checkSummaryMatches(flat, 0, 8), "zero passing checks were not recognized in a flat report")
+    assert(checkSummaryMatches("CHECKS  ✘ 1 failed  ✔ 7 passed\n", 7, 1), "mixed counts were not recognized in a flat report")
+    assert(checkSummaryMatches("CHECKS  ✔ 18 passed\n", 8, 0) == false, "accepted a partial count in a flat report")
+    assert(checkSummaryMatches("== CHECKS ==  ✔ 8 passed\n", 8, 0), "agent flat report was not recognized")
+    assert(checkSummaryMatches("  CHECKS  ✔ 8 passed\n", 8, 0) == false, "accepted a nested header alone")
+    assert(checkSummaryMatches("CHECKS  ✔ 8 passed\nCHECKS  ✔ 8 passed\n", 8, 0) == false, "accepted duplicate top headers")
+    assert(checkSummaryMatches("CHECKS  ✔ 2 passed\n  CHECKS  ✔ 8 passed\n", 8, 0) == false, "accepted more than one collection")
+    assert(checkSummaryMatches("CHECKS  ✔ 1 passed\n  CHECKS  ✔ 8 passed\n  CHECKS  ✔ 8 passed\n", 8, 0) == false, "accepted duplicate headers")
     null
   }
 
