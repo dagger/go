@@ -8,7 +8,7 @@ import (
 // golangciLintCommit is the dagger/golangci-lint commit whose manifest
 // module writes the archives' manifest, in the format its export driver
 // reads.
-const golangciLintCommit = "cec25a2af6e0d16d555da7e256424a76ee713599"
+const golangciLintCommit = "7d9cbaf83a85addefb99346297301eeb321d98c6"
 
 // manifestSource is the manifest module beside golangci-lint's export
 // driver, at golangciLintCommit, which needs only the standard library.

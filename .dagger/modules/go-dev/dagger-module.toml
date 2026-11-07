@@ -10,4 +10,4 @@ engineVersion = "v1.0.0-beta.22"
 
 [[dependencies]]
   name = "golangci-lint"
-  source = "github.com/dagger/golangci-lint@cec25a2af6e0d16d555da7e256424a76ee713599"
+  source = "github.com/dagger/golangci-lint@7d9cbaf83a85addefb99346297301eeb321d98c6"
