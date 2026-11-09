@@ -12,21 +12,35 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"path"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
-	"sync"
 
+	"dagger.io/dagger/core"
 	"dagger/gobuild/internal/dagger"
 )
 
-type Gobuild struct{}
+type Gobuild struct {
+	// +private
+	ToolImage string
+}
 
-// toolImage builds gohdr, which runs in whatever image the build uses.
-const toolImage = "golang:1.26-alpine"
+func New(
+	// The image gohdr, the build's own tool, is built in, which every plan and
+	// download mounts. It is the image of the Go version gomod's tools build
+	// with (Gomod.goImage of its scannerVersion), pinned by digest there, so a
+	// build pulls one Go image, which an engine image can ship, and gohdr is
+	// the same input in every build.
+	toolImage string,
+) *Gobuild {
+	return &Gobuild{ToolImage: toolImage}
+}
 
 // bare runs an exec as its command alone: none of these execs call Dagger,
 // and starting a nested session for each would cost every package; and
@@ -34,6 +48,12 @@ const toolImage = "golang:1.26-alpine"
 // a script, or the go command, waits for what it starts, and a cancelled
 // exec is stopped whole.
 var bare = dagger.ContainerWithExecOpts{DisableDaggerInDagger: true, NoInit: true}
+
+// pkgExec is bare for a package's own exec, its compile and link, which also
+// asks for transparent huge pages: the compiler's heap grows into fresh
+// memory, and on a host set to "always" huge pages save it most of its page
+// faults. Elsewhere it changes nothing.
+var pkgExec = dagger.ContainerWithExecOpts{DisableDaggerInDagger: true, NoInit: true, TransparentHugePages: true}
 
 // Binary builds the main package pkg as "go build" would and returns a
 // directory holding the binary, named output, and for a c-archive or
@@ -73,12 +93,18 @@ func (m *Gobuild) Binary(
 	// Flags for go build, before the package.
 	// +optional
 	flags []string,
+	// The container module downloads run with: its environment, such as
+	// GOPROXY and GOPRIVATE, its credentials and its mounts, such as git
+	// configuration or an SSH agent. Unset, base's. No package exec reads it,
+	// so it keys downloads alone.
+	// +optional
+	downloads *dagger.Container,
 ) (*dagger.Directory, error) {
-	blocks, linked, err := run(ctx, base, image, from, source, headers, mountPath, workdir, pkg, flags, false)
+	blocks, linked, err := run(ctx, m.ToolImage, base, image, from, downloads, source, headers, mountPath, workdir, pkg, flags, false)
 	if err != nil {
 		return nil, err
 	}
-	out := dag.Directory().WithFile(output, linked.file)
+	out := core.NewDirectory().WithFile(output, linked.file)
 	if blocks[linkID(blocks)].exportsHeader() {
 		// cgo writes the header only for a package that exports something,
 		// and go build installs it only if it was written.
@@ -125,23 +151,31 @@ func (m *Gobuild) TestBinary(
 	// Flags for go test -c, before the package, e.g. -race or -ldflags.
 	// +optional
 	flags []string,
+	// The container module downloads run with, as for Binary.
+	// +optional
+	downloads *dagger.Container,
 ) (*dagger.File, error) {
-	_, linked, err := run(ctx, base, image, from, source, headers, mountPath, workdir, pkg, flags, true)
+	_, linked, err := run(ctx, m.ToolImage, base, image, from, downloads, source, headers, mountPath, workdir, pkg, flags, true)
 	if err != nil {
 		return nil, err
 	}
 	return linked.file, nil
 }
 
-// Archives compiles, one exec per package as Binary builds, every package of
-// the module in workdir and every package it and its tests import, and
-// returns a directory of their archives, the full output of "go tool compile
-// -pack", under archives/, with manifest.json, which describes them for
-// golangci-lint's export driver: the Go version, target and build tags they
-// were compiled for, and for each package, by import path, its archive and a
-// digest of what it was compiled from. The packages are those "go list -deps
-// -test ./..." lists but test variants, external test packages and test
-// mains: main packages too, which the driver loads plainly as well.
+// Archives compiles, one exec per package as Binary builds, every package
+// that "go list -export -deps -test ./..." compiles in the module in workdir:
+// its packages, main packages included, their test variants and external test
+// packages, the packages recompiled against those, and every package they
+// import. It returns a directory for golangci-lint's export driver: under
+// archives/, each package's export data, the archive "go tool compile -pack
+// -linkobj" writes without the package's object code; under cgo/, the Go files cgo wrote for each cgo package's compile;
+// and manifest.json, which describes them: the Go version, target and build
+// tags they were compiled for, and for each package, by its ID in go list's
+// listing, its archive, its cgo files and their output, and a digest of what
+// it was compiled from. With all of them, the driver compiles nothing and
+// runs no cgo. With dependencies, only the packages of other modules and the
+// standard library: a directory keyed by their content alone, which an edit
+// of the module's own packages leaves as it is.
 func (m *Gobuild) Archives(
 	ctx context.Context,
 	// The Go container to build in, as for Binary.
@@ -167,9 +201,104 @@ func (m *Gobuild) Archives(
 	// manifest's.
 	// +optional
 	flags []string,
+	// Only the packages outside the module.
+	// +optional
+	dependencies bool,
+	// The container module downloads run with, as for Binary.
+	// +optional
+	downloads *dagger.Container,
+	// The packages whose imports are archived, as go list patterns from
+	// workdir. Unset, every package of the module.
+	// +optional
+	packages []string,
+	// With the packages' test variants and external test packages, and what
+	// they import, as a lint reads them.
+	// +default=true
+	tests bool,
 ) (*dagger.Directory, error) {
+	w, err := archiveWalk(ctx, m.ToolImage, base, image, from, source, headers, mountPath, workdir, flags, dependencies, downloads, packages, tests)
+	if err != nil {
+		return nil, err
+	}
+	b, blocks, results, order, p, envFlags := w.build, w.blocks, w.results, w.order, w.plan, w.envFlags
+	// The digests are of the source whole, and of what cgo wrote for a cgo
+	// package's compile, read from the package's exec.
+	var modFiles []string
+	for _, bl := range blocks {
+		modFiles = append(modFiles, bl.modFiles...)
+	}
+	tool := manifestTool(b.toolImage)
+	ctr := b.modules.mount(b.base.
+		WithMountedFile("/gobuild/write-manifest", tool), modFiles).
+		WithMountedDirectory(b.roots.Src, b.src)
+	out := core.NewDirectory()
+	var entries strings.Builder
+	var archives []*dagger.File
+	for _, bl := range order {
+		r := results[bl.id]
+		archives = append(archives, r.file)
+		entries.WriteString(bl.importPath + "\tarchives/" + bl.output())
+		if bl.cgo {
+			at := "cgo/" + bl.name
+			ctr = ctr.WithMountedDirectory("/gobuild/"+at, r.dir)
+			var generated []*dagger.File
+			for _, f := range bl.cgoOutputs() {
+				entries.WriteString("\t" + at + "/" + f)
+				generated = append(generated, r.dir.File(f))
+			}
+			out = out.WithFiles("cgo/"+bl.name, generated)
+		}
+		entries.WriteString("\n")
+	}
+	// The settings the manifest records are the go command's where the plan
+	// ran it, as the plan left it: the toolchain it switched to, with the
+	// module cache it set up for it.
+	env := p.ran.
+		WithMountedFile("/gobuild/write-manifest", tool).
+		WithExec([]string{"sh", "-c", "cd " + shQuote(b.roots.Cwd) + " && /gobuild/write-manifest env > /gobuild/env.json"}, bare).
+		File("/gobuild/env.json")
+	// The manifest is read from its exec's evaluated output, so it is keyed
+	// by its content: the exec reads the whole listing, which any edit
+	// changes.
+	manifestDir, err := ctr.
+		WithMountedFile("/gobuild/list.json", p.ran.File("/gobuild/list.json")).
+		WithMountedFile("/gobuild/env.json", env).
+		WithNewFile("/gobuild/entries.txt", entries.String()).
+		WithExec([]string{"sh", "-c", "mkdir -p /gobuild/manifest && /gobuild/write-manifest /gobuild/list.json /gobuild/env.json /gobuild/entries.txt " +
+			shQuote(strings.Join(buildTags(append(envFlags, flags...)), ",")) + " /gobuild > /gobuild/manifest/manifest.json"}, bare).
+		Directory("/gobuild/manifest").Sync(ctx)
+	if err != nil {
+		return nil, err
+	}
+	manifest, err := manifestDir.File("manifest.json").Sync(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return out.WithFiles("archives", archives).WithFile("manifest.json", manifest), nil
+}
+
+// archiveWalked is the walk Archives makes: the build, its plan and the
+// flags GOFLAGS adds, the blocks it planned, each walked package's result,
+// and the walked packages Archives returns, in import path order.
+type archiveWalked struct {
+	build    *build
+	plan     *planned
+	envFlags []string
+	blocks   map[string]*block
+	results  map[string]*result
+	order    []*block
+}
+
+// archiveWalk plans and walks what Archives compiles, with Archives' arguments.
+func archiveWalk(ctx context.Context, toolImage string, base *dagger.Container, image string, from *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir string, flags []string, dependencies bool, downloads *dagger.Container, packages []string, tests bool) (*archiveWalked, error) {
 	cwd := path.Join(mountPath, workdir)
-	b, err := newBuild(ctx, base, image, from, source, mountPath, cwd, flags)
+	// Discovery follows the imports of the one package archived, as a
+	// binary's build follows its package's; of every package otherwise.
+	pkgDir := ""
+	if len(packages) == 1 && !strings.Contains(packages[0], "...") {
+		pkgDir = path.Join(workdir, packages[0])
+	}
+	b, err := newBuild(ctx, toolImage, base, image, from, downloads, source, headers, pkgDir, tests, mountPath, cwd, flags)
 	if err != nil {
 		return nil, err
 	}
@@ -181,16 +310,17 @@ func (m *Gobuild) Archives(
 	if err != nil {
 		return nil, fmt.Errorf("GOFLAGS: %w", err)
 	}
-	// go list names the packages, from the plan's view of the source, which
-	// has every import; go build -n compiles them, a main package without
-	// its link. With none, go build would build ".", so it doesn't run, and
-	// the plan is empty.
-	list := append(append([]string{"go", "list", "-deps", "-test", "-json=" + listFields}, flags...), "./...")
-	pre := shJoin(list) + " > /gobuild/list.json" +
-		" && /gobuild/gohdr scope /gobuild/list.json > /gobuild/pkgs.txt" +
-		" && go env -json GOVERSION GOOS GOARCH CGO_ENABLED > /gobuild/env.json && "
-	goCmd := "{ [ ! -s /gobuild/pkgs.txt ] || " + shJoin(append([]string{"go", "build", "-n"}, flags...)) + " $(cat /gobuild/pkgs.txt); }"
-	p, err := b.planWith(ctx, headers, pre, goCmd)
+	// go list -export prints the plan of what it compiles, as go build -n
+	// does, and its listing of the packages.
+	listCmd := []string{"go", "list", "-export", "-deps", "-n", "-json=" + listFields}
+	if tests {
+		listCmd = append(listCmd, "-test")
+	}
+	if len(packages) == 0 {
+		packages = []string{"./..."}
+	}
+	goCmd := shJoin(append(append(listCmd, flags...), packages...)) + " > /gobuild/list.json"
+	p, err := b.planWith(ctx, headers, goCmd)
 	if err != nil {
 		return nil, err
 	}
@@ -198,58 +328,169 @@ func (m *Gobuild) Archives(
 	if err != nil {
 		return nil, err
 	}
-	results, err := b.walk(ctx, blocks, p.weights, p.cc, p.goDirs, nil)
+	list, err := p.ran.File("/gobuild/list.json").Contents(ctx)
 	if err != nil {
 		return nil, err
 	}
-	pkgs, err := p.ran.File("/gobuild/pkgs.txt").Contents(ctx)
+	ids, mains, own, err := listedIDs(list)
 	if err != nil {
 		return nil, err
 	}
-	byPath := map[string]*block{}
-	for _, bl := range blocks {
-		if !bl.isProfile {
-			byPath[bl.importPath] = bl
+	if err := identifyVariants(blocks, ids, mains); err != nil {
+		return nil, err
+	}
+	walked := blocks
+	if dependencies {
+		walked = dependencyBlocks(blocks, own)
+	}
+	results, err := b.walk(ctx, walked, p.weights, p.cc, p.goDirs, nil)
+	if err != nil {
+		return nil, err
+	}
+	var order []*block
+	for _, bl := range walked {
+		if !bl.isProfile && !(dependencies && own[bl.importPath]) {
+			order = append(order, bl)
 		}
 	}
-	// The digests are of the source whole, and of what cgo wrote for a cgo
-	// package's compile, read from the package's exec.
-	ctr := b.base.
-		WithMountedFile("/gobuild/gohdr", hdrTool()).
-		WithMountedDirectory(b.roots.Mod, b.mods).
-		WithMountedDirectory(b.roots.Src, b.src)
-	var entries strings.Builder
-	var archives []*dagger.File
-	for _, ip := range strings.Fields(pkgs) {
-		bl, ok := byPath[ip]
-		if !ok {
-			return nil, fmt.Errorf("%s: no compile for it in the plan", ip)
-		}
-		r := results[bl.id]
-		archives = append(archives, r.file)
-		entries.WriteString(ip + " archives/" + bl.output())
-		if bl.cgo {
-			at := "/gobuild/cgo/" + bl.name
-			ctr = ctr.WithMountedDirectory(at, r.dir)
-			for _, f := range bl.cgoOutputs() {
-				entries.WriteString(" " + at + "/" + f)
-			}
-		}
-		entries.WriteString("\n")
+	sort.Slice(order, func(i, j int) bool { return order[i].importPath < order[j].importPath })
+	return &archiveWalked{build: b, plan: p, envFlags: envFlags, blocks: blocks, results: results, order: order}, nil
+}
+
+// ArchiveCache is what a build reads from the cache that every build of its
+// packages with the same toolchain, flags and go.sum shares.
+type ArchiveCache struct {
+	// Each package's build: the directory the package's exec wrote, with its
+	// archives, as every build of the package reads it from the cache.
+	Builds []*dagger.Directory
+	// Each module version the build downloaded (go mod download), with its
+	// plan pack and its zip, in the order of its module cache directory name.
+	Downloads []*dagger.Directory
+	// gohdr, the tool the build's execs run.
+	Tool *dagger.File
+	// golangci-lint's write-manifest, which writes the archives' manifest,
+	// and the source it is built from, which a fresh engine would otherwise
+	// fetch to find the build.
+	ManifestTool   *dagger.File
+	ManifestSource *dagger.Directory
+	// Go's own tools the build's execs run, built by its toolchain: pack,
+	// which packages with assembly run.
+	Tools *dagger.Directory
+}
+
+// ArchiveBuilds compiles what Archives compiles, with its arguments, and
+// returns what it read from the cache instead of the export driver's
+// directory: each package's build, each module download, gohdr,
+// write-manifest and its source, and Go's pack. A cache that is to have exactly these results, such as the cache an
+// engine image pre-warms, is filled from them.
+func (m *Gobuild) ArchiveBuilds(
+	ctx context.Context,
+	// The Go container to build in, as for Binary.
+	base *dagger.Container,
+	// The image base was made from, as for Binary.
+	// +optional
+	image string,
+	// The custom container base was made from, as for Binary.
+	// +optional
+	from *dagger.Container,
+	// The source tree, as for Archives.
+	source *dagger.Directory,
+	// The header pack of source's Go files, as for Archives.
+	headers *dagger.File,
+	// Where source is mounted.
+	mountPath string,
+	// The module's directory, relative to mountPath.
+	// +default="."
+	workdir string,
+	// Flags for go build, as for Binary.
+	// +optional
+	flags []string,
+	// Only the packages outside the module.
+	// +optional
+	dependencies bool,
+	// The container module downloads run with, as for Binary.
+	// +optional
+	downloads *dagger.Container,
+	// The packages whose imports are compiled, as for Archives.
+	// +optional
+	packages []string,
+	// With the packages' test variants, as for Archives.
+	// +default=true
+	tests bool,
+) (*ArchiveCache, error) {
+	w, err := archiveWalk(ctx, m.ToolImage, base, image, from, source, headers, mountPath, workdir, flags, dependencies, downloads, packages, tests)
+	if err != nil {
+		return nil, err
 	}
-	manifest := ctr.
-		WithMountedFile("/gobuild/list.json", p.ran.File("/gobuild/list.json")).
-		WithMountedFile("/gobuild/env.json", p.ran.File("/gobuild/env.json")).
-		WithNewFile("/gobuild/entries.txt", entries.String()).
-		WithExec([]string{"sh", "-c", "/gobuild/gohdr manifest /gobuild/list.json /gobuild/env.json /gobuild/entries.txt " +
-			shQuote(strings.Join(buildTags(append(envFlags, flags...)), ",")) + " > /gobuild/manifest.json"}, bare).
-		File("/gobuild/manifest.json")
-	return dag.Directory().WithFiles("archives", archives).WithFile("manifest.json", manifest), nil
+	dirs := make([]*dagger.Directory, 0, len(w.order))
+	for _, bl := range w.order {
+		dirs = append(dirs, w.results[bl.id].dir)
+	}
+	return &ArchiveCache{Builds: dirs, Downloads: w.build.downloads, Tool: w.build.gohdr, ManifestTool: manifestTool(w.build.toolImage), ManifestSource: manifestSource(), Tools: w.build.tools}, nil
 }
 
 // listFields are the fields of go list's output Archives reads: the
-// packages, and the files their digests cover.
-const listFields = "ImportPath,Dir,ForTest,GoFiles,CgoFiles,CFiles,CXXFiles,MFiles,HFiles,FFiles,SFiles,SwigFiles,SwigCXXFiles,SysoFiles,EmbedFiles"
+// packages and their names, and what write-manifest reads, the manifest
+// module's ListFields: their modules and the files their digests cover.
+const listFields = "ImportPath,Name,Dir,ForTest,Module,GoFiles,CgoFiles,CFiles,CXXFiles,MFiles,HFiles,FFiles,SFiles,SwigFiles,SwigCXXFiles,SysoFiles,EmbedFiles"
+
+// listedIDs is the set of package IDs in a "go list -json" listing, and the
+// set of its main packages, by import path, and of the packages of the main
+// module, own.
+func listedIDs(list string) (ids, mains, own map[string]bool, err error) {
+	ids, mains, own = map[string]bool{}, map[string]bool{}, map[string]bool{}
+	dec := json.NewDecoder(strings.NewReader(list))
+	for {
+		var p struct {
+			ImportPath, Name string
+			Module           *struct{ Main bool }
+		}
+		if err := dec.Decode(&p); err == io.EOF {
+			return ids, mains, own, nil
+		} else if err != nil {
+			return nil, nil, nil, fmt.Errorf("go list: %w", err)
+		}
+		ids[p.ImportPath] = true
+		if p.Name == "main" && !strings.Contains(p.ImportPath, " [") {
+			mains[p.ImportPath] = true
+		}
+		own[p.ImportPath] = p.Module != nil && p.Module.Main
+	}
+}
+
+// dependencyBlocks is the blocks of a plan that compile none of the module's
+// own packages (own, by import path), nor anything that imports them, such
+// as a test main: the packages of other modules and the standard library,
+// which no other module's package can import the module's own into.
+func dependencyBlocks(blocks map[string]*block, own map[string]bool) map[string]*block {
+	excluded := map[string]bool{}
+	for id, bl := range blocks {
+		if own[bl.importPath] || strings.HasSuffix(bl.importPath, ".test") {
+			excluded[id] = true
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for id, bl := range blocks {
+			if excluded[id] {
+				continue
+			}
+			for _, d := range bl.deps {
+				if excluded[d] {
+					excluded[id], changed = true, true
+					break
+				}
+			}
+		}
+	}
+	kept := map[string]*block{}
+	for id, bl := range blocks {
+		if !excluded[id] {
+			kept[id] = bl
+		}
+	}
+	return kept
+}
 
 // buildTags is the -tags value in go build flags, the last one's, as a list.
 func buildTags(flags []string) []string {
@@ -270,14 +511,14 @@ func buildTags(flags []string) []string {
 
 // run builds pkg's binary, or with test its test binary, and returns the
 // plan's blocks and the link's result.
-func run(ctx context.Context, base *dagger.Container, image string, from *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir, pkg string, flags []string, test bool) (map[string]*block, *result, error) {
+func run(ctx context.Context, toolImage string, base *dagger.Container, image string, from, downloads *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir, pkg string, flags []string, test bool) (map[string]*block, *result, error) {
 	cwd := path.Join(mountPath, workdir)
 	if test {
 		// Vet is go test's, not the binary's, and is left to the lint
 		// checks: the per-package build doesn't replay it.
 		flags = append([]string{"-vet=off"}, flags...)
 	}
-	b, err := newBuild(ctx, base, image, from, source, mountPath, cwd, flags)
+	b, err := newBuild(ctx, toolImage, base, image, from, downloads, source, headers, path.Join(workdir, pkg), test, mountPath, cwd, flags)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -347,29 +588,22 @@ func (b *build) walk(ctx context.Context, blocks map[string]*block, weights map[
 	for _, bl := range blocks {
 		bl.addCFlags(cc)
 	}
-	sums, err := moduleSums(ctx, b.base, b.mods)
-	if err != nil {
-		return nil, fmt.Errorf("module checksums: %w", err)
-	}
-	mods := &modules{root: b.roots.Mod, all: b.mods, sums: sums}
+	mods := &modules{root: b.roots.Mod, all: b.mods, zips: b.zips, fetchZip: b.fetch, sums: b.sums}
+	b.modules = mods
 	if err := mods.expandLoose(ctx, blocks); err != nil {
 		return nil, err
 	}
+	mods.excludeUnread(blocks)
 	heights := heightsOf(blocks, weights)
 	mods.fetch(ctx, blocks, heights)
-	// Go 1.25 and later run "go tool pack" for packages with assembly, the
-	// runtime among the first: build the tool now, not when the runtime
-	// waits for it. An error shows again where it's used.
-	if needsTools(blocks) {
-		go b.tools.Sync(ctx)
-	}
-	w := &walker{base: b.base, tools: b.tools, src: b.src, mods: mods, roots: b.roots, nonGo: nonGo}
+	w := &walker{base: b.base, gohdr: b.gohdr, tools: b.tools, src: b.src, mods: mods, roots: b.roots, nonGo: nonGo}
 	if prepare != nil {
 		if err := prepare(w); err != nil {
 			return nil, err
 		}
 	}
 	// A PGO profile is preprocessed first: every compile reads it.
+	var err error
 	for _, bl := range blocks {
 		if bl.isProfile {
 			if w.profile, err = b.profileStep(ctx, bl, blocks, mods); err != nil {
@@ -413,27 +647,95 @@ const modCacheDir = "/gobuild/modcache"
 type build struct {
 	// base is the caller's container without its mounts, so no cache volume
 	// shadows the module sources mounted per package.
-	base  *dagger.Container
-	src   *dagger.Directory
-	mods  *dagger.Directory
+	base *dagger.Container
+	src  *dagger.Directory
+	// mods is the module cache the go command made before any download,
+	// such as a toolchain it switched to, or all of it, downloaded per
+	// project, when it switched.
+	mods *dagger.Directory
+	// packs is the plan packs of the build's downloaded modules (downloads),
+	// which a plan unpacks into its module cache; nil without any.
+	packs *dagger.Directory
+	// zips is each downloaded module's zip, by its directory name in the
+	// module cache.
+	zips map[string]*dagger.File
+	// downloads is each downloaded module's download (downloadModule), in
+	// the order of its directory name in the module cache.
+	downloads []*dagger.Directory
+	// sums is the checksum of each downloaded module, by its directory name
+	// in the module cache.
+	sums map[string]string
+	// planSrc and planMods list, a line each, the directories of the source
+	// and of the module cache whose Go files a plan unpacks (planDirs); nil
+	// for every one.
+	planSrc, planMods *string
+	// modules is the walk's modules, for a step after it that reads them.
+	modules *modules
+	// fetch downloads, on its own, the zip of a module the build reads that
+	// discover didn't find, by its directory name; nil when the build didn't
+	// download per module.
+	fetch func(name string) *dagger.File
 	tools *dagger.Directory
 	roots roots
+	// toolImage is the image gohdr is built in, which the build's own steps,
+	// those that run gohdr alone, run in too.
+	toolImage string
+	// gohdr is the build's tool (hdrTool), one object for the whole build, so
+	// the SDK asks the engine for its ID once, not once for every exec that
+	// mounts it.
+	gohdr *dagger.File
 }
 
-func newBuild(ctx context.Context, ctr *dagger.Container, image string, from *dagger.Container, source *dagger.Directory, mountPath, cwd string, flags []string) (*build, error) {
+// newBuild prepares a build of the source; pkgDir is the directory of the
+// package it builds, relative to the source, or "" for every package of the
+// module, and tests whether it builds tests: they decide which modules the
+// build downloads.
+func newBuild(ctx context.Context, toolImage string, ctr *dagger.Container, image string, from, downloads *dagger.Container, source *dagger.Directory, headers *dagger.File, pkgDir string, tests bool, mountPath, cwd string, flags []string) (*build, error) {
 	// The plan's view of the source is a filtered copy, as slow on a large
 	// source as the rest of this setup, which it doesn't depend on: it's
 	// made alongside it. An error shows again where the plan mounts it.
-	go planSource(source).ID(ctx)
+	go planSource(source).Sync(ctx)
+	gohdr := hdrTool(toolImage)
 	var err error
 	if image != "" {
-		from = dag.Container().From(image)
+		from = core.NewContainer().From(image)
 	}
+	// The caller's own container downloads a private module, with its
+	// credentials; a public one downloads in the toolchain alone, with the
+	// caller's download settings. The caller is downloads when it's set.
+	caller := ctr
+	if downloads != nil {
+		caller = downloads
+	}
+	public := caller
 	if from != nil {
+		if public, err = withEnvOnly(ctx, caller, from, func(name string) bool { return slices.Contains(downloadEnv, name) }); err != nil {
+			return nil, err
+		}
 		if ctr, err = canonical(ctx, ctr, from); err != nil {
 			return nil, err
 		}
 	}
+	// What the source's packages import, which the build follows from the
+	// package it builds to the modules it downloads. It needs nothing of the
+	// setup below, so it's listed alongside it.
+	importsMode := "build"
+	if tests {
+		importsMode = "tests"
+	}
+	type listing struct {
+		out string
+		err error
+	}
+	imports := make(chan listing, 1)
+	go func() {
+		out, err := public.
+			WithMountedFile("/gobuild/gohdr", gohdr, dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
+			WithMountedFile("/gobuild/src.hdr", headers, dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
+			WithExec([]string{"/gobuild/gohdr", "imports", "/gobuild/src.hdr", importsMode}, bare).
+			Stdout(ctx)
+		imports <- listing{out, err}
+	}()
 	// The Go caches' volumes are dropped: they would shadow the module
 	// sources mounted per package, and live on one engine. A custom base's
 	// other mounts, such as a toolchain or headers, stay.
@@ -454,6 +756,15 @@ func newBuild(ctx context.Context, ctr *dagger.Container, image string, from *da
 	for _, m := range mounts {
 		if caches[m] {
 			ctr = ctr.WithoutMount(m)
+		}
+	}
+	callerMounts, err := caller.Mounts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, m := range callerMounts {
+		if caches[m] {
+			caller = caller.WithoutMount(m)
 		}
 	}
 	gomodcache, err := ctr.EnvVariable(ctx, "GOMODCACHE")
@@ -484,12 +795,16 @@ func newBuild(ctx context.Context, ctr *dagger.Container, image string, from *da
 	if err := checkFlags(append(append([]string(nil), flags...), envFlags...)); err != nil {
 		return nil, err
 	}
-	b := &build{base: base, src: source, roots: roots{Src: mountPath, Mod: gomodcache, Cwd: cwd}}
-	// The module cache, downloaded from every go.mod and go.sum in the
-	// source: the root's, and those a local replace or go.work points at,
-	// or the alternate go.mod a -modfile flag names, with its go.sum.
+	b := &build{base: base, src: source, roots: roots{Src: mountPath, Mod: gomodcache, Cwd: cwd}, toolImage: toolImage, gohdr: gohdr}
+	// The module cache is made from the build's go.sums: the main module's,
+	// those of a go.work's modules and its go.work.sum, or the alternate
+	// go.mod a -modfile flag names, with its go.sum. The go command lists
+	// them, from every go.mod and go.sum in the source, and does what it
+	// does before any download, such as switching to the toolchain the
+	// go.mod asks for, which it downloads as a module.
 	include := []string{"**/go.mod", "**/go.sum", "go.work", "go.work.sum", "**/vendor/modules.txt"}
 	download := []string{"go", "mod", "download"}
+	list := []string{"go", "list", "-m", "-f", "{{.GoMod}}"}
 	// The go.mod the build reads its go directive from: the alternate one,
 	// or with none, the module's own, which the script asks go for.
 	goMod := ""
@@ -497,6 +812,7 @@ func newBuild(ctx context.Context, ctr *dagger.Container, image string, from *da
 		// An empty -modfile in the call means the module's own go.mod,
 		// whatever GOFLAGS, which the download runs with, names.
 		download = append(download, "-modfile=")
+		list = append(list, "-modfile=")
 	} else if ok {
 		if !path.IsAbs(mf) {
 			mf = path.Join(cwd, mf)
@@ -504,6 +820,7 @@ func newBuild(ctx context.Context, ctr *dagger.Container, image string, from *da
 		rel := strings.TrimPrefix(strings.TrimPrefix(mf, mountPath), "/")
 		include = append(include, rel, strings.TrimSuffix(rel, ".mod")+".sum")
 		download = append(download, "-modfile="+mf)
+		list = append(list, "-modfile="+mf)
 		goMod = mf
 	}
 	// The cache directory is made first: a module with no dependencies
@@ -511,6 +828,10 @@ func newBuild(ctx context.Context, ctr *dagger.Container, image string, from *da
 	quoted := make([]string, len(download))
 	for i, a := range download {
 		quoted[i] = shQuote(a)
+	}
+	listed := make([]string, len(list))
+	for i, a := range list {
+		listed[i] = shQuote(a)
 	}
 	// In vendor mode the go command reads dependencies from the vendor
 	// directory and never the module cache, and a vendored dependency need
@@ -525,11 +846,11 @@ func newBuild(ctx context.Context, ctr *dagger.Container, image string, from *da
 	// file read from the module cache is keyed by its path in it too: then
 	// a module's download is the same input in every project. A module
 	// cache the base comes with, filled for offline builds, is its start.
-	start := ""
+	seed := ""
 	if path.Clean(gomodcache) != modCacheDir {
-		start = "\n[ ! -d " + shQuote(gomodcache) + " ] || [ " + shQuote(gomodcache) + " -ef " + modCacheDir + " ] || cp -a " + shQuote(gomodcache) + "/. " + modCacheDir + "/"
+		seed = "\n[ ! -d " + shQuote(gomodcache) + " ] || [ " + shQuote(gomodcache) + " -ef " + modCacheDir + " ] || cp -a " + shQuote(gomodcache) + "/. " + modCacheDir + "/"
 	}
-	script := "set -e\nmkdir -p " + modCacheDir + start +
+	script := "set -e\nmkdir -p " + modCacheDir + seed +
 		"\nexport GOMODCACHE=" + modCacheDir + "\nmode=" + shQuote(mode) + "\nsrc=" + shQuote(mountPath) + "\ngomod=" + shQuote(goMod) + `
 if [ -z "$mode" ] && [ -n "$(find "$src" -path '*/vendor/modules.txt' | head -n 1)" ]; then
 	work=$(go env GOWORK)
@@ -545,14 +866,96 @@ if [ -z "$mode" ] && [ -n "$(find "$src" -path '*/vendor/modules.txt' | head -n 
 		[ "${minor:-0}" -ge "$min" ] && mode=vendor
 	fi
 fi
-[ "$mode" = vendor ] || ` + strings.Join(quoted, " ")
-	b.mods, err = base.
+printf '%s' "$mode" > /gobuild/mode
+: > /gobuild/sums
+go env GOOS GOARCH CGO_ENABLED GOVERSION > /gobuild/goenv
+[ "$mode" = vendor ] || {
+	gomods=$(` + strings.Join(listed, " ") + `)
+	if [ "$(go env GOVERSION)" != "$(GOTOOLCHAIN=local go env GOVERSION)" ]; then
+		# The go.mod asked for a newer Go, which the go command switched to:
+		# that toolchain downloads, in the project, as it always has.
+		` + strings.Join(quoted, " ") + `
+		touch /gobuild/switched
+	else
+		work=$(go env GOWORK)
+		for f in $gomods; do [ ! -f "${f%.mod}.sum" ] || cat "${f%.mod}.sum" >> /gobuild/sums; done
+		if [ -n "$work" ] && [ "$work" != off ] && [ -f "$work.sum" ]; then cat "$work.sum" >> /gobuild/sums; fi
+	fi
+}`
+	first, err := base.
 		WithMountedDirectory(mountPath, source.Filter(dagger.DirectoryFilterOpts{Include: include})).
 		WithWorkdir(cwd).
 		WithExec([]string{"sh", "-c", script}, bare).
-		Directory(modCacheDir).Sync(ctx)
+		Sync(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("go mod download: %w", err)
+	}
+	sumFile, err := first.File("/gobuild/sums").Contents(ctx)
+	if err != nil {
+		return nil, err
+	}
+	start := first.Directory(modCacheDir)
+	// What the go command downloaded before any module, such as a
+	// toolchain, is recorded in the module cache it starts from.
+	type sumsListing struct {
+		sums map[string]string
+		err  error
+	}
+	startSums := make(chan sumsListing, 1)
+	go func() {
+		sums, err := moduleSums(ctx, base, start)
+		startSums <- sumsListing{sums, err}
+	}()
+	entries := parseGoSums([]string{sumFile})
+	b.mods = start
+	goenv, err := first.File("/gobuild/goenv").Contents(ctx)
+	if err != nil {
+		return nil, err
+	}
+	switched, err := first.Directory("/gobuild").Glob(ctx, "switched")
+	if err != nil {
+		return nil, err
+	}
+	if len(switched) > 0 {
+		entries = nil
+	} else {
+		d := &downloader{public: public, private: caller, gohdr: b.gohdr, gomodcache: gomodcache, sums: entries,
+			target: newTarget(goenv, buildTags(append(append([]string(nil), envFlags...), flags...)))}
+		// The modules the go command fetches directly rather than through a
+		// proxy: GONOPROXY's, or GOPRIVATE's when it's unset or empty.
+		if d.privatePatterns, err = firstEnv(ctx, caller, "GONOPROXY", "GOPRIVATE"); err != nil {
+			return nil, err
+		}
+		listed := <-imports
+		if listed.err != nil {
+			return nil, fmt.Errorf("source imports: %w", listed.err)
+		}
+		var dirs planDirs
+		if b.packs, b.zips, b.downloads, dirs, err = d.discover(ctx, parseSourceImports(d.target, listed.out), pkgDir); err != nil {
+			return nil, fmt.Errorf("go mod download: %w", err)
+		}
+		mods := strings.Join(dirs.mods, "\n")
+		b.planMods = &mods
+		// In vendor mode a package outside the source's modules is in its
+		// vendor directory, which discover doesn't follow: the plan unpacks
+		// every source directory.
+		if mode, err := first.File("/gobuild/mode").Contents(ctx); err != nil {
+			return nil, err
+		} else if mode != "vendor" {
+			src := strings.Join(dirs.src, "\n")
+			b.planSrc = &src
+		}
+		b.fetch = d.lazyZip
+	}
+	listedSums := <-startSums
+	if listedSums.err != nil {
+		return nil, fmt.Errorf("start module cache checksums: %w", listedSums.err)
+	}
+	b.sums = listedSums.sums
+	for _, e := range entries {
+		if e.zip != "" {
+			b.sums[escapeModule(e.path)+"@"+escapeModule(e.version)] = e.zip
+		}
 	}
 	// Built for the machine the execs run on, by the build's own toolchain.
 	b.tools = base.
@@ -562,6 +965,13 @@ fi
 		WithEnvVariable("GOCACHE", "/gobuild/cache").
 		WithExec([]string{"go", "build", "-o", toolsDir + "/", "cmd/pack"}, bare).
 		Directory(toolsDir)
+	// Go 1.25 and later run "go tool pack" for each package with assembly,
+	// the runtime among them, so a build on them needs pack and its runtime
+	// waits for it there: it's built alongside the plan instead. Earlier Go
+	// runs the toolchain's own pack. An error shows again where it's used.
+	if newTarget(goenv, nil).goMinor >= 25 {
+		go b.tools.Sync(ctx)
+	}
 	return b, nil
 }
 
@@ -570,8 +980,8 @@ fi
 // copy of a large source costs more than the listing, which reruns when the
 // source changes anyway and costs one exec then.
 func (b *build) sourceSizes(ctx context.Context) (map[string]int64, error) {
-	out, err := dag.Container().From(toolImage).
-		WithMountedFile("/gobuild/gohdr", hdrTool(), dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
+	out, err := core.NewContainer().From(b.toolImage).
+		WithMountedFile("/gobuild/gohdr", b.gohdr, dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
 		WithMountedDirectory("/gobuild/src", b.src, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true}).
 		WithExec([]string{"/gobuild/gohdr", "sizes", "/gobuild/src"}, bare).
 		Stdout(ctx)
@@ -618,30 +1028,13 @@ func weighSource(blocks map[string]*block, weights map[string]int64, sizes map[s
 
 // canonical is from with ctr's environment and nothing else of ctr's.
 func canonical(ctx context.Context, ctr *dagger.Container, from *dagger.Container) (*dagger.Container, error) {
-	vars, err := ctr.EnvVariables(ctx)
+	names, values, err := envOf(ctx, ctr)
 	if err != nil {
 		return nil, err
 	}
-	names := make([]string, len(vars))
-	values := make([]string, len(vars))
-	errs := make([]error, len(vars))
-	var wg sync.WaitGroup
-	for i, v := range vars {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if names[i], errs[i] = v.Name(ctx); errs[i] == nil {
-				values[i], errs[i] = v.Value(ctx)
-			}
-		}()
-	}
-	wg.Wait()
 	out := from
-	for i := range vars {
-		if errs[i] != nil {
-			return nil, errs[i]
-		}
-		out = out.WithEnvVariable(names[i], values[i])
+	for i, name := range names {
+		out = out.WithEnvVariable(name, values[i])
 	}
 	return out, nil
 }
@@ -660,7 +1053,7 @@ func (b *build) plan(ctx context.Context, headers *dagger.File, flags []string, 
 	}
 	cmd = append(cmd, flags...)
 	cmd = append(cmd, "-o", planOut+"/out", pkg)
-	p, err := b.planWith(ctx, headers, "", shJoin(cmd))
+	p, err := b.planWith(ctx, headers, shJoin(cmd))
 	if err != nil {
 		return "", nil, ccInfo{}, nil, err
 	}
@@ -682,21 +1075,89 @@ type planned struct {
 	goDirs  *dagger.File
 }
 
+// withModules mounts the module cache a plan reads: the go command's own,
+// and, when the build downloaded modules, their plan packs, which
+// unpackHeaders unpacks into it, with the list of the directories it
+// unpacks.
+func (b *build) withModules(ctr *dagger.Container) *dagger.Container {
+	ctr = ctr.WithMountedDirectory(b.roots.Mod, b.mods)
+	if b.packs != nil {
+		ctr = ctr.WithMountedDirectory("/gobuild/modpacks", b.packs, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
+	}
+	if b.planMods != nil {
+		ctr = ctr.WithNewFile("/gobuild/plandirs/mods", *b.planMods)
+	}
+	return ctr
+}
+
+// unpackHeaders is the script that unpacks, for a plan, the build's plan
+// packs into the module cache, only in the directories the plan reads when
+// they're known, and the pack of the source's headers the plan reads
+// (planHeaders), mounted at /gobuild/src.hdr, into the source.
+func (b *build) unpackHeaders() string {
+	script := ""
+	if b.packs != nil {
+		script = "/gobuild/gohdr unpackall /gobuild/modpacks " + shQuote(b.roots.Mod)
+		if b.planMods != nil {
+			script += " /gobuild/plandirs/mods"
+		}
+		script += " && "
+	}
+	// The list is planHeaders', made from the whole pack.
+	return script + "/gobuild/gohdr unpack /gobuild/src.hdr " + shQuote(b.roots.Src) + " /dev/null"
+}
+
+// planHeaders is what a plan reads of the source's Go files: a pack of the
+// headers that "gohdr unpack" writes from the source's header pack with the
+// directories the plan reads, when they're known (planDirs); and the whole
+// pack's list of its Go files in directories named like Go files, the plan's
+// goDirs.
+//
+// They are made by an exec of their own, and each is read from its evaluated
+// output, so it is keyed by its content: the plan follows only the headers it
+// reads. With the whole pack, the plan was keyed by every Go file's imports
+// in the workspace: a change to any of them, another module's included, ran
+// the plan again, and its go command, for the same plan.
+func (b *build) planHeaders(ctx context.Context, headers *dagger.File) (*dagger.File, *dagger.File, error) {
+	ctr := core.NewContainer().From(b.toolImage).
+		WithMountedFile("/gobuild/gohdr", b.gohdr, dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
+		WithMountedFile("/gobuild/src.hdr", headers, dagger.ContainerWithMountedFileOpts{ReadOnly: true})
+	cmd := []string{"/gobuild/gohdr", "subset", "/gobuild/src.hdr", "/gobuild/hdr/plan.hdr", "/gobuild/hdr/godirs.txt"}
+	if b.planSrc != nil {
+		ctr = ctr.WithNewFile("/gobuild/plandirs/src", *b.planSrc)
+		cmd = append(cmd, "/gobuild/plandirs/src")
+	}
+	out, err := ctr.WithExec([]string{"sh", "-c", "mkdir -p /gobuild/hdr && " + shJoin(cmd)}, bare).Directory("/gobuild/hdr").Sync(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	pack, err := out.File("plan.hdr").Sync(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	return pack, out.File("godirs.txt"), nil
+}
+
 // planWith makes a plan as plan does, with goCmd the go command that prints
-// it, run after pre, which may be empty or a command ending in "&&".
-func (b *build) planWith(ctx context.Context, headers *dagger.File, pre, goCmd string) (*planned, error) {
-	ran := b.base.
-		WithMountedFile("/gobuild/gohdr", hdrTool()).
-		WithMountedDirectory(b.roots.Mod, b.mods).
+// it.
+func (b *build) planWith(ctx context.Context, headers *dagger.File, goCmd string) (*planned, error) {
+	planHdr, goDirs, err := b.planHeaders(ctx, headers)
+	if err != nil {
+		return nil, err
+	}
+	ran := b.withModules(b.base.
+		WithMountedFile("/gobuild/gohdr", b.gohdr)).
 		WithMountedDirectory(b.roots.Src, planSource(b.src)).
-		WithMountedFile("/gobuild/src.hdr", headers).
+		WithMountedFile("/gobuild/src.hdr", planHdr).
 		// An empty build cache, so the plan holds every step.
 		WithEnvVariable("GOCACHE", "/gobuild/plancache").
 		// A failed plan prints go build's error, such as a //go:embed
-		// pattern it rejects, rather than leaving it in the plan file.
-		WithExec([]string{"sh", "-c", "/gobuild/gohdr unpack /gobuild/src.hdr " + shQuote(b.roots.Src) + " /gobuild/godirs.txt" +
-			" && cd " + shQuote(b.roots.Cwd) + " && " + pre + "{ " + goCmd + " 2> /gobuild/plan.txt" +
-			" || { status=$?; cat /gobuild/plan.txt >&2; exit $status; }; }" +
+		// pattern it rejects, rather than leaving it in the plan file: the
+		// end of go build's output, where it writes the error, and not the
+		// plan before it, which a large build makes hundreds of KB long.
+		WithExec([]string{"sh", "-c", b.unpackHeaders() +
+			" && cd " + shQuote(b.roots.Cwd) + " && { " + goCmd + " 2> /gobuild/plan.txt" +
+			" || { status=$?; tail -n 40 /gobuild/plan.txt >&2; exit $status; }; }" +
 			" && /gobuild/gohdr weigh /gobuild/plan.txt > /gobuild/weights.txt" +
 			" && /gobuild/gohdr cc /gobuild/plan.txt > /gobuild/cc.txt"}, bare)
 	plan, err := ran.File("/gobuild/plan.txt").Contents(ctx)
@@ -723,7 +1184,7 @@ func (b *build) planWith(ctx context.Context, headers *dagger.File, pre, goCmd s
 		}
 		weights[id] = v
 	}
-	return &planned{ran: ran, plan: plan, weights: weights, cc: parseCC(ccOut), goDirs: ran.File("/gobuild/godirs.txt")}, nil
+	return &planned{ran: ran, plan: plan, weights: weights, cc: parseCC(ccOut), goDirs: goDirs}, nil
 }
 
 // testmain is the _testmain.go the go command writes for pkg's test binary.
@@ -741,14 +1202,17 @@ func (b *build) testmain(ctx context.Context, headers *dagger.File, flags []stri
 	for i, c := range cmd {
 		quoted[i] = shQuote(c)
 	}
-	return b.base.
-		WithMountedFile("/gobuild/gohdr", hdrTool()).
-		WithMountedDirectory(b.roots.Mod, b.mods).
+	planHdr, _, err := b.planHeaders(ctx, headers)
+	if err != nil {
+		return nil, err
+	}
+	return b.withModules(b.base.
+		WithMountedFile("/gobuild/gohdr", b.gohdr)).
 		WithMountedDirectory(b.roots.Src, planSource(b.src)).
-		WithMountedFile("/gobuild/src.hdr", headers).
+		WithMountedFile("/gobuild/src.hdr", planHdr).
 		WithMountedDirectory("/gobuild/tests", tests).
 		WithEnvVariable("GOCACHE", "/gobuild/plancache").
-		WithExec([]string{"sh", "-c", "/gobuild/gohdr unpack /gobuild/src.hdr " + shQuote(b.roots.Src) + " /gobuild/godirs.txt" +
+		WithExec([]string{"sh", "-c", b.unpackHeaders() +
 			" && cp -R /gobuild/tests/. " + shQuote(b.roots.Src) + "/" +
 			" && cd " + shQuote(b.roots.Cwd) + " && { " + strings.Join(quoted, " ") + " 2> /gobuild/testmain.err; " +
 			`work=$(sed -n 's/^WORK=//p' /gobuild/testmain.err); ` +
@@ -793,17 +1257,6 @@ func (b *build) planError(ctx context.Context, err error) error {
 	// Not wrapped: a module's error that wraps an ExecError reaches the
 	// caller as the exec's error alone, "exit code: N", without the message.
 	return fmt.Errorf("%s: %s", strings.Join(lines, "\n"), err.Error())
-}
-
-func needsTools(blocks map[string]*block) bool {
-	for _, b := range blocks {
-		for _, l := range b.lines {
-			if strings.Contains(l, "go tool pack ") {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // checkFlags rejects the go build flags, from the call and GOFLAGS, that

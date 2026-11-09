@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"go/build"
+	"go/build/constraint"
 	"go/doc"
 	"go/parser"
 	"go/token"
@@ -39,6 +40,7 @@ var (
 func (index *localIndex) writeDiscovery(outDir string) error {
 	roots := append([]string{}, index.goModules()...)
 	catalog := discoveryCatalog{Roots: roots, Modules: map[string]int{}}
+	goFiles := index.goFileFacts()
 	moduleDir := filepath.Join(outDir, discoveryModulesDir)
 	if err := os.MkdirAll(moduleDir, 0o755); err != nil {
 		return err
@@ -53,7 +55,6 @@ func (index *localIndex) writeDiscovery(outDir string) error {
 		moduleDiscovery.WriteString("module\t" + root + "\t" + modPath + "\t" + index.goVersion(root) + "\n")
 		kinds := map[string]string{}
 		packageTests := map[string][]string{}
-		goFiles := index.goFileFacts()
 		files := index.packageFiles(root)
 		fileKindsOf := make([]string, len(files))
 		fileTests := make([][]string, len(files))
@@ -70,6 +71,10 @@ func (index *localIndex) writeDiscovery(outDir string) error {
 			// scan records why, in its .err, and other modules are unaffected.
 			if goFiles[file].readErr != nil {
 				continue
+			}
+			if len(goFiles[file].tests) > 0 {
+				catalog.Toolchain.Release = catalog.Toolchain.Release || goFiles[file].toolchain.Release
+				catalog.Toolchain.Cgo = catalog.Toolchain.Cgo || goFiles[file].toolchain.Cgo
 			}
 			dir := path.Dir(moduleRelative(root, file))
 			packageTests[dir] = append(packageTests[dir], fileTests[i]...)
@@ -118,6 +123,65 @@ func (index *localIndex) writeDiscovery(outDir string) error {
 type discoveryCatalog struct {
 	Roots   []string       `json:"roots"`
 	Modules map[string]int `json:"modules"`
+	// Toolchain is which of the toolchain's own build tags the constraints of
+	// the test files that declare tests name, across every module. Discovery
+	// with a custom base asks the base's go only when one is named: GOFLAGS and
+	// an explicit CGO_ENABLED come from its environment, but only its go knows
+	// its version, and whether cgo is on when CGO_ENABLED is unset.
+	Toolchain toolchainTags `json:"toolchain"`
+}
+
+// toolchainTags is which build tags only the Go toolchain decides a file's
+// constraints name: a release tag (go1.N), or cgo.
+type toolchainTags struct {
+	Release bool `json:"release"`
+	Cgo     bool `json:"cgo"`
+}
+
+// constraintToolchainTags reports which toolchain tags the build constraint
+// lines of a Go file name: the //go:build and // +build comments before its
+// package clause, read by go/parser as go/build reads the header. A file whose
+// package clause doesn't parse names both, so that discovery asks the
+// toolchain rather than guess.
+func constraintToolchainTags(name string, src []byte) toolchainTags {
+	file, err := parser.ParseFile(token.NewFileSet(), name, src, parser.PackageClauseOnly|parser.ParseComments)
+	if err != nil {
+		return toolchainTags{Release: true, Cgo: true}
+	}
+	var tags toolchainTags
+	for _, group := range file.Comments {
+		if group.Pos() >= file.Package {
+			break
+		}
+		for _, comment := range group.List {
+			if !constraint.IsGoBuild(comment.Text) && !constraint.IsPlusBuild(comment.Text) {
+				continue
+			}
+			expr, err := constraint.Parse(comment.Text)
+			if err != nil {
+				continue
+			}
+			expr.Eval(func(tag string) bool {
+				if tag == "cgo" {
+					tags.Cgo = true
+				} else if isReleaseTag(tag) {
+					tags.Release = true
+				}
+				return false
+			})
+		}
+	}
+	return tags
+}
+
+// isReleaseTag reports whether tag is a Go release tag such as go1.21.
+func isReleaseTag(tag string) bool {
+	minor, ok := strings.CutPrefix(tag, "go1.")
+	if !ok || minor == "" {
+		return false
+	}
+	_, err := strconv.Atoi(minor)
+	return err == nil
 }
 
 // A module's catalogue. Its lines are

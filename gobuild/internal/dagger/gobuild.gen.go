@@ -3,16 +3,554 @@
 package dagger
 
 import (
-	"dagger/gobuild/internal/dagger/core"
+	"context"
+	"encoding/json"
+
+	"github.com/dagger/querybuilder"
 )
 
-type Gobuild = core.Gobuild
+type Gobuild struct { // gobuild (../../:0:0)
+	query *querybuilder.Selection
+	// refetchID is set when this object is built through a field marked
+	// @reevaluate: it fetches its ID on every use, so each use evaluates that
+	// field again.
+	refetchID bool
+
+	id *ID
+}
+
+func (r *Gobuild) WithGraphQLQuery(q *querybuilder.Selection) *Gobuild {
+	return &Gobuild{
+		query: q,
+		// The query's origin is unknown: it may go through a field that
+		// must be reevaluated.
+		refetchID: true,
+	}
+}
+
+// GobuildArchiveBuildsOpts contains options for Gobuild.ArchiveBuilds
+type GobuildArchiveBuildsOpts struct {
+	// The image base was made from, as for Binary.
+	Image string
+	// The custom container base was made from, as for Binary.
+	From *Container
+	// The module's directory, relative to mountPath.
+	//
+	// Default: "."
+	Workdir string
+	// Flags for go build, as for Binary.
+	Flags []string
+	// Only the packages outside the module.
+	Dependencies bool
+	// The container module downloads run with, as for Binary.
+	Downloads *Container
+	// The packages whose imports are compiled, as for Archives.
+	Packages []string
+	// With the packages' test variants, as for Archives.
+	//
+	// Default: true
+	Tests bool
+}
+
+// ArchiveBuilds compiles what Archives compiles, with its arguments, and
+// returns what it read from the cache instead of the export driver's
+// directory: each package's build, each module download, gohdr,
+// write-manifest and its source, and Go's pack. A cache that is to have exactly these results, such as the cache an
+// engine image pre-warms, is filled from them.
+func (r *Gobuild) ArchiveBuilds(base *Container, source *Directory, headers *File, mountPath string, opts ...GobuildArchiveBuildsOpts) *GobuildArchiveCache {
+	assertNotNil("base", base)
+	assertNotNil("source", source)
+	assertNotNil("headers", headers)
+	q := r.query.Select("archiveBuilds")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `image` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Image) {
+			q = q.Arg("image", opts[i].Image)
+		}
+		// `from` optional argument
+		if !querybuilder.IsZeroValue(opts[i].From) {
+			q = q.Arg("from", opts[i].From)
+		}
+		// `workdir` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Workdir) {
+			q = q.Arg("workdir", opts[i].Workdir)
+		}
+		// `flags` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Flags) {
+			q = q.Arg("flags", opts[i].Flags)
+		}
+		// `dependencies` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Dependencies) {
+			q = q.Arg("dependencies", opts[i].Dependencies)
+		}
+		// `downloads` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Downloads) {
+			q = q.Arg("downloads", opts[i].Downloads)
+		}
+		// `packages` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Packages) {
+			q = q.Arg("packages", opts[i].Packages)
+		}
+		// `tests` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Tests) {
+			q = q.Arg("tests", opts[i].Tests)
+		}
+	}
+	q = q.Arg("base", base)
+	q = q.Arg("source", source)
+	q = q.Arg("headers", headers)
+	q = q.Arg("mountPath", mountPath)
+
+	return &GobuildArchiveCache{
+		query:     q,
+		refetchID: r.refetchID,
+	}
+}
 
 // GobuildArchivesOpts contains options for Gobuild.Archives
-type GobuildArchivesOpts = core.GobuildArchivesOpts
+type GobuildArchivesOpts struct {
+	// The image base was made from, as for Binary.
+	Image string
+	// The custom container base was made from, as for Binary.
+	From *Container
+	// The module's directory, relative to mountPath.
+	//
+	// Default: "."
+	Workdir string
+	// Flags for go build, as for Binary: the build tags among them are the
+	// manifest's.
+	Flags []string
+	// Only the packages outside the module.
+	Dependencies bool
+	// The container module downloads run with, as for Binary.
+	Downloads *Container
+	// The packages whose imports are archived, as go list patterns from
+	// workdir. Unset, every package of the module.
+	Packages []string
+	// With the packages' test variants and external test packages, and what
+	// they import, as a lint reads them.
+	//
+	// Default: true
+	Tests bool
+}
+
+// Archives compiles, one exec per package as Binary builds, every package
+// that "go list -export -deps -test ./..." compiles in the module in workdir:
+// its packages, main packages included, their test variants and external test
+// packages, the packages recompiled against those, and every package they
+// import. It returns a directory for golangci-lint's export driver: under
+// archives/, each package's export data, the archive "go tool compile -pack
+// -linkobj" writes without the package's object code; under cgo/, the Go files cgo wrote for each cgo package's compile;
+// and manifest.json, which describes them: the Go version, target and build
+// tags they were compiled for, and for each package, by its ID in go list's
+// listing, its archive, its cgo files and their output, and a digest of what
+// it was compiled from. With all of them, the driver compiles nothing and
+// runs no cgo. With dependencies, only the packages of other modules and the
+// standard library: a directory keyed by their content alone, which an edit
+// of the module's own packages leaves as it is.
+func (r *Gobuild) Archives(base *Container, source *Directory, headers *File, mountPath string, opts ...GobuildArchivesOpts) *Directory {
+	assertNotNil("base", base)
+	assertNotNil("source", source)
+	assertNotNil("headers", headers)
+	q := r.query.Select("archives")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `image` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Image) {
+			q = q.Arg("image", opts[i].Image)
+		}
+		// `from` optional argument
+		if !querybuilder.IsZeroValue(opts[i].From) {
+			q = q.Arg("from", opts[i].From)
+		}
+		// `workdir` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Workdir) {
+			q = q.Arg("workdir", opts[i].Workdir)
+		}
+		// `flags` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Flags) {
+			q = q.Arg("flags", opts[i].Flags)
+		}
+		// `dependencies` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Dependencies) {
+			q = q.Arg("dependencies", opts[i].Dependencies)
+		}
+		// `downloads` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Downloads) {
+			q = q.Arg("downloads", opts[i].Downloads)
+		}
+		// `packages` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Packages) {
+			q = q.Arg("packages", opts[i].Packages)
+		}
+		// `tests` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Tests) {
+			q = q.Arg("tests", opts[i].Tests)
+		}
+	}
+	q = q.Arg("base", base)
+	q = q.Arg("source", source)
+	q = q.Arg("headers", headers)
+	q = q.Arg("mountPath", mountPath)
+
+	return new(Directory).WithGraphQLQuery(q)
+}
 
 // GobuildBinaryOpts contains options for Gobuild.Binary
-type GobuildBinaryOpts = core.GobuildBinaryOpts
+type GobuildBinaryOpts struct {
+	// The image base was made from. Set, package execs run in that image
+	// with base's environment alone, so their keys don't carry how base was
+	// made (a workdir at the project's mount path, its cache mounts), and
+	// projects with the same image and settings share them.
+	Image string
+	// The custom container base was made from, as image is for an image:
+	// package execs run in it with base's environment alone.
+	From *Container
+	// The directory to run go build in, relative to mountPath.
+	//
+	// Default: "."
+	Workdir string
+	// Flags for go build, before the package.
+	Flags []string
+	// The container module downloads run with: its environment, such as
+	// GOPROXY and GOPRIVATE, its credentials and its mounts, such as git
+	// configuration or an SSH agent. Unset, base's. No package exec reads it,
+	// so it keys downloads alone.
+	Downloads *Container
+}
+
+// Binary builds the main package pkg as "go build" would and returns a
+// directory holding the binary, named output, and for a c-archive or
+// c-shared build the C header go build writes next to it. The binary's Go
+// build ID is a hash of what its link reads, not the one go build computes.
+func (r *Gobuild) Binary(base *Container, source *Directory, headers *File, mountPath string, pkg string, output string, opts ...GobuildBinaryOpts) *Directory {
+	assertNotNil("base", base)
+	assertNotNil("source", source)
+	assertNotNil("headers", headers)
+	q := r.query.Select("binary")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `image` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Image) {
+			q = q.Arg("image", opts[i].Image)
+		}
+		// `from` optional argument
+		if !querybuilder.IsZeroValue(opts[i].From) {
+			q = q.Arg("from", opts[i].From)
+		}
+		// `workdir` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Workdir) {
+			q = q.Arg("workdir", opts[i].Workdir)
+		}
+		// `flags` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Flags) {
+			q = q.Arg("flags", opts[i].Flags)
+		}
+		// `downloads` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Downloads) {
+			q = q.Arg("downloads", opts[i].Downloads)
+		}
+	}
+	q = q.Arg("base", base)
+	q = q.Arg("source", source)
+	q = q.Arg("headers", headers)
+	q = q.Arg("mountPath", mountPath)
+	q = q.Arg("pkg", pkg)
+	q = q.Arg("output", output)
+
+	return new(Directory).WithGraphQLQuery(q)
+}
+
+// A unique identifier for this Gobuild.
+func (r *Gobuild) ID(ctx context.Context) (ID, error) {
+	if r.id != nil {
+		return *r.id, nil
+	}
+	q := r.query.Select("id")
+
+	var response ID
+
+	q = q.Bind(&response)
+	if r.refetchID {
+		return response, q.Execute(ctx)
+	}
+	return memoizedID(ctx, r.query, func() (ID, error) {
+		err := q.Execute(ctx)
+		return response, err
+	})
+}
+
+// XXX_GraphQLType is an internal function. It returns the native GraphQL type name
+func (r *Gobuild) XXX_GraphQLType() string {
+	return "Gobuild"
+}
+
+// XXX_GraphQLIDType is an internal function. It returns the native GraphQL type name for the ID of this object
+func (r *Gobuild) XXX_GraphQLIDType() string {
+	return "ID"
+}
+
+// XXX_GraphQLID is an internal function. It returns the underlying type ID
+func (r *Gobuild) XXX_GraphQLID(ctx context.Context) (string, error) {
+	id, err := r.ID(ctx)
+	if err != nil {
+		return "", err
+	}
+	return string(id), nil
+}
+
+func (r *Gobuild) MarshalJSON() ([]byte, error) {
+	id, err := r.ID(marshalCtx)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(id)
+}
+func (r *Gobuild) UnmarshalJSON(bs []byte) error {
+	var id string
+	err := json.Unmarshal(bs, &id)
+	if err != nil {
+		return err
+	}
+	*r = Gobuild{query: selectNode(Connect().QueryBuilder(), id, "Gobuild")}
+	return nil
+}
 
 // GobuildTestBinaryOpts contains options for Gobuild.TestBinary
-type GobuildTestBinaryOpts = core.GobuildTestBinaryOpts
+type GobuildTestBinaryOpts struct {
+	// The image base was made from, as for Binary.
+	Image string
+	// The custom container base was made from, as for Binary.
+	From *Container
+	// The directory to run go test in, relative to mountPath.
+	//
+	// Default: "."
+	Workdir string
+	// Flags for go test -c, before the package, e.g. -race or -ldflags.
+	Flags []string
+	// The container module downloads run with, as for Binary.
+	Downloads *Container
+}
+
+// TestBinary builds the test binary of package pkg as "go test -c" would,
+// one exec per package as Binary builds a binary: the package compiled with
+// its test files, its external test package, the packages it is imported
+// through recompiled against it, and the test main the go command writes,
+// linked. Unlike go test -c, it does not run go vet, which is left to the
+// lint checks. The binary's Go build ID is a hash of what its link reads,
+// not the one go test computes.
+func (r *Gobuild) TestBinary(base *Container, source *Directory, headers *File, mountPath string, pkg string, opts ...GobuildTestBinaryOpts) *File {
+	assertNotNil("base", base)
+	assertNotNil("source", source)
+	assertNotNil("headers", headers)
+	q := r.query.Select("testBinary")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `image` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Image) {
+			q = q.Arg("image", opts[i].Image)
+		}
+		// `from` optional argument
+		if !querybuilder.IsZeroValue(opts[i].From) {
+			q = q.Arg("from", opts[i].From)
+		}
+		// `workdir` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Workdir) {
+			q = q.Arg("workdir", opts[i].Workdir)
+		}
+		// `flags` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Flags) {
+			q = q.Arg("flags", opts[i].Flags)
+		}
+		// `downloads` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Downloads) {
+			q = q.Arg("downloads", opts[i].Downloads)
+		}
+	}
+	q = q.Arg("base", base)
+	q = q.Arg("source", source)
+	q = q.Arg("headers", headers)
+	q = q.Arg("mountPath", mountPath)
+	q = q.Arg("pkg", pkg)
+
+	return new(File).WithGraphQLQuery(q)
+}
+
+// ArchiveCache is what a build reads from the cache that every build of its
+// packages with the same toolchain, flags and go.sum shares.
+type GobuildArchiveCache struct { // gobuild (../../:0:0)
+	query *querybuilder.Selection
+	// refetchID is set when this object is built through a field marked
+	// @reevaluate: it fetches its ID on every use, so each use evaluates that
+	// field again.
+	refetchID bool
+
+	id *ID
+}
+
+func (r *GobuildArchiveCache) WithGraphQLQuery(q *querybuilder.Selection) *GobuildArchiveCache {
+	return &GobuildArchiveCache{
+		query: q,
+		// The query's origin is unknown: it may go through a field that
+		// must be reevaluated.
+		refetchID: true,
+	}
+}
+
+// Each package's build: the directory the package's exec wrote, with its
+// archives, as every build of the package reads it from the cache.
+func (r *GobuildArchiveCache) Builds(ctx context.Context) ([]Directory, error) {
+	q := r.query.Select("builds")
+
+	q = q.Select("id")
+
+	type builds struct {
+		Id ID
+	}
+
+	convert := func(fields []builds) []Directory {
+		out := []Directory{}
+
+		for i := range fields {
+			val := *new(Directory).WithGraphQLQuery(selectNode(q.Root(), fields[i].Id, "Directory"))
+			out = append(out, val)
+		}
+
+		return out
+	}
+	var response []builds
+
+	q = q.Bind(&response)
+
+	err := q.Execute(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return convert(response), nil
+}
+
+// Each module version the build downloaded (go mod download), with its
+// plan pack and its zip, in the order of its module cache directory name.
+func (r *GobuildArchiveCache) Downloads(ctx context.Context) ([]Directory, error) {
+	q := r.query.Select("downloads")
+
+	q = q.Select("id")
+
+	type downloads struct {
+		Id ID
+	}
+
+	convert := func(fields []downloads) []Directory {
+		out := []Directory{}
+
+		for i := range fields {
+			val := *new(Directory).WithGraphQLQuery(selectNode(q.Root(), fields[i].Id, "Directory"))
+			out = append(out, val)
+		}
+
+		return out
+	}
+	var response []downloads
+
+	q = q.Bind(&response)
+
+	err := q.Execute(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return convert(response), nil
+}
+
+// A unique identifier for this GobuildArchiveCache.
+func (r *GobuildArchiveCache) ID(ctx context.Context) (ID, error) {
+	if r.id != nil {
+		return *r.id, nil
+	}
+	q := r.query.Select("id")
+
+	var response ID
+
+	q = q.Bind(&response)
+	if r.refetchID {
+		return response, q.Execute(ctx)
+	}
+	return memoizedID(ctx, r.query, func() (ID, error) {
+		err := q.Execute(ctx)
+		return response, err
+	})
+}
+
+// XXX_GraphQLType is an internal function. It returns the native GraphQL type name
+func (r *GobuildArchiveCache) XXX_GraphQLType() string {
+	return "GobuildArchiveCache"
+}
+
+// XXX_GraphQLIDType is an internal function. It returns the native GraphQL type name for the ID of this object
+func (r *GobuildArchiveCache) XXX_GraphQLIDType() string {
+	return "ID"
+}
+
+// XXX_GraphQLID is an internal function. It returns the underlying type ID
+func (r *GobuildArchiveCache) XXX_GraphQLID(ctx context.Context) (string, error) {
+	id, err := r.ID(ctx)
+	if err != nil {
+		return "", err
+	}
+	return string(id), nil
+}
+
+func (r *GobuildArchiveCache) MarshalJSON() ([]byte, error) {
+	id, err := r.ID(marshalCtx)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(id)
+}
+func (r *GobuildArchiveCache) UnmarshalJSON(bs []byte) error {
+	var id string
+	err := json.Unmarshal(bs, &id)
+	if err != nil {
+		return err
+	}
+	*r = GobuildArchiveCache{query: selectNode(Connect().QueryBuilder(), id, "GobuildArchiveCache")}
+	return nil
+}
+
+func (r *GobuildArchiveCache) ManifestSource() *Directory {
+	q := r.query.Select("manifestSource")
+
+	return new(Directory).WithGraphQLQuery(q)
+}
+
+// golangci-lint's write-manifest, which writes the archives' manifest,
+// and the source it is built from, which a fresh engine would otherwise
+// fetch to find the build.
+func (r *GobuildArchiveCache) ManifestTool() *File {
+	q := r.query.Select("manifestTool")
+
+	return new(File).WithGraphQLQuery(q)
+}
+
+// gohdr, the tool the build's execs run.
+func (r *GobuildArchiveCache) Tool() *File {
+	q := r.query.Select("tool")
+
+	return new(File).WithGraphQLQuery(q)
+}
+
+// Go's own tools the build's execs run, built by its toolchain: pack,
+// which packages with assembly run.
+func (r *GobuildArchiveCache) Tools() *Directory {
+	q := r.query.Select("tools")
+
+	return new(Directory).WithGraphQLQuery(q)
+}
+
+func (r *Query) Gobuild(toolImage string) *Gobuild { // gobuild (../../:0:0)
+	q := r.query.Select("gobuild")
+	q = q.Arg("toolImage", toolImage)
+
+	return &Gobuild{
+		query:     q,
+		refetchID: r.refetchID,
+	}
+}

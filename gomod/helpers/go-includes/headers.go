@@ -37,6 +37,16 @@ func (index *localIndex) writeHeaderPack(path string) error {
 		files = append(files, index.goFilesByModule[root]...)
 		files = append(files, index.goDirFilesByModule[root]...)
 	}
+	// A go.work at the root or beside a module, whose replacements map
+	// import paths to the source's directories, as a go.mod's do.
+	works := map[string]bool{}
+	for _, root := range append([]string{"."}, index.moduleRoots...) {
+		work := filepath.ToSlash(filepath.Join(root, "go.work"))
+		if fi, err := os.Stat(filepath.Join(index.root, work)); err == nil && fi.Mode().IsRegular() && !works[work] {
+			works[work] = true
+			files = append(files, work)
+		}
+	}
 	sort.Strings(files)
 	goFiles := index.goFileFacts()
 	datas := make([][]byte, len(files))
@@ -52,7 +62,7 @@ func (index *localIndex) writeHeaderPack(path string) error {
 		// A symlink this pack holds only for a //go:embed or a file in a
 		// directory named like a Go file, stays one, its target as its
 		// data, so the embed fails, or leaves it out, as go decides.
-		if filepath.Base(files[i]) != "go.mod" {
+		if base := filepath.Base(files[i]); base != "go.mod" && base != "go.work" {
 			if fi, err := os.Lstat(full); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
 				target, err := os.Readlink(full)
 				datas[i], modes[i], errs[i] = []byte(target), fs.ModeSymlink|0o777, err

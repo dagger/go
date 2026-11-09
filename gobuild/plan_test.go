@@ -3,6 +3,7 @@ package main
 import (
 	"reflect"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -422,6 +423,70 @@ func TestScriptKeepsLinkDirectory(t *testing.T) {
 	script := b.script(blocks, soloCompileC)
 	if !strings.Contains(script, "cd /work/"+b.name+"/exe/\n") || !strings.Contains(script, "link -o a.out.so ") {
 		t.Errorf("the link's directory change was dropped:\n%s", script)
+	}
+}
+
+// A dependency compiles its export data and its object code to two
+// archives, and packs its assembly into the object code's; its importer's
+// compile reads the export data, and the link reads the object code from
+// /work/linklib. The main package that links writes one archive.
+func TestScriptSplitsExportData(t *testing.T) {
+	plan := strings.Join([]string{
+		"mkdir -p $WORK/b002/",
+		"",
+		"#",
+		"# example.com/m/lib",
+		"#",
+		"",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b002/_pkg_.a -p example.com/m/lib -pack -asmhdr $WORK/b002/go_asm.h ./lib/lib.go",
+		"/usr/local/go/pkg/tool/linux_amd64/asm -p example.com/m/lib -o $WORK/b002/x.o ./lib/x.s",
+		"go tool pack r $WORK/b002/_pkg_.a $WORK/b002/x.o # internal",
+	}, "\n") + "\n" + strings.Replace(mainLink(
+		"cat >$WORK/b001/importcfg << 'EOF' # internal",
+		"packagefile example.com/m/lib=$WORK/b002/_pkg_.a",
+		"EOF",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main -importcfg $WORK/b001/importcfg -pack ./main.go",
+	), "packagefile example.com/m=$WORK/b001/_pkg_.a", "packagefile example.com/m=$WORK/b001/_pkg_.a\npackagefile example.com/m/lib=$WORK/b002/_pkg_.a\npackagefile example.com/m/dep=$WORK/b003/_pkg_.a", 1) +
+		"\n" + strings.Join([]string{
+		"mkdir -p $WORK/b003/",
+		"",
+		"#",
+		"# example.com/m/dep",
+		"#",
+		"",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b003/_pkg_.a -p example.com/m/dep -pack ./dep/dep.go",
+	}, "\n")
+	blocks, err := parsePlan(plan, testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lib, main := blocks["b002"], blocks["b001"]
+	if !lib.splits() || main.splits() {
+		t.Fatalf("splits: lib %v, main %v", lib.splits(), main.splits())
+	}
+	export, object := "/work/"+lib.name+"/"+lib.name+".a", "/work/"+lib.name+"/"+lib.name+".link.a"
+	script := lib.script(blocks, soloCompileC)
+	for _, want := range []string{"-linkobj " + object + " -o " + export + " ", "/pack r " + object + " "} {
+		if !strings.Contains(script, want) {
+			t.Errorf("lib's script lacks %q:\n%s", want, script)
+		}
+	}
+	script = main.script(blocks, soloCompileC)
+	for _, want := range []string{"packagefile example.com/m/lib=/work/lib/" + lib.name + ".a'", "packagefile example.com/m/lib=/work/linklib/" + lib.name + ".link.a'"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("main's script lacks %q:\n%s", want, script)
+		}
+	}
+	if strings.Contains(script, "-linkobj") {
+		t.Errorf("the main package that links splits:\n%s", script)
+	}
+	// The link reads the main package's own archive, which its exec wrote.
+	if own := "/work/" + main.name + "/" + main.name + ".a"; !strings.Contains(script, "-buildmode=exe "+own+"\n") || !strings.Contains(script, "-o "+own+" ") {
+		t.Errorf("main's script doesn't compile to and link %s:\n%s", own, script)
+	}
+	// The link reads every dependency, its own compile only its imports.
+	if !slices.Equal(main.deps, []string{"b002", "b003"}) || !slices.Equal(main.compileDeps(), []string{"b002"}) {
+		t.Errorf("main's deps %v, compile deps %v", main.deps, main.compileDeps())
 	}
 }
 
@@ -858,6 +923,60 @@ func TestParseSums(t *testing.T) {
 	}
 }
 
+// A module's tests and testdata are left out of its extraction, by
+// patterns under its directory in the zip, but for what the build reads:
+// a dependency's test files, compiled by go test -c, a file embedded from
+// testdata, or a directory read whole, each put back by a pattern that
+// names just it. A module read whole, for its C or assembly, is extracted
+// whole.
+func TestExcludeUnread(t *testing.T) {
+	m := &modules{sums: map[string]string{
+		"github.com/!burnt!sushi/toml@v1.2.0": "h1:a=",
+		"golang.org/x/sys@v0.30.0":            "h1:b=",
+		"example.com/testdata/lib@v1.0.0":     "h1:c=",
+		"example.com/incdep@v1.0.0":           "h1:d=",
+	}}
+	m.excludeUnread(map[string]*block{
+		"b001": {modFiles: []string{
+			"github.com/!burnt!sushi/toml@v1.2.0/decode.go",
+			"github.com/!burnt!sushi/toml@v1.2.0/decode_test.go",
+			"github.com/!burnt!sushi/toml@v1.2.0/testdata/[x].toml",
+			"github.com/!burnt!sushi/toml@v1.2.0/fixtures_test.go/value.go",
+		}},
+		"b002": {modFiles: []string{
+			"golang.org/x/sys@v0.30.0/unix/syscall.go",
+			"golang.org/x/sys@v0.30.0/cpu/**",
+			"cache/download/golang.org/x/sys/@v/list",
+		}},
+		"b003": {modFiles: []string{"example.com/testdata/lib@v1.0.0/lib.go"}},
+		"b004": {modFiles: []string{
+			"example.com/incdep@v1.0.0/asm/value_amd64.s",
+			"example.com/incdep@v1.0.0/**",
+		}},
+	})
+	want := map[string][]string{
+		"github.com/!burnt!sushi/toml@v1.2.0": {
+			"github.com/BurntSushi/toml@v1.2.0/**/*_test.go",
+			"github.com/BurntSushi/toml@v1.2.0/**/testdata",
+			"!github.com/BurntSushi/toml@v1.2.0/decode_test.go",
+			"!github.com/BurntSushi/toml@v1.2.0/fixtures_test.go/value.go",
+			`!github.com/BurntSushi/toml@v1.2.0/testdata/\[x\].toml`,
+		},
+		"golang.org/x/sys@v0.30.0": {
+			"golang.org/x/sys@v0.30.0/**/*_test.go",
+			"golang.org/x/sys@v0.30.0/**/testdata",
+			"!golang.org/x/sys@v0.30.0/cpu/**",
+		},
+		"example.com/testdata/lib@v1.0.0": {
+			"example.com/testdata/lib@v1.0.0/**/*_test.go",
+			"example.com/testdata/lib@v1.0.0/**/testdata",
+		},
+	}
+	if !reflect.DeepEqual(m.exclude, want) {
+		t.Errorf("exclude = %q, want %q", m.exclude, want)
+	}
+}
+
 // A plan of many packages for their archives keeps each main package's
 // compile and leaves out its link, from its import config on: no block
 // links, and a main package depends on what it imports, not on what its
@@ -917,6 +1036,98 @@ func TestParseArchivePlan(t *testing.T) {
 		if !strings.Contains(script, "/compile ") {
 			t.Errorf("%s: the script doesn't compile:\n%s", id, script)
 		}
+	}
+}
+
+// A "go list -export -deps -test -n" plan names each step by import path
+// only: identifyVariants gives each its package's ID, a test variant by its
+// test files, a package recompiled for a test by its imports, and leaves
+// the test mains out.
+func TestIdentifyVariants(t *testing.T) {
+	compile := func(id, pkg string, files []string, deps ...string) []string {
+		lines := []string{"mkdir -p $WORK/" + id + "/", "", "#", "# " + pkg, "#", "", "cat >$WORK/" + id + "/importcfg << 'EOF' # internal"}
+		for _, d := range deps {
+			lines = append(lines, "packagefile x=$WORK/"+d+"/_pkg_.a")
+		}
+		return append(lines, "EOF",
+			"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/"+id+"/_pkg_.a -p "+pkg+" -importcfg $WORK/"+id+"/importcfg -pack "+strings.Join(files, " "))
+	}
+	var lines []string
+	lines = append(lines, compile("b002", "example.com/m/p", []string{"./p/p.go"})...)
+	lines = append(lines, compile("b003", "example.com/m/q", []string{"./q/q.go"}, "b002")...)
+	lines = append(lines, compile("b004", "example.com/m/p", []string{"./p/p.go", "./p/p_test.go"})...)
+	lines = append(lines, compile("b005", "example.com/m/q", []string{"./q/q.go"}, "b004")...)
+	lines = append(lines, compile("b006", "example.com/m/p_test", []string{"./p/x_test.go"}, "b004", "b005")...)
+	lines = append(lines, compile("b007", "example.com/m/p.test", []string{"$WORK/b007/_testmain.go"}, "b004", "b006")...)
+	// A main package whose only tests are external: compiled once as main,
+	// and once for its tests as a library.
+	lines = append(lines, strings.Replace(strings.Join(compile("b008", "example.com/m/cmd", []string{"./cmd/main.go"}), "\n"), "-p example.com/m/cmd ", "-p main ", 1))
+	lines = append(lines, compile("b009", "example.com/m/cmd", []string{"./cmd/main.go"})...)
+	blocks, err := parseArchivePlan(strings.Join(lines, "\n"), testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]bool{
+		"example.com/m/cmd": true, "example.com/m/cmd [example.com/m/cmd.test]": true,
+		"example.com/m/p": true, "example.com/m/q": true, "example.com/m/p.test": true,
+		"example.com/m/p [example.com/m/p.test]": true, "example.com/m/q [example.com/m/p.test]": true,
+		"example.com/m/p_test [example.com/m/p.test]": true,
+	}
+	mains := map[string]bool{"example.com/m/cmd": true}
+	if err := identifyVariants(blocks, ids, mains); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"b002": "example.com/m/p",
+		"b003": "example.com/m/q",
+		"b004": "example.com/m/p [example.com/m/p.test]",
+		"b005": "example.com/m/q [example.com/m/p.test]",
+		"b006": "example.com/m/p_test [example.com/m/p.test]",
+		"b008": "example.com/m/cmd",
+		"b009": "example.com/m/cmd [example.com/m/cmd.test]",
+	}
+	if len(blocks) != len(want) {
+		t.Errorf("%d blocks, want %d: the test main stays", len(blocks), len(want))
+	}
+	names := map[string]bool{}
+	for id, v := range want {
+		b := blocks[id]
+		if b == nil || b.importPath != v || b.name != stableName(v) {
+			t.Errorf("%s: %+v, want %s", id, b, v)
+			continue
+		}
+		names[b.name] = true
+	}
+	if len(names) != len(want) {
+		t.Errorf("variants share names: %v", names)
+	}
+	// With -buildmode=plugin, a main package compiles as a library, alike in
+	// both steps: the first is the plain package. Without tests, it has one.
+	plugin := strings.ReplaceAll(strings.Join(lines, "\n"), "-p main ", "-p example.com/m/cmd ")
+	blocks, _ = parseArchivePlan(plugin, testRoots)
+	if err := identifyVariants(blocks, ids, mains); err != nil {
+		t.Fatal(err)
+	}
+	if blocks["b008"].importPath != "example.com/m/cmd" || blocks["b009"].importPath != "example.com/m/cmd [example.com/m/cmd.test]" {
+		t.Errorf("plugin build mode: %s, %s", blocks["b008"].importPath, blocks["b009"].importPath)
+	}
+	// Step numbers have at least three digits: b1000 comes after b900.
+	blocks, _ = parseArchivePlan(strings.NewReplacer("$WORK/b008/", "$WORK/b900/", "$WORK/b009/", "$WORK/b1000/").Replace(plugin), testRoots)
+	if err := identifyVariants(blocks, ids, mains); err != nil {
+		t.Fatal(err)
+	}
+	if blocks["b900"].importPath != "example.com/m/cmd" || blocks["b1000"].importPath != "example.com/m/cmd [example.com/m/cmd.test]" {
+		t.Errorf("past step 999: %s, %s", blocks["b900"].importPath, blocks["b1000"].importPath)
+	}
+	blocks, _ = parseArchivePlan(strings.Join(lines[:len(lines)-len(compile("b009", "example.com/m/cmd", []string{"./cmd/main.go"}))], "\n"), testRoots)
+	if err := identifyVariants(blocks, map[string]bool{"example.com/m/cmd": true, "example.com/m/p": true, "example.com/m/q": true,
+		"example.com/m/p [example.com/m/p.test]": true, "example.com/m/q [example.com/m/p.test]": true, "example.com/m/p_test [example.com/m/p.test]": true}, mains); err != nil || blocks["b008"].importPath != "example.com/m/cmd" {
+		t.Errorf("a main package without tests: %v, %s", err, blocks["b008"].importPath)
+	}
+	delete(ids, "example.com/m/q [example.com/m/p.test]")
+	blocks, _ = parseArchivePlan(strings.Join(lines, "\n"), testRoots)
+	if err := identifyVariants(blocks, ids, mains); err == nil {
+		t.Error("a step that is no listed package was taken")
 	}
 }
 
@@ -1024,5 +1235,28 @@ func TestWeighSource(t *testing.T) {
 	}
 	if _, err := parseSizes("x cmd/x/main.go\n"); err == nil {
 		t.Error("a malformed line parsed")
+	}
+}
+
+// A dependencies-only archive compiles the packages of other modules and the
+// standard library, and nothing of the module's own, nor what imports it.
+func TestDependencyBlocks(t *testing.T) {
+	blocks := map[string]*block{
+		"b001": {id: "b001", importPath: "example.com/app", deps: []string{"b002", "b003"}},
+		"b002": {id: "b002", importPath: "example.com/app/internal/dagger", deps: []string{"b003", "b004"}},
+		"b003": {id: "b003", importPath: "github.com/dep/x", deps: []string{"b004"}},
+		"b004": {id: "b004", importPath: "fmt"},
+		"b005": {id: "b005", importPath: "example.com/app.test", deps: []string{"b001"}},
+		"b006": {id: "b006", importPath: "github.com/dep/x/xtest", deps: []string{"b002"}},
+	}
+	own := map[string]bool{"example.com/app": true, "example.com/app/internal/dagger": true}
+	got := dependencyBlocks(blocks, own)
+	var ids []string
+	for id := range got {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	if want := []string{"b003", "b004"}; !reflect.DeepEqual(ids, want) {
+		t.Errorf("dependencyBlocks = %q, want %q", ids, want)
 	}
 }

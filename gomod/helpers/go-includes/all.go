@@ -331,6 +331,9 @@ type goFileFacts struct {
 	// kinds and tests are what the file marks its directory as in discovery.
 	kinds string
 	tests []string
+	// toolchain is which of the toolchain's own build tags the file's build
+	// constraints name.
+	toolchain toolchainTags
 	// generates reports a go:generate command line, as go generate reads one.
 	generates bool
 }
@@ -401,6 +404,7 @@ func readGoFile(full, rel string) *goFileFacts {
 	}
 
 	facts.kinds, facts.tests = fileKinds(rel, data, strings.HasSuffix(rel, "_test.go"))
+	facts.toolchain = constraintToolchainTags(rel, data)
 	for line := range strings.SplitSeq(string(data), "\n") {
 		if strings.HasPrefix(line, "//go:generate ") || strings.HasPrefix(line, "//go:generate\t") {
 			facts.generates = true
@@ -593,7 +597,10 @@ func (index *localIndex) testDirectoriesFor(moduleRoot string) []string {
 	return testDirectoriesFromFiles(testFiles)
 }
 
-// replaceModules resolves local go.mod replace targets to module roots.
+// replaceModules resolves local go.mod replace targets to module roots. An
+// absent target of a module go.mod doesn't require is left to go: go build
+// reads a replacement only for a module the build needs, and reports a
+// missing target itself if it does.
 func (index *localIndex) replaceModules(moduleRoot string) ([]string, error) {
 	goModPath := path.Join(moduleRoot, "go.mod")
 	goMod, err := index.goMod(moduleRoot)
@@ -601,6 +608,10 @@ func (index *localIndex) replaceModules(moduleRoot string) ([]string, error) {
 		return nil, err
 	}
 
+	required := make(map[string]bool, len(goMod.Require))
+	for _, require := range goMod.Require {
+		required[require.Mod.Path] = true
+	}
 	var roots []string
 	for _, replace := range goMod.Replace {
 		if !isLocalReplace(replace) {
@@ -609,6 +620,14 @@ func (index *localIndex) replaceModules(moduleRoot string) ([]string, error) {
 		target := strings.TrimSuffix(replace.New.Path, "/")
 		root, ok := containingModuleDir(index.moduleSet, path.Join(path.Dir(goModPath), target))
 		if !ok {
+			// go build reads a replacement only for a module the build needs.
+			// When go.mod doesn't list the module, the replace is usually
+			// unused, and go build never looks for its target; when a
+			// dependency's go.mod does need it, go reports the missing target
+			// at build time, as it does without dagger/go.
+			if !required[replace.Old.Path] {
+				continue
+			}
 			return nil, fmt.Errorf("%s: no Go module found for local replace target: %s", replacePosition(goModPath, replace), replace.New.Path)
 		}
 		roots = append(roots, root)
