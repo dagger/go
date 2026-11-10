@@ -69,6 +69,15 @@ On a module: `packages`, `test`, `generate`, `skip-test`, `skip-generate`,
 `has-generate-directives`, `generate-directories`, `base`, `include`,
 `include-base`, `include-discovered`, `source`, `test-data`.
 
+#### Workspace inputs
+
+Test checks and package generators use prepared file views. They do not receive
+`Workspace`. The package collection prepares these inputs. Test and generation
+commands run only during evaluation.
+
+Discovery still scans Go files across the workspace. A Go edit can therefore
+select checks in other modules. Build and module-level helpers still receive Workspace.
+
 #### Settings
 
 | Setting               | Meaning                                                       |

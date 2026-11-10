@@ -252,7 +252,8 @@ type Gomod {
   includesHelper: Container! {
     # No cache volumes: the scan is an ordinary result, which another engine
     # can pull from the remote cache.
-    container.from(goImage(scannerVersion))
+    container
+      .from(goImage(scannerVersion))
       # The same download retry as withGoCaches.
       .withEnvVariable("GOPROXY", "https://proxy.golang.org|https://proxy.golang.org|direct")
       .withoutEntrypoint
@@ -302,9 +303,10 @@ type Gomod {
     # sync would come first, as the chain's argument.
     let parts = {{
       helper: includesHelper.sync,
-      source: goSource(ws).sync,
+      source: goSource(ws).sync
     }}
-    parts.helper
+    parts
+      .helper
       .withMountedDirectory("/ws", parts.source)
       .withWorkdir("/ws")
   }
@@ -383,9 +385,7 @@ type Gomod {
     let versionFlags = if (goVersion == "") { [] } else { ["--go-version", goVersion] }
     let cgoFlags = if (cgo) { ["--cgo"] } else { [] }
     scanner(ws)
-      .withExec(
-        ["go-includes", "--output-dir", "/output"] + testFlags + generateFlags + goflagsFlags + versionFlags + cgoFlags,
-      )
+      .withExec(["go-includes", "--output-dir", "/output"] + testFlags + generateFlags + goflagsFlags + versionFlags + cgoFlags)
       .directory("/output")
   }
 
@@ -725,9 +725,11 @@ type GoMod {
       .glob(subpath("**/*.go"))
       .filter { file => file.hasSuffix("/") == false }
       .map { file => file.trimPrefix("/").trimPrefix("./") }
-      .map { file => {{owner: deepestRoot(file, roots), file: file}} }
+      .map { file => {{owner: deepestRoot(file, roots), file}} }
       .filter { pair =>
-        goIgnores(if (pair.owner == ".") { pair.file } else { pair.file.trimPrefix(pair.owner + "/") }) == false
+        goIgnores(if (pair.owner == ".") { pair.file } else {
+          pair.file.trimPrefix(pair.owner + "/")
+        }) == false
       }
     mergeGroups(byModule, grouped(owned))
   }
@@ -761,7 +763,7 @@ type GoMod {
       .dropLast(1)
       .reduce({{dir: "", owner: path}}) { state, segment =>
         let dir = if (state.dir == "") { segment } else { state.dir + "/" + segment }
-        {{dir: dir, owner: if (roots.has(dir)) { dir } else { state.owner }}}
+        {{dir, owner: if (roots.has(dir)) { dir } else { state.owner }}}
       }
       .owner
   }
@@ -851,7 +853,7 @@ type GoMod {
       .dropLast(1)
       .reduce({{dir: "", found: false}}) { state, segment =>
         let dir = if (state.dir == "") { segment } else { state.dir + "/" + segment }
-        {{dir: dir, found: state.found or roots.has(dir)}}
+        {{dir, found: state.found or roots.has(dir)}}
       }
       .found
   }
@@ -885,9 +887,10 @@ type GoMod {
     # As in Gomod.scanner, the helper builds while the workspace syncs.
     let parts = {{
       helper: gomod.includesHelper.sync,
-      source: ws.directory("/", include: gomod.goSourceInclude).sync,
+      source: ws.directory("/", include: gomod.goSourceInclude).sync
     }}
-    parts.helper
+    parts
+      .helper
       .withMountedDirectory("/ws", parts.source)
       .withWorkdir("/ws")
       .withExec(["go-includes", "--output-dir", "/output"] + testFlags + generateFlags)
@@ -969,7 +972,10 @@ type GoMod {
     generate: Boolean!,
     suffix: String!,
   ): [String!]! {
-    let output = scanned(ws, test, generate)
+    scanLines(scanned(ws, test, generate), suffix)
+  }
+
+  let scanLines(output: Directory!, suffix: String!): [String!]! {
     let failure = output.file(outputStem + ".err").contents.trimSpace
     if (failure != "") {
       raise failure
@@ -1096,8 +1102,15 @@ type GoMod {
     generate: Boolean! = false,
     extra: [String!]! = [],
   ): Directory! {
+    sourceFromScan(ws, scanned(ws, test, generate), extra: extra)
+  }
+
+  """
+  Source from an existing scan with the required test/generate mode.
+  """
+  sourceFromScan(ws: Workspace!, scan: Directory!, extra: [String!]! = []): Directory! {
     let goSourceInclude = gomod.goSourceInclude
-    let patterns = include(ws, test: test, generate: generate, extra: extra)
+    let patterns = includeExtraFiles + scanLines(scan, ".inc") + extra
     # A "!" pattern takes back files the patterns before it selected, which
     # only one read of the whole list in order does. Any "!" counts: Dagger
     # cleans a pattern's path before it looks for one, so "./!a.go" is "!a.go".
@@ -1114,7 +1127,9 @@ type GoMod {
       } else {
         goSource.filter(include: covered)
       }
-      if (rest.length == 0) { own } else { own.withDirectory(".", ws.directory("/", include: rest)) }
+      if (rest.length == 0) { own } else {
+        own.withDirectory(".", ws.directory("/", include: rest))
+      }
     }
   }
 
