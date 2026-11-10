@@ -1314,13 +1314,24 @@ type GoModule {
 
   # Form source views during input preparation, without setting up tools.
   let testInputs(ws: Workspace!): GoTestInputs! {
-    GoTestInputs(
-      source: lib.at(path).sourceFromScan(ws, tool.discoveryScan(ws)),
-      testData: testData(ws),
-      configs: gomod.daggerConfigs(ws),
-      version: if (baseImage == null) { toolchainVersion(ws) } else { "" },
-      importPath: importPath(ws),
-    )
+    {
+      let source = lib.at(path).sourceFromScan(ws, tool.discoveryScan(ws))
+      let testData = testData(ws)
+      let configs = gomod.daggerConfigs(ws)
+      # Resolve lazy Directory handles inside this error boundary, before serialization.
+      source.id
+      testData.id
+      configs.id
+      GoTestInputs(
+        source: source,
+        testData: testData,
+        configs: configs,
+        version: if (baseImage == null) { toolchainVersion(ws) } else { "" },
+        importPath: importPath(ws),
+      )
+    } rescue {
+      err: Error => GoTestInputs(failure: err.message)
+    }
   }
 
   """
@@ -1390,7 +1401,8 @@ type GoModule {
   One command and report shared by every selected test in this Go module.
   """
   let runTests(inputs: GoTestInputs!, packages: GoPackages!): GoTestResults! {
-    let moduleImportPath = inputs.importPath
+    if (inputs.failure != null) { raise inputs.failure! }
+    let moduleImportPath = inputs.importPath!
     let discovered = packages
       .entries
       .filter { entry => packages.paths.contains(entry.directory) }
@@ -1418,10 +1430,10 @@ type GoModule {
       ["-run", "^(" + names.join("|") + ")$"]
     } else { empty }
     let executed = testEnvFrom(
-      baseFor(inputs.version),
-      inputs.source,
-      inputs.testData,
-      inputs.configs,
+      baseFor(inputs.version!),
+      inputs.source!,
+      inputs.testData!,
+      inputs.configs!,
     )
       .withWorkdir(path)
       .withEnvVariable("_EXPERIMENTAL_DAGGER_CLI_BIN", "/dev/.dagger/dagger")
@@ -1918,11 +1930,12 @@ type GoTest {
 
 # Source inputs shared by the tests in one module. Tool setup stays in evaluation.
 type GoTestInputs {
-  let source: Directory!
-  let testData: Directory!
-  let configs: Directory!
-  let version: String!
-  let importPath: String!
+  let source: Directory
+  let testData: Directory
+  let configs: Directory
+  let version: String
+  let importPath: String
+  let failure: String
 }
 
 # Prepared source and container inputs. Commands stay in evaluation.
