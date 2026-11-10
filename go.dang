@@ -501,10 +501,18 @@ type GoPackages @collection {
       mountPath: mountPath,
       tool: tool,
       tests: entries.filter { entry => entry.directory == path }[0]!.tests,
+      generation: GoGenerateInputs(
+        modulePath: generation.modulePath,
+        source: generation.source,
+        version: generation.version,
+        failure: generation.failure,
+        directories: generation.directories.filter { dir => dir.path == path },
+      ),
     )
   }
 
   let module: GoModule!
+  let generation: GoGenerateInputs!
 
   """
   Binaries of the selected main packages for the engine's platform, one file
@@ -570,6 +578,7 @@ type GoPackage {
   let mountPath: String!
 
   let tool: Go!
+  let generation: GoGenerateInputs!
 
   let module(ws: Workspace!): GoModule! {
     tool.packageModule(ws, path, mountPath)
@@ -608,20 +617,8 @@ type GoPackage {
   """
   Run go generate in this package.
   """
-  generate(ws: Workspace!): Changeset! @generate {
-    let mod = module(ws)
-    let failure = mod.scanFailure(ws)
-    if (failure != null) {
-      raise failure
-    }
-    let dirs = mod.generateDirsIn(ws, [path])
-    if (dirs.length == 0) {
-      directory.changes(directory)
-    } else {
-      let before = directory.withDirectory(mod.path, mod.generateSource(ws))
-      let after = before.withDirectory(mod.path, mod.generatedTree(ws, dirs))
-      after.changes(before)
-    }
+  generate: Changeset! @generate {
+    tool.goModuleAt(generation.modulePath, mountPath).generateFrom(generation)
   }
 }
 
@@ -745,6 +742,7 @@ type GoModule {
       mountPath: mountPath,
       tool: tool,
       module: self,
+      generation: generationInputs(ws, paths),
       entries: records.map { pkg =>
         let dir = relativeDir(pkg.directory)
         GoPackageSelection(
@@ -1138,25 +1136,68 @@ type GoModule {
   output of the ones before it.
   """
   let generateExec(ws: Workspace!, dirs: [String!]!): Container! {
-    let initial = base(ws).withDirectory(".", source(ws, generate: true))
-    dirs.reduce(GoGeneration(container: initial, value: "")) { state, dir =>
-      let value = lib.at(path).generateContainer(ws, dir)
-      let ctr = if (value == state.value) {
+    generateExecFrom(prepareGeneration(ws, dirs))
+  }
+
+  let generationInputs(ws: Workspace!, pkgPaths: [String!]!): GoGenerateInputs! {
+    let failure = scanFailure(ws)
+    if (failure != null) {
+      GoGenerateInputs(modulePath: path, failure: failure, directories: [])
+    } else {
+      prepareGeneration(ws, generateDirsIn(ws, pkgPaths))
+    }
+  }
+
+  let prepareGeneration(ws: Workspace!, dirs: [String!]!): GoGenerateInputs! {
+    GoGenerateInputs(
+      modulePath: path,
+      source: if (dirs.length == 0) { null } else { source(ws, generate: true) },
+      version: if (dirs.length == 0 or baseImage != null) { "" } else { toolchainVersion(ws) },
+      directories: dirs.map { dir =>
+        {
+          let value = lib.at(path).generateContainer(ws, dir)
+          GoGenerateDirectory(
+            path: dir,
+            value: value,
+            container: if (value == "") { null } else { ws.resolve(value).container.withoutEntrypoint },
+          )
+        } rescue {
+          err: Error => GoGenerateDirectory(path: dir, value: "", failure: err.message)
+        }
+      },
+    )
+  }
+
+  let generateFrom(inputs: GoGenerateInputs!): Changeset! {
+    if (inputs.failure != null) {
+      raise inputs.failure
+    } else if (inputs.directories.length == 0) {
+      directory.changes(directory)
+    } else {
+      let before = directory.withDirectory(path, inputs.source!.directory(path))
+      let after = before.withDirectory(path, generateExecFrom(inputs).directory("."))
+      after.changes(before)
+    }
+  }
+
+  let generateExecFrom(inputs: GoGenerateInputs!): Container! {
+    let initial = baseFor(inputs.version).withDirectory(".", inputs.source!)
+    inputs.directories.reduce(GoGeneration(container: initial, value: "")) { state, dir =>
+      if (dir.failure != null) { raise dir.failure }
+      let ctr = if (dir.value == state.value) {
         state.container
       } else {
-        let selected = if (value == "") {
-          base(ws)
+        let selected = if (dir.value == "") {
+          baseFor(inputs.version)
         } else {
-          prepareBase(
-            gomod.withGoCaches(ws.resolve(value).container.withoutEntrypoint),
-          )
+          prepareBase(gomod.withGoCaches(dir.container!))
         }
         selected.withDirectory(mountPath, state.container.directory(mountPath))
       }
       GoGeneration(
-        value: value,
+        value: dir.value,
         container: ctr
-          .withWorkdir(mountPath + "/" + dir)
+          .withWorkdir(mountPath + "/" + dir.path)
           .withExec(["go", "generate", "."], experimentalPrivilegedNesting: true),
       )
     }.container.withWorkdir(mountPath + "/" + path)
@@ -1664,6 +1705,22 @@ type GoTestInputs {
   let configs: Directory!
   let version: String!
   let importPath: String!
+}
+
+# Prepared source and container inputs. Commands stay in evaluation.
+type GoGenerateInputs {
+  let modulePath: String!
+  let source: Directory
+  let version: String! = ""
+  let failure: String
+  let directories: [GoGenerateDirectory!]!
+}
+
+type GoGenerateDirectory {
+  let path: String!
+  let value: String!
+  let container: Container
+  let failure: String
 }
 
 # Carry workspace files across changes in the generation container.

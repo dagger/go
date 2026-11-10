@@ -71,12 +71,12 @@ On a module: `packages`, `test`, `generate`, `skip-test`, `skip-generate`,
 
 #### Workspace inputs
 
-Test checks use saved source, testdata and config views. They do not receive
-`Workspace`. These views are prepared when the module's package collection is
-built. Tool setup and test commands stay in check execution.
+Test checks and package generators use prepared file views. They do not receive
+`Workspace`. The package collection prepares these inputs. Test and generation
+commands run only during evaluation.
 
 Discovery still scans Go files across the workspace. A Go edit can therefore
-select checks in other modules. Builds and generators still receive Workspace.
+select checks in other modules. Build and module-level helpers still receive Workspace.
 
 #### Settings
 
