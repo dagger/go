@@ -259,6 +259,87 @@ func (r *Gobuild) Binary(base *Container, source *Directory, headers *File, moun
 	return new(Directory).WithGraphQLQuery(q)
 }
 
+// Dependencies builds packages of a build that read none of its source and
+// import nothing that does, one exec per package as a build does: the
+// standard library and the build's dependencies. A build calls it through
+// the engine with exactly what those packages read, so the engine caches the
+// call: every build that compiles the same packages the same way, whatever
+// its own source, finds it in one request, instead of one or two for each
+// package, and an edit of the build's own source leaves it as it is.
+func (r *Gobuild) Dependencies(base *Container, hdr *Directory, tools *Directory, platform string, modRoot string, moduleNames []string, moduleDirs []*Directory, packages string, links bool) *GobuildDependencyBuilds {
+	assertNotNil("base", base)
+	assertNotNil("hdr", hdr)
+	assertNotNil("tools", tools)
+	q := r.query.Select("dependencies")
+	q = q.Arg("base", base)
+	q = q.Arg("hdr", hdr)
+	q = q.Arg("tools", tools)
+	q = q.Arg("platform", platform)
+	q = q.Arg("modRoot", modRoot)
+	q = q.Arg("moduleNames", moduleNames)
+	q = q.Arg("moduleDirs", moduleDirs)
+	q = q.Arg("packages", packages)
+	q = q.Arg("links", links)
+
+	return &GobuildDependencyBuilds{
+		query:     q,
+		refetchID: r.refetchID,
+	}
+}
+
+// GobuildDiscoverOpts contains options for Gobuild.Discover
+type GobuildDiscoverOpts struct {
+	// The container a private module downloads in, with the caller's
+	// credentials.
+	Private *Container
+	// The modules private downloads, as GONOPROXY or GOPRIVATE names them.
+	PrivatePatterns string
+
+	Tags []string
+}
+
+// Discover downloads, as discover does, the modules a build may read, from
+// the import paths of packages outside the build's source that the source's
+// packages import (sourceImports.outside), and returns what it found. A
+// build calls it through the engine with exactly what discover reads of the
+// build, none of its own source, so the engine caches the call: every build
+// whose source imports the same packages from outside it, with the same
+// go.sums, finds it in one request, instead of two for each module, and an
+// edit of the build's own source that changes none of those imports leaves
+// it as it is.
+func (r *Gobuild) Discover(public *Container, hdr *Directory, gomodcache string, sums string, goenv string, imports []string, planImports []string, own []string, opts ...GobuildDiscoverOpts) *GobuildDiscovery {
+	assertNotNil("public", public)
+	assertNotNil("hdr", hdr)
+	q := r.query.Select("discover")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `private` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Private) {
+			q = q.Arg("private", opts[i].Private)
+		}
+		// `privatePatterns` optional argument
+		if !querybuilder.IsZeroValue(opts[i].PrivatePatterns) {
+			q = q.Arg("privatePatterns", opts[i].PrivatePatterns)
+		}
+		// `tags` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Tags) {
+			q = q.Arg("tags", opts[i].Tags)
+		}
+	}
+	q = q.Arg("public", public)
+	q = q.Arg("hdr", hdr)
+	q = q.Arg("gomodcache", gomodcache)
+	q = q.Arg("sums", sums)
+	q = q.Arg("goenv", goenv)
+	q = q.Arg("imports", imports)
+	q = q.Arg("planImports", planImports)
+	q = q.Arg("own", own)
+
+	return &GobuildDiscovery{
+		query:     q,
+		refetchID: r.refetchID,
+	}
+}
+
 // A unique identifier for this Gobuild.
 func (r *Gobuild) ID(ctx context.Context) (ID, error) {
 	if r.id != nil {
@@ -409,7 +490,7 @@ func (r *GobuildArchiveCache) Builds(ctx context.Context) ([]Directory, error) {
 		out := []Directory{}
 
 		for i := range fields {
-			val := *new(Directory).WithGraphQLQuery(selectNode(q.Root(), fields[i].Id, "Directory"))
+			val := *loaded[*Directory](q, fields[i].Id)
 			out = append(out, val)
 		}
 
@@ -442,7 +523,7 @@ func (r *GobuildArchiveCache) Downloads(ctx context.Context) ([]Directory, error
 		out := []Directory{}
 
 		for i := range fields {
-			val := *new(Directory).WithGraphQLQuery(selectNode(q.Root(), fields[i].Id, "Directory"))
+			val := *loaded[*Directory](q, fields[i].Id)
 			out = append(out, val)
 		}
 
@@ -522,27 +603,358 @@ func (r *GobuildArchiveCache) ManifestSource() *Directory {
 }
 
 // golangci-lint's write-manifest, which writes the archives' manifest,
-// and the source it is built from, which a fresh engine would otherwise
-// fetch to find the build.
-func (r *GobuildArchiveCache) ManifestTool() *File {
+// for every machine an engine runs on (machineTools), and the source it
+// is built from, which a fresh engine would otherwise fetch to find the
+// build.
+func (r *GobuildArchiveCache) ManifestTool() *Directory {
 	q := r.query.Select("manifestTool")
 
-	return new(File).WithGraphQLQuery(q)
+	return new(Directory).WithGraphQLQuery(q)
 }
 
-// gohdr, the tool the build's execs run.
-func (r *GobuildArchiveCache) Tool() *File {
+// gohdr, the tool the build's execs run, for every machine an engine
+// runs on (machineTools).
+func (r *GobuildArchiveCache) Tool() *Directory {
 	q := r.query.Select("tool")
 
-	return new(File).WithGraphQLQuery(q)
+	return new(Directory).WithGraphQLQuery(q)
 }
 
-// Go's own tools the build's execs run, built by its toolchain: pack,
-// which packages with assembly run.
+// Go's own tools the build's execs run, built by its toolchain for every
+// machine an engine runs on: pack, which packages with assembly run.
 func (r *GobuildArchiveCache) Tools() *Directory {
 	q := r.query.Select("tools")
 
 	return new(Directory).WithGraphQLQuery(q)
+}
+
+// DependencyBuilds is what the dependency call (Dependencies) built, in the
+// order of its packages.
+type GobuildDependencyBuilds struct { // gobuild (../../:0:0)
+	query *querybuilder.Selection
+	// refetchID is set when this object is built through a field marked
+	// @reevaluate: it fetches its ID on every use, so each use evaluates that
+	// field again.
+	refetchID bool
+
+	id *ID
+}
+
+func (r *GobuildDependencyBuilds) WithGraphQLQuery(q *querybuilder.Selection) *GobuildDependencyBuilds {
+	return &GobuildDependencyBuilds{
+		query: q,
+		// The query's origin is unknown: it may go through a field that
+		// must be reevaluated.
+		refetchID: true,
+	}
+}
+
+// Each package's archive, which its importers' compiles read.
+func (r *GobuildDependencyBuilds) Archives(ctx context.Context) ([]File, error) {
+	q := r.query.Select("archives")
+
+	q = q.Select("id")
+
+	type archives struct {
+		Id ID
+	}
+
+	convert := func(fields []archives) []File {
+		out := []File{}
+
+		for i := range fields {
+			val := *loaded[*File](q, fields[i].Id)
+			out = append(out, val)
+		}
+
+		return out
+	}
+	var response []archives
+
+	q = q.Bind(&response)
+
+	err := q.Execute(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return convert(response), nil
+}
+
+// Each package's work directory, which holds its archive.
+func (r *GobuildDependencyBuilds) Dirs(ctx context.Context) ([]Directory, error) {
+	q := r.query.Select("dirs")
+
+	q = q.Select("id")
+
+	type dirs struct {
+		Id ID
+	}
+
+	convert := func(fields []dirs) []Directory {
+		out := []Directory{}
+
+		for i := range fields {
+			val := *loaded[*Directory](q, fields[i].Id)
+			out = append(out, val)
+		}
+
+		return out
+	}
+	var response []dirs
+
+	q = q.Bind(&response)
+
+	err := q.Execute(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return convert(response), nil
+}
+
+// A unique identifier for this GobuildDependencyBuilds.
+func (r *GobuildDependencyBuilds) ID(ctx context.Context) (ID, error) {
+	if r.id != nil {
+		return *r.id, nil
+	}
+	q := r.query.Select("id")
+
+	var response ID
+
+	q = q.Bind(&response)
+	if r.refetchID {
+		return response, q.Execute(ctx)
+	}
+	return memoizedID(ctx, r.query, func() (ID, error) {
+		err := q.Execute(ctx)
+		return response, err
+	})
+}
+
+// XXX_GraphQLType is an internal function. It returns the native GraphQL type name
+func (r *GobuildDependencyBuilds) XXX_GraphQLType() string {
+	return "GobuildDependencyBuilds"
+}
+
+// XXX_GraphQLIDType is an internal function. It returns the native GraphQL type name for the ID of this object
+func (r *GobuildDependencyBuilds) XXX_GraphQLIDType() string {
+	return "ID"
+}
+
+// XXX_GraphQLID is an internal function. It returns the underlying type ID
+func (r *GobuildDependencyBuilds) XXX_GraphQLID(ctx context.Context) (string, error) {
+	id, err := r.ID(ctx)
+	if err != nil {
+		return "", err
+	}
+	return string(id), nil
+}
+
+func (r *GobuildDependencyBuilds) MarshalJSON() ([]byte, error) {
+	id, err := r.ID(marshalCtx)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(id)
+}
+func (r *GobuildDependencyBuilds) UnmarshalJSON(bs []byte) error {
+	var id string
+	err := json.Unmarshal(bs, &id)
+	if err != nil {
+		return err
+	}
+	*r = GobuildDependencyBuilds{query: selectNode(Connect().QueryBuilder(), id, "GobuildDependencyBuilds")}
+	return nil
+}
+
+// Each package's object code, which a link reads: its archive unless
+// the package splits. Empty when the call's caller doesn't link.
+func (r *GobuildDependencyBuilds) LinkObjects(ctx context.Context) ([]File, error) {
+	q := r.query.Select("linkObjects")
+
+	q = q.Select("id")
+
+	type linkObjects struct {
+		Id ID
+	}
+
+	convert := func(fields []linkObjects) []File {
+		out := []File{}
+
+		for i := range fields {
+			val := *loaded[*File](q, fields[i].Id)
+			out = append(out, val)
+		}
+
+		return out
+	}
+	var response []linkObjects
+
+	q = q.Bind(&response)
+
+	err := q.Execute(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return convert(response), nil
+}
+
+// Discovery is what the discovery call (Discover) found: the modules a
+// build downloads and what its plan reads of them.
+type GobuildDiscovery struct { // gobuild (../../:0:0)
+	query *querybuilder.Selection
+	// refetchID is set when this object is built through a field marked
+	// @reevaluate: it fetches its ID on every use, so each use evaluates that
+	// field again.
+	refetchID bool
+
+	id *ID
+}
+
+func (r *GobuildDiscovery) WithGraphQLQuery(q *querybuilder.Selection) *GobuildDiscovery {
+	return &GobuildDiscovery{
+		query: q,
+		// The query's origin is unknown: it may go through a field that
+		// must be reevaluated.
+		refetchID: true,
+	}
+}
+
+// Each one's download (downloadModule), in the same order.
+func (r *GobuildDiscovery) Downloads(ctx context.Context) ([]Directory, error) {
+	q := r.query.Select("downloads")
+
+	q = q.Select("id")
+
+	type downloads struct {
+		Id ID
+	}
+
+	convert := func(fields []downloads) []Directory {
+		out := []Directory{}
+
+		for i := range fields {
+			val := *loaded[*Directory](q, fields[i].Id)
+			out = append(out, val)
+		}
+
+		return out
+	}
+	var response []downloads
+
+	q = q.Bind(&response)
+
+	err := q.Execute(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return convert(response), nil
+}
+
+// The import paths discover followed, by the target's build constraints
+// and by none: the caller checks that its source provides none of them.
+func (r *GobuildDiscovery) Followed(ctx context.Context) ([]string, error) {
+	q := r.query.Select("followed")
+
+	var response []string
+
+	q = q.Bind(&response)
+	return response, q.Execute(ctx)
+}
+
+// A unique identifier for this GobuildDiscovery.
+func (r *GobuildDiscovery) ID(ctx context.Context) (ID, error) {
+	if r.id != nil {
+		return *r.id, nil
+	}
+	q := r.query.Select("id")
+
+	var response ID
+
+	q = q.Bind(&response)
+	if r.refetchID {
+		return response, q.Execute(ctx)
+	}
+	return memoizedID(ctx, r.query, func() (ID, error) {
+		err := q.Execute(ctx)
+		return response, err
+	})
+}
+
+// XXX_GraphQLType is an internal function. It returns the native GraphQL type name
+func (r *GobuildDiscovery) XXX_GraphQLType() string {
+	return "GobuildDiscovery"
+}
+
+// XXX_GraphQLIDType is an internal function. It returns the native GraphQL type name for the ID of this object
+func (r *GobuildDiscovery) XXX_GraphQLIDType() string {
+	return "ID"
+}
+
+// XXX_GraphQLID is an internal function. It returns the underlying type ID
+func (r *GobuildDiscovery) XXX_GraphQLID(ctx context.Context) (string, error) {
+	id, err := r.ID(ctx)
+	if err != nil {
+		return "", err
+	}
+	return string(id), nil
+}
+
+func (r *GobuildDiscovery) MarshalJSON() ([]byte, error) {
+	id, err := r.ID(marshalCtx)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(id)
+}
+func (r *GobuildDiscovery) UnmarshalJSON(bs []byte) error {
+	var id string
+	err := json.Unmarshal(bs, &id)
+	if err != nil {
+		return err
+	}
+	*r = GobuildDiscovery{query: selectNode(Connect().QueryBuilder(), id, "GobuildDiscovery")}
+	return nil
+}
+
+// Each downloaded module's directory name in the module cache, in name
+// order.
+func (r *GobuildDiscovery) Names(ctx context.Context) ([]string, error) {
+	q := r.query.Select("names")
+
+	var response []string
+
+	q = q.Bind(&response)
+	return response, q.Execute(ctx)
+}
+
+// Their plan packs, in one directory.
+func (r *GobuildDiscovery) Packs() *Directory {
+	q := r.query.Select("packs")
+
+	return new(Directory).WithGraphQLQuery(q)
+}
+
+func (r *GobuildDiscovery) PlanFollowed(ctx context.Context) ([]string, error) {
+	q := r.query.Select("planFollowed")
+
+	var response []string
+
+	q = q.Bind(&response)
+	return response, q.Execute(ctx)
+}
+
+// The directories of the module cache whose Go files the plan reads.
+func (r *GobuildDiscovery) PlanMods(ctx context.Context) ([]string, error) {
+	q := r.query.Select("planMods")
+
+	var response []string
+
+	q = q.Bind(&response)
+	return response, q.Execute(ctx)
 }
 
 func (r *Query) Gobuild(toolImage string) *Gobuild { // gobuild (../../:0:0)

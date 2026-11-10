@@ -49,6 +49,13 @@ type node struct {
 	Profile bool `json:"profile,omitempty"`
 	// Link is set for the main package, which links.
 	Link bool `json:"link,omitempty"`
+	// Cgo is set when the package runs the cgo tool and the C compiler,
+	// whose output depends on the machine's C toolchain: it isn't declared
+	// for its target (Directory.withPlatform).
+	Cgo bool `json:"cgo,omitempty"`
+	// Weight, in the dependency call, is the package's weight (heightsOf),
+	// which orders its execs there.
+	Weight int64 `json:"weight,omitempty"`
 }
 
 // toNode renders a block for a walk. A package reads its dependencies'
@@ -61,12 +68,12 @@ func toNode(b *block, blocks map[string]*block, conc string) *node {
 	sort.Slice(deps, func(i, j int) bool { return blocks[deps[i]].name < blocks[deps[j]].name })
 	n := &node{ID: b.id, Name: b.name, ImportPath: b.importPath, Deps: deps,
 		SrcFiles: b.srcFiles, SrcNonGo: b.srcNonGo, ModFiles: b.modFiles, Output: b.output(), LinkOutput: b.linkOutput(),
-		Script: b.script(blocks, conc), Profile: b.profile != "", Link: b.isLink}
+		Script: b.script(blocks, conc), Profile: b.profile != "", Link: b.isLink, Cgo: b.cgo}
 	if b.isLink {
 		n.CompileDeps = b.compileDeps()
 	}
 	n.Tools = strings.Contains(n.Script, toolsDir+"/")
-	n.Gohdr = strings.Contains(n.Script, "/gobuild/gohdr ")
+	n.Gohdr = strings.Contains(n.Script, hdrBin+" ")
 	return n
 }
 
@@ -97,8 +104,12 @@ func toNodes(blocks map[string]*block, outside map[string]bool, weights map[stri
 
 // walker runs a set of nodes, one exec each, each after its dependencies.
 type walker struct {
-	base  *dagger.Container
-	gohdr *dagger.File
+	base *dagger.Container
+	// platform is the build's target, as a Platform, which each package's
+	// output is declared for.
+	platform string
+	// hdr is gohdr, for every machine an engine runs on (hdrTools).
+	hdr *dagger.Directory
 	tools *dagger.Directory
 	src   *dagger.Directory
 	// nonGo is the source's files that aren't Go, which a package with C or
@@ -115,6 +126,9 @@ type walker struct {
 	// testmain is a test binary's _testmain.go, which its main package
 	// compiles; nil for a binary.
 	testmain *dagger.File
+	// links is set when a link outside the walk reads the object code of
+	// the packages it builds, as the dependency call's caller's does.
+	links bool
 }
 
 // profileOutput is the PGO profile step's output and where scripts read it.
@@ -146,16 +160,20 @@ type result struct {
 	link     *dagger.File
 	linkErr  error
 	linkDone chan struct{}
-	// dir is the package's work directory, which holds file: evaluated, but
-	// for the link's.
+	// dir is the package's work directory, which holds file.
 	dir  *dagger.Directory
 	err  error // set before done closes; dependents read it
 	done chan struct{}
 }
 
-func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*result, error) {
+// walk runs nodes and returns their results, with done's: the results of
+// packages already built, such as the dependency call's, which nodes import.
+func (w *walker) walk(ctx context.Context, nodes map[string]*node, done map[string]*result) (map[string]*result, error) {
 	results := map[string]*result{}
-	links := false
+	for id, r := range done {
+		results[id] = r
+	}
+	links := w.links
 	for id, n := range nodes {
 		results[id] = &result{done: make(chan struct{}), linkDone: make(chan struct{})}
 		links = links || n.Link
@@ -235,7 +253,7 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 				ctr = ctr.WithMountedDirectory(toolsDir, w.tools, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
 			}
 			if n.Gohdr {
-				ctr = ctr.WithMountedFile("/gobuild/gohdr", w.gohdr, dagger.ContainerWithMountedFileOpts{ReadOnly: true})
+				ctr = ctr.WithMountedDirectory(hdrDir, w.hdr, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
 			}
 			if n.Profile {
 				ctr = ctr.WithMountedDirectory(w.profile.path, w.profile.dir, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
@@ -247,39 +265,41 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 				ctr = ctr.WithMountedDirectory(path.Join(w.roots.Src, at), srcDir, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
 			}
 			ctr = w.mods.mount(ctr, n.ModFiles)
-			// The script goes in as a mounted file, and the exec names the
-			// package instead: its arguments are its title wherever the
-			// build is shown, such as over a compile error, and a script
-			// runs to tens of KB with the link's import config. A mounted
-			// file adds no layer to the step's root filesystem.
-			script := core.NewDirectory().WithNewFile("build.sh", n.Script).File("build.sh")
+			// The script goes in as a file the step's container writes, and
+			// the exec names the package instead: its arguments and options
+			// are its title wherever the build is shown, such as over a
+			// compile error, and a script runs to tens of KB with the link's
+			// import config. Written in the step's own query, the file costs
+			// no request of its own, as a file object passed in would, for
+			// its ID.
 			ran := ctr.
-				WithMountedFile(scriptPath, script, dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
+				WithNewFile(scriptPath, n.Script).
 				WithExec([]string{"sh", scriptPath, n.ImportPath}, pkgExec)
 			if !first[id] {
 				slots.acquire(w.heights[id])
 			}
 			defer slots.release()
+			out := ran.Directory("/work/" + n.Name)
+			// What a package compiles is the same whichever platform's
+			// toolchain compiles it, unless it runs the C compiler.
+			if !n.Cgo {
+				out = out.WithPlatform(core.Platform(w.platform))
+			}
 			if n.Link {
 				// No exec reads the link's output, so it is read from the
 				// unevaluated directory: keyed by its content, it would cost
 				// a hash of the whole binary on every link.
-				r.dir = ran.Directory("/work/" + n.Name)
+				r.dir = out
 				r.file, r.err = r.dir.File(n.Output).Sync(ctx)
 				r.err = execFailure(r.err)
 				return
 			}
-			// Evaluate the output directory first, then read the file from
-			// it: only a file read from an evaluated directory is keyed by its
+			// The request that runs the exec reads the archive, keyed by its
 			// content, so a package whose archive came out unchanged leaves
 			// its dependents' execs cached.
-			out, err := ran.Directory("/work/" + n.Name).Sync(ctx)
-			if err != nil {
-				r.err = execFailure(err)
-				return
-			}
 			r.dir = out
-			r.file, r.err = out.File(n.Output).Sync(ctx)
+			r.file, r.err = out.File(n.Output).Sync(ctx, core.FileSyncOpts{KeyByContent: true})
+			r.err = execFailure(r.err)
 			switch {
 			case r.err != nil || !links:
 			case n.LinkOutput == n.Output:
@@ -288,7 +308,7 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node) (map[string]*
 				asyncLink = true
 				go func() {
 					defer close(r.linkDone)
-					r.link, r.linkErr = out.File(n.LinkOutput).Sync(ctx)
+					r.link, r.linkErr = out.File(n.LinkOutput).Sync(ctx, core.FileSyncOpts{KeyByContent: true})
 				}()
 			}
 		}()

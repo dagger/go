@@ -68,8 +68,8 @@ func (r ArchiveCache) MarshalJSON() ([]byte, error) {
 	var concrete struct {
 		Builds         []*dagger.Directory
 		Downloads      []*dagger.Directory
-		Tool           *dagger.File
-		ManifestTool   *dagger.File
+		Tool           *dagger.Directory
+		ManifestTool   *dagger.Directory
 		ManifestSource *dagger.Directory
 		Tools          *dagger.Directory
 	}
@@ -86,8 +86,8 @@ func (r *ArchiveCache) UnmarshalJSON(bs []byte) error {
 	var concrete struct {
 		Builds         []*dagger.Directory
 		Downloads      []*dagger.Directory
-		Tool           *dagger.File
-		ManifestTool   *dagger.File
+		Tool           *dagger.Directory
+		ManifestTool   *dagger.Directory
 		ManifestSource *dagger.Directory
 		Tools          *dagger.Directory
 	}
@@ -104,6 +104,74 @@ func (r *ArchiveCache) UnmarshalJSON(bs []byte) error {
 	return nil
 }
 
+func (r DependencyBuilds) MarshalJSON() ([]byte, error) {
+	var concrete struct {
+		Archives    []*dagger.File
+		LinkObjects []*dagger.File
+		Dirs        []*dagger.Directory
+	}
+	concrete.Archives = r.Archives
+	concrete.LinkObjects = r.LinkObjects
+	concrete.Dirs = r.Dirs
+	return json.Marshal(&concrete)
+}
+
+func (r *DependencyBuilds) UnmarshalJSON(bs []byte) error {
+	var concrete struct {
+		Archives    []*dagger.File
+		LinkObjects []*dagger.File
+		Dirs        []*dagger.Directory
+	}
+	err := json.Unmarshal(bs, &concrete)
+	if err != nil {
+		return err
+	}
+	r.Archives = concrete.Archives
+	r.LinkObjects = concrete.LinkObjects
+	r.Dirs = concrete.Dirs
+	return nil
+}
+
+func (r Discovery) MarshalJSON() ([]byte, error) {
+	var concrete struct {
+		Names        []string
+		Downloads    []*dagger.Directory
+		Packs        *dagger.Directory
+		PlanMods     []string
+		Followed     []string
+		PlanFollowed []string
+	}
+	concrete.Names = r.Names
+	concrete.Downloads = r.Downloads
+	concrete.Packs = r.Packs
+	concrete.PlanMods = r.PlanMods
+	concrete.Followed = r.Followed
+	concrete.PlanFollowed = r.PlanFollowed
+	return json.Marshal(&concrete)
+}
+
+func (r *Discovery) UnmarshalJSON(bs []byte) error {
+	var concrete struct {
+		Names        []string
+		Downloads    []*dagger.Directory
+		Packs        *dagger.Directory
+		PlanMods     []string
+		Followed     []string
+		PlanFollowed []string
+	}
+	err := json.Unmarshal(bs, &concrete)
+	if err != nil {
+		return err
+	}
+	r.Names = concrete.Names
+	r.Downloads = concrete.Downloads
+	r.Packs = concrete.Packs
+	r.PlanMods = concrete.PlanMods
+	r.Followed = concrete.Followed
+	r.PlanFollowed = concrete.PlanFollowed
+	return nil
+}
+
 func DaggerDispatch(ctx context.Context, parentJSON []byte, parentName string, fnName string, inputArgs map[string][]byte) (_ any, err error) {
 	setMarshalContext(ctx)
 	_ = inputArgs
@@ -111,6 +179,12 @@ func DaggerDispatch(ctx context.Context, parentJSON []byte, parentName string, f
 		switch fnName {
 		case "ArchiveCache", "archiveCache":
 			parentName = "ArchiveCache"
+			fnName = ""
+		case "DependencyBuilds", "dependencyBuilds":
+			parentName = "DependencyBuilds"
+			fnName = ""
+		case "Discovery", "discovery":
+			parentName = "Discovery"
 			fnName = ""
 		case "Gobuild", "gobuild":
 			parentName = "Gobuild"
@@ -125,6 +199,26 @@ func DaggerDispatch(ctx context.Context, parentJSON []byte, parentName string, f
 		switch fnName {
 		case "":
 			return &ArchiveCache{}, nil
+		default:
+			return nil, fmt.Errorf("unknown function %s", fnName)
+		}
+	case "DependencyBuilds":
+		if fnName == "New" {
+			fnName = ""
+		}
+		switch fnName {
+		case "":
+			return &DependencyBuilds{}, nil
+		default:
+			return nil, fmt.Errorf("unknown function %s", fnName)
+		}
+	case "Discovery":
+		if fnName == "New" {
+			fnName = ""
+		}
+		switch fnName {
+		case "":
+			return &Discovery{}, nil
 		default:
 			return nil, fmt.Errorf("unknown function %s", fnName)
 		}
@@ -399,6 +493,160 @@ func DaggerDispatch(ctx context.Context, parentJSON []byte, parentName string, f
 				}
 			}
 			return (*Gobuild).Binary(&parent, ctx, base, image, from, source, headers, mountPath, workdir, pkg, output, flags, downloads)
+		case "Dependencies":
+			var parent Gobuild
+			err = json.Unmarshal(parentJSON, &parent)
+			if err != nil {
+				panic(fmt.Errorf("%s: %w", "failed to unmarshal parent object", err))
+			}
+			var base *core.Container
+			if inputArgs["base"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["base"]), &base)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg base", err))
+				}
+			}
+			var hdr *core.Directory
+			if inputArgs["hdr"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["hdr"]), &hdr)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg hdr", err))
+				}
+			}
+			var tools *core.Directory
+			if inputArgs["tools"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["tools"]), &tools)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg tools", err))
+				}
+			}
+			var platform string
+			if inputArgs["platform"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["platform"]), &platform)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg platform", err))
+				}
+			}
+			var modRoot string
+			if inputArgs["modRoot"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["modRoot"]), &modRoot)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg modRoot", err))
+				}
+			}
+			var moduleNames []string
+			if inputArgs["moduleNames"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["moduleNames"]), &moduleNames)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg moduleNames", err))
+				}
+			}
+			var moduleDirs []*core.Directory
+			if inputArgs["moduleDirs"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["moduleDirs"]), &moduleDirs)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg moduleDirs", err))
+				}
+			}
+			var packages string
+			if inputArgs["packages"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["packages"]), &packages)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg packages", err))
+				}
+			}
+			var links bool
+			if inputArgs["links"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["links"]), &links)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg links", err))
+				}
+			}
+			return (*Gobuild).Dependencies(&parent, ctx, base, hdr, tools, platform, modRoot, moduleNames, moduleDirs, packages, links)
+		case "Discover":
+			var parent Gobuild
+			err = json.Unmarshal(parentJSON, &parent)
+			if err != nil {
+				panic(fmt.Errorf("%s: %w", "failed to unmarshal parent object", err))
+			}
+			var public *core.Container
+			if inputArgs["public"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["public"]), &public)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg public", err))
+				}
+			}
+			var private *core.Container
+			if inputArgs["private"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["private"]), &private)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg private", err))
+				}
+			}
+			var privatePatterns string
+			if inputArgs["privatePatterns"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["privatePatterns"]), &privatePatterns)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg privatePatterns", err))
+				}
+			}
+			var hdr *core.Directory
+			if inputArgs["hdr"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["hdr"]), &hdr)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg hdr", err))
+				}
+			}
+			var gomodcache string
+			if inputArgs["gomodcache"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["gomodcache"]), &gomodcache)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg gomodcache", err))
+				}
+			}
+			var sums string
+			if inputArgs["sums"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["sums"]), &sums)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg sums", err))
+				}
+			}
+			var goenv string
+			if inputArgs["goenv"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["goenv"]), &goenv)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg goenv", err))
+				}
+			}
+			var tags []string
+			if inputArgs["tags"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["tags"]), &tags)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg tags", err))
+				}
+			}
+			var imports []string
+			if inputArgs["imports"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["imports"]), &imports)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg imports", err))
+				}
+			}
+			var planImports []string
+			if inputArgs["planImports"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["planImports"]), &planImports)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg planImports", err))
+				}
+			}
+			var own []string
+			if inputArgs["own"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["own"]), &own)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg own", err))
+				}
+			}
+			return (*Gobuild).Discover(&parent, ctx, public, private, privatePatterns, hdr, gomodcache, sums, goenv, tags, imports, planImports, own)
 		case "TestBinary":
 			var parent Gobuild
 			err = json.Unmarshal(parentJSON, &parent)

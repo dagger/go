@@ -726,14 +726,16 @@ type GoArchiveBuilds {
   downloads: [Directory!]!
 
   """
-  gobuild's gohdr, the tool the builds' execs run.
+  gobuild's gohdr, the tool the builds' execs run, for every machine an
+  engine runs on.
   """
-  tool: File!
+  tool: Directory!
 
   """
-  golangci-lint's write-manifest, which writes the archives' manifest.
+  golangci-lint's write-manifest, which writes the archives' manifest, for
+  every machine an engine runs on.
   """
-  manifestTool: File!
+  manifestTool: Directory!
 
   """
   The source write-manifest is built from, golangci-lint's manifest module at
@@ -742,14 +744,21 @@ type GoArchiveBuilds {
   manifestSource: Directory!
 
   """
-  Go's own tools the builds run, built by its toolchain: pack.
+  Go's own tools the builds run, built by its toolchain for every machine an
+  engine runs on: pack.
   """
   tools: Directory!
 
   """
-  gomod's go-includes helper.
+  gomod's go-includes helper, for the engine's platform.
   """
   helper: Container!
+
+  """
+  gomod's go-includes binary for the builds' platform, which the helper of
+  an engine of that platform runs.
+  """
+  helperBinary: File!
 }
 
 """
@@ -1723,8 +1732,14 @@ type GoModule {
     what only they import, which a lint reads.
     """
     noTests: Boolean! = false,
+    """
+    The GOOS/GOARCH they're compiled for, e.g. "linux/arm64": the engine's
+    platform when unset. The engine's own toolchain compiles them, so an
+    engine of any platform makes them for any other.
+    """
+    platform: String,
   ): Directory! {
-    let ctr = platformBase(ws, gomod.hostPlatform)
+    let ctr = platformBase(ws, platform ?? gomod.hostPlatform)
     let flags = buildFlags + (ctr.envVariable("GOFLAGS") ?? "").split(" ").filter { f => f != "" }
     if (gccgo(flags)) {
       raise "Go module " + path + ": a gccgo build has no archives for the export driver, which reads gc's"
@@ -1771,8 +1786,13 @@ type GoModule {
     what only they import.
     """
     noTests: Boolean! = false,
+    """
+    The GOOS/GOARCH they're compiled for, e.g. "linux/arm64": the engine's
+    platform when unset.
+    """
+    platform: String,
   ): GoArchiveBuilds! {
-    let ctr = platformBase(ws, gomod.hostPlatform)
+    let ctr = platformBase(ws, platform ?? gomod.hostPlatform)
     let flags = buildFlags + (ctr.envVariable("GOFLAGS") ?? "").split(" ").filter { f => f != "" }
     if (gccgo(flags)) {
       raise "Go module " + path + ": a gccgo build has no archives"
@@ -1802,6 +1822,7 @@ type GoModule {
         manifestSource: cache.manifestSource,
         tools: cache.tools,
         helper: gomod.includesHelper,
+        helperBinary: gomod.includesHelperBinary(platform ?? gomod.hostPlatform),
       )
     } rescue {
       err: Error => raise "Go archive builds of module " + path + ": " + err.message

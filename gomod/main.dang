@@ -246,9 +246,8 @@ type Gomod {
 
   """
   The container go-includes runs in, before a workspace is mounted: the
-  helper built from gomod's own source in a pinned image, so it is the same
-  for every module. A cache that pre-warms Go builds, such as an engine
-  image's, holds it.
+  helper (includesHelperBinary) for the engine's platform in a pinned image,
+  so it is the same for every module.
   """
   includesHelper: Container! {
     # No cache volumes: the scan is an ordinary result, which another engine
@@ -258,13 +257,34 @@ type Gomod {
       # The same download retry as withGoCaches.
       .withEnvVariable("GOPROXY", "https://proxy.golang.org|https://proxy.golang.org|direct")
       .withoutEntrypoint
+      .withFile("/usr/local/bin/go-includes", includesHelperBinary(hostPlatform))
+  }
+
+  """
+  go-includes for a platform, GOOS/GOARCH, built from gomod's own source in
+  a pinned image by the engine's own Go toolchain, and declared as made for
+  that platform: an engine of that platform finds the one an engine of
+  another platform built. A cache that pre-warms Go builds, such as an
+  engine image's, holds it.
+  """
+  includesHelperBinary(platform: String!): File! {
+    let target = platform.split("/")
+    container.from(goImage(scannerVersion))
+      # The same download retry as withGoCaches.
+      .withEnvVariable("GOPROXY", "https://proxy.golang.org|https://proxy.golang.org|direct")
+      .withEnvVariable("GOOS", target.takeFirst(1).join(""))
+      .withEnvVariable("GOARCH", target.takeFirst(2).takeLast(1).join(""))
+      .withoutEntrypoint
       .withWorkdir("/helpers/go-includes")
       .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
       # A fresh engine compiles the standard library for this build, and
       # skipping inlining there cuts the build by about a quarter. The scan
       # loses about 25 ms without inlining, and the GC setting it runs with
       # wins that back (see go-includes/main.go).
-      .withExec(["go", "build", "-gcflags=std=-l", "-o", "/usr/local/bin/go-includes", "."])
+      .withExec(["go", "build", "-gcflags=std=-l", "-o", "/out/go-includes", "."])
+      .directory("/out")
+      .withPlatform(platform: (platform :: Platform!))
+      .file("go-includes")
   }
 
   """

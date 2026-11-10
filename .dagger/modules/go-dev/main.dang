@@ -912,8 +912,9 @@ type GoDev {
   """
   A build builds Go's pack tool only when its toolchain runs it: Go 1.25 and
   later run "go tool pack" for each package with assembly, the runtime among
-  them, so a build on Go 1.27 builds pack once, and Go 1.24, which runs its
-  own pack, builds none. The base's go command writes a line to a cache
+  them, so a build on Go 1.27 builds pack once for each machine an engine
+  runs on, which its tools directory holds, and Go 1.24, which runs its own
+  pack, builds none. The base's go command writes a line to a cache
   volume of the run's own each time it builds pack, and the base carries the
   run's name, so no earlier run's cached build stands in for it.
   """
@@ -922,7 +923,7 @@ type GoDev {
     let old = packBuilds("1.24", run)
     let current = packBuilds("1.27.3", run)
     assert(old == "", "a build on Go 1.24 built pack: " + old)
-    assert(current == "pack\n", "a build on Go 1.27 built pack other than once: " + current)
+    assert(current == "pack\npack\n", "a build on Go 1.27 built pack other than once for each of the two machines: " + current)
     null
   }
 
@@ -1072,6 +1073,51 @@ type GoDev {
   }
 
   """
+  A dependency's package that imports a package of the project's own module
+  is built with the project's: the build follows the import into the
+  project's source, which a plan then reads. So it is when the project's
+  go.sum also names a version of the project's module that no proxy serves.
+  The dependency comes from a file proxy in the base, as from any module
+  proxy.
+  """
+  sourceFromDependencyCheck: Void @check {
+    let dep = directory
+      .withNewFile("go.mod", "module example.com/srcdep\n\ngo 1.25\n")
+      .withNewFile("srcdep.go", "package srcdep\n\nimport \"example.com/srcapp/lib\"\n\nconst Answer = lib.Base + 2\n")
+    let main = directory
+      .withNewFile("go.mod", "module example.com/srcapp\n\ngo 1.25\n\nrequire example.com/srcdep v1.0.0\n")
+      .withNewFile("lib/lib.go", "package lib\n\nconst Base = 40\n")
+      .withNewFile("main.go", "package main\n\nimport (\n\t\"fmt\"\n\n\t\"example.com/srcdep\"\n)\n\nfunc main() { fmt.Println(srcdep.Answer) }\n")
+    # The proxy serves the dependency as go mod download fetches it, and the
+    # go.sum is written from it, then made again with a zip checksum for a
+    # version of the project's module that the proxy doesn't serve.
+    let made = container
+      .from("golang:1.27.3-alpine")
+      .withExec(["apk", "add", "--no-cache", "zip"])
+      .withDirectory("/z/example.com/srcdep@v1.0.0", dep)
+      .withDirectory("/ws", main)
+      .withExec(["sh", "-c", "set -e; p=/proxy/example.com/srcdep/@v; mkdir -p $p; cd /z; zip -qr $p/v1.0.0.zip example.com/srcdep@v1.0.0; cp example.com/srcdep@v1.0.0/go.mod $p/v1.0.0.mod; printf 'v1.0.0\\n' > $p/list; printf '{\"Version\":\"v1.0.0\"}' > $p/v1.0.0.info; cd /ws; GOPROXY=file:///proxy GOSUMDB=off go mod tidy"])
+      .withExec(["sh", "-c", "set -e; mkdir /sums; cp /ws/go.sum /sums/tidy; { cat /ws/go.sum; echo 'example.com/srcapp v1.0.0 h1:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='; } > /sums/unserved"])
+    let base = container
+      .from("golang:1.27.3-alpine")
+      .withDirectory("/proxy", made.directory("/proxy"))
+      .withEnvVariable("GOPROXY", "file:///proxy")
+      .withEnvVariable("GOSUMDB", "sum.golang.org https://sumdb.invalid")
+    let failures = ["tidy", "unserved"].map { sum =>
+      let ws = made.directory("/ws").withFile("go.sum", made.file("/sums/" + sum)).asWorkspace
+      let out = {
+        let built = go(base: base).modules(ws).get(key: ".").packages(ws).get(key: ".").binary(ws)
+        base.withFile("/usr/local/bin/srcapp", built).withExec(["srcapp"]).stdout
+      } rescue {
+        err: Error => err.message
+      }
+      if (out == "42\n") { "" } else { "the build with the " + sum + " go.sum: " + out }
+    }.filter { failure => failure != "" }
+    assert(failures.length == 0, failures.join("\n"))
+    null
+  }
+
+  """
   A cgo or assembly package in the source #includes files from elsewhere in
   it, which no plan line names: outside its module, of names no pattern
   covers, that the caller adds with includeExtraFiles, and in directories
@@ -1167,8 +1213,8 @@ type GoDev {
     assert(downloads.length == 1, "archive builds: " + toString(downloads.length) + " downloads, for 1 module download")
     let distinct = builds.reduce([]) { seen, d => if (seen.contains(d)) { seen } else { seen + [d] } }
     assert(distinct.length == builds.length, "archive builds repeat a build")
-    assert(built.tool.name == "gohdr", "archive builds: the tool is " + built.tool.name + ", not gohdr")
-    assert(built.manifestTool.name == "write-manifest", "archive builds: the manifest tool is " + built.manifestTool.name + ", not write-manifest")
+    assert(built.tool.entries.contains("gohdr"), "archive builds: the tool is " + built.tool.entries.join(", ") + ", without gohdr")
+    assert(built.manifestTool.entries.contains("write-manifest"), "archive builds: the manifest tool is " + built.manifestTool.entries.join(", ") + ", without write-manifest")
     assert(built.manifestSource.entries.contains("go.mod"), "archive builds: the manifest tool's source is " + built.manifestSource.entries.join(", ") + ", without go.mod")
     assert(built.tools.entries.contains("pack"), "archive builds: the tools are " + built.tools.entries.join(", ") + ", without pack")
   }
@@ -2273,7 +2319,11 @@ type GoDev {
       + (if (passed > 0) { ["✔", `${passed}`, "passed"] } else { [] })
     let collection = if (failed > 0) { ["✘", "1", "failed"] } else { ["✔", "1", "passed"] }
     let flat = top.length == 1 and items.length == 0 and checkTally(top[0]!) == expected
-    flat or (top.length == 1 and items.length == 1 and checkTally(top[0]!) == collection and checkTally(items[0]!) == expected)
+    # A grouped report nests the items' totals under their collection check.
+    # Its top header counts the collection, or, as v1.0.0-beta.26's does, the
+    # items again.
+    let grouped = top.length == 1 and items.length == 1 and checkTally(items[0]!) == expected
+    flat or (grouped and (checkTally(top[0]!) == collection or checkTally(top[0]!) == expected))
   }
 
   let checkHeaderAt(line: String!, indent: String!): Boolean! {
@@ -2306,6 +2356,10 @@ type GoDev {
     assert(checkSummaryMatches("  CHECKS  ✔ 8 passed\n", 8, 0) == false, "accepted a nested header alone")
     assert(checkSummaryMatches("CHECKS  ✔ 8 passed\nCHECKS  ✔ 8 passed\n", 8, 0) == false, "accepted duplicate top headers")
     assert(checkSummaryMatches("CHECKS  ✔ 2 passed\n  CHECKS  ✔ 8 passed\n", 8, 0) == false, "accepted more than one collection")
+    let itemsAtTop = "CHECKS  ✘ 2 failed  ✔ 6 passed\n✘ go/modules/packages/tests/test 1.0s ERROR\n  CHECKS  ✘ 2 failed  ✔ 6 passed\n"
+    assert(checkSummaryMatches(itemsAtTop, 6, 2), "a grouped report counting the items at the top was not recognized")
+    assert(checkSummaryMatches(itemsAtTop, 7, 1) == false, "accepted other totals from a grouped report counting the items at the top")
+    assert(checkSummaryMatches("CHECKS  ✔ 8 passed\n  CHECKS  ✘ 1 failed  ✔ 7 passed\n", 7, 1) == false, "accepted a top count that disagrees with the items")
     assert(checkSummaryMatches("CHECKS  ✔ 1 passed\n  CHECKS  ✔ 8 passed\n  CHECKS  ✔ 8 passed\n", 8, 0) == false, "accepted duplicate headers")
     null
   }

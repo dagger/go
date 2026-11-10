@@ -506,7 +506,7 @@ func TestScriptCompileConcurrency(t *testing.T) {
 		t.Errorf("with -c:\n%s\nwithout:\n%s", with, without)
 	}
 	wrapped := script("/opt/wrap /usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main -pack ./main.go")
-	if !strings.Contains(wrapped, "/opt/wrap /usr/local/go/pkg/tool/linux_amd64/compile -c="+soloCompileC+" -o ") {
+	if !strings.Contains(wrapped, "/opt/wrap /usr/local/go/pkg/tool/$gohost/compile -c="+soloCompileC+" -o ") {
 		t.Errorf("a -toolexec compile:\n%s", wrapped)
 	}
 }
@@ -530,7 +530,7 @@ func TestScriptStartHeap(t *testing.T) {
 		}
 	}
 	wrapped := script(`/opt/wrap /usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main -goversion "go1.26.10 X:nocoverageredesign" -pack ./main.go`)
-	if !strings.Contains(wrapped, "/opt/wrap /usr/local/go/pkg/tool/linux_amd64/compile -c="+soloCompileC+flag+" -o ") {
+	if !strings.Contains(wrapped, "/opt/wrap /usr/local/go/pkg/tool/$gohost/compile -c="+soloCompileC+flag+" -o ") {
 		t.Errorf("a -toolexec compile:\n%s", wrapped)
 	}
 	for _, v := range []string{" -goversion go1.25.3", " -goversion go1.9", ` -goversion "go1.25.3 X:boringcrypto"`, ` -goversion "devel go1.27-0123456789 Mon Oct 26 2026"`, ""} {
@@ -591,7 +591,7 @@ func TestScriptLinkBuildID(t *testing.T) {
 	}
 	b := blocks["b001"]
 	script := b.script(blocks, soloCompileC)
-	if !strings.Contains(script, "id=$(/gobuild/gohdr linkid /work/"+b.name+"/importcfg.link ") ||
+	if !strings.Contains(script, "id=$("+hdrBin+" linkid /work/"+b.name+"/importcfg.link ") ||
 		!strings.Contains(script, " -buildid=$id -X main.v=1 ") || strings.Contains(script, "Plan") {
 		t.Errorf("link build ID:\n%s", script)
 	}
@@ -601,6 +601,39 @@ func TestScriptLinkBuildID(t *testing.T) {
 	}
 	if s := user["b001"].script(user, soloCompileC); !strings.Contains(s, " -buildid=$id -buildid= ") {
 		t.Errorf("the call's own -buildid was dropped:\n%s", s)
+	}
+}
+
+// A script names no machine: the plan names the toolchain's tools by the
+// machine that made it, and the script runs them from the same toolchain's
+// tool directory for the machine the exec runs on, so the plans of two
+// machines for one target are the same scripts, the link's build ID salt
+// included, and the same package builds.
+func TestScriptNamesNoMachine(t *testing.T) {
+	scripts := func(host string) map[string]string {
+		plan := strings.Replace(mainLink("/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -p main -buildid PlanC/PlanC -pack ./main.go"),
+			"-buildmode=exe ", "-buildmode=exe -buildid=PlanX/PlanY/PlanY/PlanX ", 1)
+		blocks, err := parsePlan(strings.ReplaceAll(plan, "linux_amd64", host), testRoots)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]string{}
+		for id, b := range blocks {
+			out[id] = b.script(blocks, soloCompileC)
+		}
+		return out
+	}
+	amd64, arm64 := scripts("linux_amd64"), scripts("linux_arm64")
+	for id, s := range amd64 {
+		if s != arm64[id] {
+			t.Errorf("%s differs by machine:\n%s\n---\n%s", id, s, arm64[id])
+		}
+		if strings.Contains(s, "linux_") {
+			t.Errorf("%s names a machine:\n%s", id, s)
+		}
+		if strings.Contains(s, "/pkg/tool/$gohost/") && !strings.Contains(s, "gohost=$(GOTOOLCHAIN=local go env GOHOSTOS GOHOSTARCH") {
+			t.Errorf("%s runs a tool without reading its machine:\n%s", id, s)
+		}
 	}
 }
 

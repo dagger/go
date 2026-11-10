@@ -1,4 +1,5 @@
 name = "gobuild"
+include = []
 
 [entrypoint]
   kind = "dang"

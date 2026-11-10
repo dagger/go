@@ -1,27 +1,63 @@
 package main
 
 import (
+	"sync"
+
 	"dagger.io/dagger/core"
 	"dagger/gobuild/internal/dagger"
 )
 
-// hdrTool builds gohdr, the helper's in-container tool. "gohdr unpack" writes
+// hdrDir is where an exec that runs gohdr mounts it (hdrTools), and hdrBin
+// is the command that runs it.
+const (
+	hdrDir = "/gobuild/gohdr.d"
+	hdrBin = hdrDir + "/gohdr"
+)
+
+// hdrTools builds gohdr, the helper's in-container tool. "gohdr unpack" writes
 // out a header pack, the go module's scan of each Go file up to the end of its
 // imports, for the plan, and lists the pack's Go files in directories named
 // like Go files. "gohdr weigh" weighs the plan's steps by the Go
 // source they compile. "gohdr cc" answers the plan's C compiler probes.
 // "gohdr linkid" makes a link's build ID.
 //
-// It is a standalone tool, so it is built in image, gomod's pinned
-// toolchain, statically, and runs in whatever image the module builds with.
-func hdrTool(image string) *dagger.File {
-	return core.NewContainer().From(image).
-		WithEnvVariable("CGO_ENABLED", "0").
-		WithNewFile("/gohdr-src/go.mod", "module gohdr\n\ngo 1.26\n").
-		WithNewFile("/gohdr-src/main.go", hdrToolSrc).
-		WithWorkdir("/gohdr-src").
-		WithExec([]string{"go", "build", "-o", "/gohdr", "."}, bare).File("/gohdr")
+// It is gohdr for every machine an engine runs on (machineTools), declared
+// for a build's target. A standalone tool, it is built in image, gomod's
+// pinned toolchain, statically, and runs in whatever image the module builds
+// with. It is one object for each image and target, so the SDK asks the
+// engine for its ID once, not once for every exec that mounts it.
+func hdrTools(image, platform string) *dagger.Directory {
+	return toolsFor("gohdr", image, platform, func(goarch string) *dagger.File {
+		return core.NewContainer().From(image).
+			WithEnvVariable("CGO_ENABLED", "0").
+			WithEnvVariable("GOOS", "linux").
+			WithEnvVariable("GOARCH", goarch).
+			WithNewFile("/gohdr-src/go.mod", "module gohdr\n\ngo 1.26\n").
+			WithNewFile("/gohdr-src/main.go", hdrToolSrc).
+			WithWorkdir("/gohdr-src").
+			WithExec([]string{"go", "build", "-o", "/gohdr", "."}, bare).File("/gohdr")
+	})
 }
+
+// toolsFor is machineTools' directory of the tool name, built by build in
+// image and declared for platform, made once for each name, image and
+// platform.
+func toolsFor(name, image, platform string, build func(goarch string) *dagger.File) *dagger.Directory {
+	key := name + "\x00" + image + "\x00" + platform
+	toolsMu.Lock()
+	defer toolsMu.Unlock()
+	if dir, ok := toolsMade[key]; ok {
+		return dir
+	}
+	dir := machineTools(name, platform, build)
+	toolsMade[key] = dir
+	return dir
+}
+
+var (
+	toolsMu   sync.Mutex
+	toolsMade = map[string]*dagger.Directory{}
+)
 
 const hdrToolSrc = `package main
 

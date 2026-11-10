@@ -72,6 +72,10 @@ var (
 	// The Go linker, run directly or through a -toolexec program. Only a
 	// command runs it: parsePlan keeps heredoc data, which may name it, out.
 	reLink       = regexp.MustCompile(`/pkg/tool/[^/\s]+/link `)
+	// reToolDir is the host part of the toolchain's tool directory as the
+	// plan names it, by the machine's GOHOSTOS_GOHOSTARCH, e.g. the
+	// "/pkg/tool/linux_amd64/" of /usr/local/go/pkg/tool/linux_amd64/compile.
+	reToolDir = regexp.MustCompile(`/pkg/tool/[^/\s]+/`)
 	reDepArchive = regexp.MustCompile(`\$WORK/(b\d+)/_pkg_\.a`)
 	// cat >TARGET << 'EOF' [# internal]
 	reHeredoc = regexp.MustCompile(`^cat >(\S+) << 'EOF'( # internal)?$`)
@@ -789,6 +793,7 @@ func (b *block) script(blocks map[string]*block, conc string) string {
 	var heredoc []string
 	heredocTarget := ""
 	linkCfg := false
+	tools := false
 	needed := cdNeeded(b.lines)
 	for i, l := range b.lines {
 		// The link's import config names the archives it reads.
@@ -804,6 +809,15 @@ func (b *block) script(blocks map[string]*block, conc string) string {
 		// directory, so it doesn't tie the step to the project.
 		if isCd(l) && !needed[i] && (!b.cgo || !cdTo(l, b.dir)) {
 			continue
+		}
+		// The tools run from the plan's toolchain's tool directory for the
+		// machine the exec runs on, which the exec asks that toolchain for:
+		// the plan names the machine that made the plan, and a script that
+		// names no machine is the same, and finds the same package build,
+		// on every machine.
+		if heredocTarget == "" && reToolDir.MatchString(l) {
+			l = reToolDir.ReplaceAllLiteralString(l, "/pkg/tool/$gohost/")
+			tools = true
 		}
 		link := b.isLink && i == b.linkAt-1
 		if !link && strings.Contains(l, "-buildid") {
@@ -851,7 +865,7 @@ func (b *block) script(blocks map[string]*block, conc string) string {
 		if loc := reLinkBuildID.FindStringIndex(l); link && loc != nil {
 			if m := reImportcfg.FindStringSubmatch(l); m != nil {
 				sum := sha256.Sum256([]byte(l[:loc[0]] + l[loc[1]:]))
-				body.WriteString("id=$(/gobuild/gohdr linkid " + m[1] + " " + hex.EncodeToString(sum[:8]) + ")\n")
+				body.WriteString("id=$(" + hdrBin + " linkid " + m[1] + " " + hex.EncodeToString(sum[:8]) + ")\n")
 				l = l[:loc[0]] + " -buildid=$id" + l[loc[1]:]
 			}
 		}
@@ -881,7 +895,12 @@ func (b *block) script(blocks map[string]*block, conc string) string {
 		}
 		body.WriteString(l + "\n")
 	}
-	return "set -e\n# " + b.importPath + "\nmkdir -p " + strings.Join(dirs, " ") + "\n" + body.String()
+	prelude := ""
+	if tools {
+		// The machine's, which any toolchain reports, without switching.
+		prelude = "gohost=$(GOTOOLCHAIN=local go env GOHOSTOS GOHOSTARCH | paste -sd_ -)\n"
+	}
+	return "set -e\n# " + b.importPath + "\n" + prelude + "mkdir -p " + strings.Join(dirs, " ") + "\n" + body.String()
 }
 
 // isCd reports whether a plan line changes directory: the go command's own
