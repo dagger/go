@@ -1142,7 +1142,7 @@ type GoModule {
   let generationInputs(ws: Workspace!, pkgPaths: [String!]!): GoGenerateInputs! {
     let failure = scanFailure(ws)
     if (failure != null) {
-      GoGenerateInputs(modulePath: path, failure: failure, directories: [])
+      GoGenerateInputs(modulePath: path, version: "", failure: failure, directories: [])
     } else {
       prepareGeneration(ws, generateDirsIn(ws, pkgPaths))
     }
@@ -1170,7 +1170,7 @@ type GoModule {
 
   let generateFrom(inputs: GoGenerateInputs!): Changeset! {
     if (inputs.failure != null) {
-      raise inputs.failure
+      raise inputs.failure!
     } else if (inputs.directories.length == 0) {
       directory.changes(directory)
     } else {
@@ -1183,7 +1183,7 @@ type GoModule {
   let generateExecFrom(inputs: GoGenerateInputs!): Container! {
     let initial = baseFor(inputs.version).withDirectory(".", inputs.source!)
     inputs.directories.reduce(GoGeneration(container: initial, value: "")) { state, dir =>
-      if (dir.failure != null) { raise dir.failure }
+      if (dir.failure != null) { raise dir.failure! }
       let ctr = if (dir.value == state.value) {
         state.container
       } else {
@@ -1711,7 +1711,7 @@ type GoTestInputs {
 type GoGenerateInputs {
   let modulePath: String!
   let source: Directory
-  let version: String! = ""
+  let version: String!
   let failure: String
   let directories: [GoGenerateDirectory!]!
 }
