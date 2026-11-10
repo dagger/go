@@ -260,7 +260,6 @@ type GoDev {
     tests.subset(keys: [one]).test(ws)
     run(
       tests.get(key: one).test(
-        ws,
         selection: tool.module(ws, modPath).packages(ws).subset(keys: [modPath]),
       ),
     )
@@ -334,7 +333,6 @@ type GoDev {
     let failed = {
       run(
         sharedPackages.get(key: "sub").tests.get(key: "TestShared").test(
-          shared,
           selection: sharedTool.modules(shared).get(key: ".").packages(shared).subset(keys: ["sub"]),
         ),
       )
@@ -2102,7 +2100,7 @@ type GoDev {
 
     # A package's own generate runs alone, so version does not see what later
     # generates; a batch of both runs them in order, as go generate does.
-    let alone = globbed.modules(ws).get(key: root).packages(ws).get(key: child).generate(ws)
+    let alone = globbed.modules(ws).get(key: root).packages(ws).get(key: child).generate
     assert(alone.addedPaths == [child + "/generated.go"], "a package's own generate ran elsewhere")
     assert(
       alone.layer.file(child + "/generated.go").contents.contains("Earlier") == false,
@@ -2172,7 +2170,7 @@ type GoDev {
     # Discovery starts at the fixture, so the workspace cwd is not its root
     # when containers are resolved.
     let caller = ws.withDirectory(root, fixture).withWorkdir(root)
-    let changes = go(
+    let mod = go(
       base: container.from("golang:1.27.3-alpine").withEnvVariable(
         "GENERATOR_BASE",
         "default",
@@ -2180,7 +2178,15 @@ type GoDev {
       generate: [root + "/**"],
       goflags: "-tags=generatecontainer",
       mountPath: "/custom/workspace",
-    ).module(caller, root, findUp: false).generate(caller)
+    ).module(caller, root, findUp: false)
+    let changes = mod.generate(caller)
+    let leaf = mod.packages(caller).get(key: root).generate
+    assert(
+      leaf.layer.file(root + "/generated.txt").contents == "included input\n"
+        and leaf.layer.file(root + "/service.txt").contents == "service binding retained\n"
+        and leaf.layer.file(root + "/workdir.txt").contents == "/custom/workspace/" + root + "\n",
+      "package generation lost its container, source, or workdir",
+    )
     assert(
       changes.layer.file(root + "/workdir.txt").contents == "/custom/workspace/" + root + "\n",
       "selected container lost the configured mount path",

@@ -205,11 +205,12 @@ type Go {
   # constraints name a Go release or cgo.
   let discoveryScan(ws: Workspace!): Directory! {
     if (base == null) {
-      lib.scan(ws, goflags: goflags ?? "", goVersion: version ?? "")
+      lib.scan(ws, test: true, goflags: goflags ?? "", goVersion: version ?? "")
     } else {
       let cgoEnv = base!.envVariable("CGO_ENABLED")
       let fromEnv = lib.scan(
         ws,
+        test: true,
         goflags: goflags ?? base!.envVariable("GOFLAGS") ?? "",
         cgo: cgoEnv == "1",
       )
@@ -218,7 +219,13 @@ type Go {
       let cgo = JSON.decode(`${toolchain.field(path: ["toolchain", "cgo"]).contents}`) :: Boolean!
       if (release or (cgo and cgoEnv != "0" and cgoEnv != "1")) {
         let env = baseGoEnv
-        lib.scan(ws, goflags: env.GOFLAGS, goVersion: env.GOVERSION, cgo: env.CGO_ENABLED == "1")
+        lib.scan(
+          ws,
+          test: true,
+          goflags: env.GOFLAGS,
+          goVersion: env.GOVERSION,
+          cgo: env.CGO_ENABLED == "1",
+        )
       } else {
         fromEnv
       }
@@ -227,7 +234,9 @@ type Go {
 
   # Ask a custom base's go, with goflags over the image's GOFLAGS.
   let baseGoEnv: {{GOVERSION: String!, CGO_ENABLED: String!, GOFLAGS: String!}}! {
-    let probed = if (goflags == null) { base! } else { base!.withEnvVariable("GOFLAGS", goflags!) }
+    let probed = if (goflags == null) { base! } else {
+      base!.withEnvVariable("GOFLAGS", goflags!)
+    }
     let env = probed.withoutEntrypoint.withExec(["go", "env", "-json", "GOVERSION", "CGO_ENABLED", "GOFLAGS"]).stdout
     JSON.decode(env) :: {{GOVERSION: String!, CGO_ENABLED: String!, GOFLAGS: String!}}!
   }
@@ -361,8 +370,12 @@ type Go {
     let excluded = generate.filter { p => p.hasPrefix("!") }.map { p => p.trimPrefix("!") }
     # One gomod call, which every module's listing shares, rather than a glob
     # of the workspace per module.
-    let includeDirs = if (generateAll) { empty } else { lib.goFileDirectories(ws, included) }
-    let excludeDirs = if (generateAll) { empty } else { lib.goFileDirectories(ws, excluded) }
+    let includeDirs = if (generateAll) { empty } else {
+      lib.goFileDirectories(ws, included)
+    }
+    let excludeDirs = if (generateAll) { empty } else {
+      lib.goFileDirectories(ws, excluded)
+    }
     # Split once per line: each field taken is work for every package line,
     # which counts on every build.
     moduleDiscoveryLines(ws, modulePath)
@@ -519,10 +532,18 @@ type GoPackages @collection {
       mountPath: mountPath,
       tool: tool,
       tests: entries.filter { entry => entry.directory == path }[0]!.tests,
+      generation: GoGenerateInputs(
+        modulePath: generation.modulePath,
+        source: generation.source,
+        version: generation.version,
+        failure: generation.failure,
+        directories: generation.directories.filter { dir => dir.path == path },
+      ),
     )
   }
 
   let module: GoModule!
+  let generation: GoGenerateInputs!
 
   """
   Binaries of the selected main packages for the engine's platform, one file
@@ -588,6 +609,7 @@ type GoPackage {
   let mountPath: String!
 
   let tool: Go!
+  let generation: GoGenerateInputs!
 
   let module(ws: Workspace!): GoModule! {
     tool.packageModule(ws, path, mountPath)
@@ -626,20 +648,8 @@ type GoPackage {
   """
   Run go generate in this package.
   """
-  generate(ws: Workspace!): Changeset! @generate {
-    let mod = module(ws)
-    let failure = mod.scanFailure(ws)
-    if (failure != null) {
-      raise failure
-    }
-    let dirs = mod.generateDirsIn(ws, [path])
-    if (dirs.length == 0) {
-      directory.changes(directory)
-    } else {
-      let before = directory.withDirectory(mod.path, mod.generateSource(ws))
-      let after = before.withDirectory(mod.path, mod.generatedTree(ws, dirs))
-      after.changes(before)
-    }
+  generate: Changeset! @generate {
+    tool.goModuleAt(generation.modulePath, mountPath).generateFrom(generation)
   }
 }
 
@@ -803,11 +813,13 @@ type GoModule {
       if (next != paths.length) { raise "package catalogue does not contain every selected path" }
       selected
     }
+    let inputs = if (records.any { pkg => pkg.tests.length > 0 }) { testInputs(ws) } else { null }
     GoPackages(
       paths: paths,
       mountPath: mountPath,
       tool: tool,
       module: self,
+      generation: generationInputs(ws, paths),
       entries: records.map { pkg =>
         let dir = relativeDir(pkg.directory)
         GoPackageSelection(
@@ -816,6 +828,7 @@ type GoModule {
             names: pkg.tests.uniq,
             directory: dir,
             module: self,
+            inputs: inputs,
           ),
         )
       },
@@ -1045,9 +1058,13 @@ type GoModule {
   Go container for this module, before source is added.
   """
   base(ws: Workspace!): Container! {
+    baseFor(if (baseImage == null) { toolchainVersion(ws) } else { "" })
+  }
+
+  let baseFor(version: String!): Container! {
     prepareBase(
       if (baseImage == null) {
-        gomod.goContainer(toolchainVersion(ws))
+        gomod.goContainer(version)
       } else {
         gomod.withGoCaches(baseImage.withoutEntrypoint)
       },
@@ -1203,25 +1220,68 @@ type GoModule {
   output of the ones before it.
   """
   let generateExec(ws: Workspace!, dirs: [String!]!): Container! {
-    let initial = base(ws).withDirectory(".", source(ws, generate: true))
-    dirs.reduce(GoGeneration(container: initial, value: "")) { state, dir =>
-      let value = lib.at(path).generateContainer(ws, dir)
-      let ctr = if (value == state.value) {
+    generateExecFrom(prepareGeneration(ws, dirs))
+  }
+
+  let generationInputs(ws: Workspace!, pkgPaths: [String!]!): GoGenerateInputs! {
+    let failure = scanFailure(ws)
+    if (failure != null) {
+      GoGenerateInputs(modulePath: path, version: "", failure: failure, directories: [])
+    } else {
+      prepareGeneration(ws, generateDirsIn(ws, pkgPaths))
+    }
+  }
+
+  let prepareGeneration(ws: Workspace!, dirs: [String!]!): GoGenerateInputs! {
+    GoGenerateInputs(
+      modulePath: path,
+      source: if (dirs.length == 0) { null } else { source(ws, generate: true) },
+      version: if (dirs.length == 0 or baseImage != null) { "" } else { toolchainVersion(ws) },
+      directories: dirs.map { dir =>
+        {
+          let value = lib.at(path).generateContainer(ws, dir)
+          GoGenerateDirectory(
+            path: dir,
+            value: value,
+            container: if (value == "") { null } else { ws.resolve(value).container.withoutEntrypoint },
+          )
+        } rescue {
+          err: Error => GoGenerateDirectory(path: dir, value: "", failure: err.message)
+        }
+      },
+    )
+  }
+
+  let generateFrom(inputs: GoGenerateInputs!): Changeset! {
+    if (inputs.failure != null) {
+      raise inputs.failure!
+    } else if (inputs.directories.length == 0) {
+      directory.changes(directory)
+    } else {
+      let before = directory.withDirectory(path, inputs.source!.directory(path))
+      let after = before.withDirectory(path, generateExecFrom(inputs).directory("."))
+      after.changes(before)
+    }
+  }
+
+  let generateExecFrom(inputs: GoGenerateInputs!): Container! {
+    let initial = baseFor(inputs.version).withDirectory(".", inputs.source!)
+    inputs.directories.reduce(GoGeneration(container: initial, value: "")) { state, dir =>
+      if (dir.failure != null) { raise dir.failure! }
+      let ctr = if (dir.value == state.value) {
         state.container
       } else {
-        let selected = if (value == "") {
-          base(ws)
+        let selected = if (dir.value == "") {
+          baseFor(inputs.version)
         } else {
-          prepareBase(
-            gomod.withGoCaches(ws.resolve(value).container.withoutEntrypoint),
-          )
+          prepareBase(gomod.withGoCaches(dir.container!))
         }
         selected.withDirectory(mountPath, state.container.directory(mountPath))
       }
       GoGeneration(
-        value: value,
+        value: dir.value,
         container: ctr
-          .withWorkdir(mountPath + "/" + dir)
+          .withWorkdir(mountPath + "/" + dir.path)
           .withExec(["go", "generate", "."], experimentalPrivilegedNesting: true),
       )
     }.container.withWorkdir(mountPath + "/" + path)
@@ -1243,20 +1303,40 @@ type GoModule {
       .file("/usr/local/bin/otelgotest")
   }
 
+  # Form source views during input preparation, without setting up tools.
+  let testInputs(ws: Workspace!): GoTestInputs! {
+    GoTestInputs(
+      source: lib.at(path).sourceFromScan(ws, tool.discoveryScan(ws)),
+      testData: testData(ws),
+      configs: gomod.daggerConfigs(ws),
+      version: if (baseImage == null) { toolchainVersion(ws) } else { "" },
+      importPath: importPath(ws),
+    )
+  }
+
   """
   Test container with this module's sources, testdata, and otelgotest in
   place, before any test command runs.
   """
   let testEnv(ws: Workspace!): Container! {
+    testEnvFrom(base(ws), source(ws, test: true), testData(ws), gomod.daggerConfigs(ws))
+  }
+
+  let testEnvFrom(
+    base: Container!,
+    source: Directory!,
+    testData: Directory!,
+    configs: Directory!,
+  ): Container! {
     gomod
-      .withTool(base(ws), "otelgotest", testRunner)
-      .withDirectory(".", source(ws, test: true))
-      .withDirectory(".", testData(ws))
+      .withTool(base, "otelgotest", testRunner)
+      .withDirectory(".", source)
+      .withDirectory(".", testData)
       # A test that serves a Dagger module needs that module's config, which is
       # not a Go file and so is not in the source mount. Without it the serve
       # fails with "does not contain a dagger config file" even though the
       # module's Go code is right there.
-      .withDirectory(".", gomod.daggerConfigs(ws))
+      .withDirectory(".", configs)
       # Nested Dagger clients find the workspace boundary by walking up to .git.
       .withNewFile(".git/HEAD", "ref: refs/heads/main\n")
   }
@@ -1300,8 +1380,8 @@ type GoModule {
   """
   One command and report shared by every selected test in this Go module.
   """
-  let runTests(ws: Workspace!, packages: GoPackages!): GoTestResults! {
-    let moduleImportPath = importPath(ws)
+  let runTests(inputs: GoTestInputs!, packages: GoPackages!): GoTestResults! {
+    let moduleImportPath = inputs.importPath
     let discovered = packages
       .entries
       .filter { entry => packages.paths.contains(entry.directory) }
@@ -1328,7 +1408,12 @@ type GoModule {
       let names = tool.sorted(selected.reduce(empty) { all, tests => all + tests.names }.uniq)
       ["-run", "^(" + names.join("|") + ")$"]
     } else { empty }
-    let executed = testEnv(ws)
+    let executed = testEnvFrom(
+      baseFor(inputs.version),
+      inputs.source,
+      inputs.testData,
+      inputs.configs,
+    )
       .withWorkdir(path)
       .withEnvVariable("_EXPERIMENTAL_DAGGER_CLI_BIN", "/dev/.dagger/dagger")
       .withExec(
@@ -1345,7 +1430,9 @@ type GoModule {
       .withFile("/usr/local/bin/go-test-report", gomod.testReportIndexer)
       .withNewFile(
         "/go-test-selection.json",
-        JSON.encode(selected.map { tests => {{pkg: tests.pkg, names: tests.names}} }),
+        JSON.encode(
+          selected.map { tests => {{pkg: tests.pkg, names: tests.names}} },
+        ),
       )
       .withExec([
         "/usr/local/bin/go-test-report",
@@ -1528,13 +1615,21 @@ type GoModule {
   # One package's binary for a platform. Only a main package selected by the
   # build setting has one.
   let binaryFile(ws: Workspace!, platform: String!, pkgPath: String!): File! {
-    buildFile(ws, platform, selectedMain(ws, pkgPath), binaryFileName(ws, pkgPath, platform))
+    buildFile(ws, platform, selectedMain(ws, pkgPath), binaryFileName(
+      ws,
+      pkgPath,
+      platform,
+    ))
   }
 
   # One package's binary for a platform with what go build writes next to
   # it: the C header of a c-archive or c-shared build.
   let binaryOutputs(ws: Workspace!, platform: String!, pkgPath: String!): Directory! {
-    buildOutputs(ws, platform, selectedMain(ws, pkgPath), binaryFileName(ws, pkgPath, platform))
+    buildOutputs(ws, platform, selectedMain(ws, pkgPath), binaryFileName(
+      ws,
+      pkgPath,
+      platform,
+    ))
   }
 
   # A package's directory relative to the module, which must be a main
@@ -1744,12 +1839,13 @@ type GoTests @collection {
   let directory: String!
 
   let module: GoModule!
+  let inputs: GoTestInputs
 
   """
   The test function with this name.
   """
   function(name: String!): GoTest! @get {
-    GoTest(name: name, directory: directory, module: module)
+    GoTest(name: name, directory: directory, module: module, inputs: inputs!)
   }
 
   """
@@ -1785,13 +1881,43 @@ type GoTest {
   let directory: String!
 
   let module: GoModule!
+  let inputs: GoTestInputs!
 
   """
   Run go tests
   """
-  test(ws: Workspace!, selection: GoPackages!): Void @check {
-    module.runTests(ws, selection).assertPassed(directory, module.packagePath(directory), name)
+  test(selection: GoPackages!): Void @check {
+    module.runTests(inputs, selection).assertPassed(
+      directory,
+      module.packagePath(directory),
+      name,
+    )
   }
+}
+
+# Source inputs shared by the tests in one module. Tool setup stays in evaluation.
+type GoTestInputs {
+  let source: Directory!
+  let testData: Directory!
+  let configs: Directory!
+  let version: String!
+  let importPath: String!
+}
+
+# Prepared source and container inputs. Commands stay in evaluation.
+type GoGenerateInputs {
+  let modulePath: String!
+  let source: Directory
+  let version: String!
+  let failure: String
+  let directories: [GoGenerateDirectory!]!
+}
+
+type GoGenerateDirectory {
+  let path: String!
+  let value: String!
+  let container: Container
+  let failure: String
 }
 
 # Carry workspace files across changes in the generation container.
