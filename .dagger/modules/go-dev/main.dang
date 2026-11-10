@@ -2313,7 +2313,11 @@ type GoDev {
       + (if (passed > 0) { ["✔", `${passed}`, "passed"] } else { [] })
     let collection = if (failed > 0) { ["✘", "1", "failed"] } else { ["✔", "1", "passed"] }
     let flat = top.length == 1 and items.length == 0 and checkTally(top[0]!) == expected
-    flat or (top.length == 1 and items.length == 1 and checkTally(top[0]!) == collection and checkTally(items[0]!) == expected)
+    # A grouped report nests the items' totals under their collection check.
+    # Its top header counts the collection, or, as v1.0.0-beta.26's does, the
+    # items again.
+    let grouped = top.length == 1 and items.length == 1 and checkTally(items[0]!) == expected
+    flat or (grouped and (checkTally(top[0]!) == collection or checkTally(top[0]!) == expected))
   }
 
   let checkHeaderAt(line: String!, indent: String!): Boolean! {
@@ -2346,6 +2350,10 @@ type GoDev {
     assert(checkSummaryMatches("  CHECKS  ✔ 8 passed\n", 8, 0) == false, "accepted a nested header alone")
     assert(checkSummaryMatches("CHECKS  ✔ 8 passed\nCHECKS  ✔ 8 passed\n", 8, 0) == false, "accepted duplicate top headers")
     assert(checkSummaryMatches("CHECKS  ✔ 2 passed\n  CHECKS  ✔ 8 passed\n", 8, 0) == false, "accepted more than one collection")
+    let itemsAtTop = "CHECKS  ✘ 2 failed  ✔ 6 passed\n✘ go/modules/packages/tests/test 1.0s ERROR\n  CHECKS  ✘ 2 failed  ✔ 6 passed\n"
+    assert(checkSummaryMatches(itemsAtTop, 6, 2), "a grouped report counting the items at the top was not recognized")
+    assert(checkSummaryMatches(itemsAtTop, 7, 1) == false, "accepted other totals from a grouped report counting the items at the top")
+    assert(checkSummaryMatches("CHECKS  ✔ 8 passed\n  CHECKS  ✘ 1 failed  ✔ 7 passed\n", 7, 1) == false, "accepted a top count that disagrees with the items")
     assert(checkSummaryMatches("CHECKS  ✔ 1 passed\n  CHECKS  ✔ 8 passed\n  CHECKS  ✔ 8 passed\n", 8, 0) == false, "accepted duplicate headers")
     null
   }
