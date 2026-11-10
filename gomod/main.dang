@@ -48,7 +48,7 @@ type Gomod {
     ws: Workspace!,
     include: [String!]! = [],
     exclude: [String!]! = [],
-  ): [GoMod!]! {
+  ): [Module!]! {
     # Answered from the workspace directly rather than from the scan, so that
     # listing modules never builds or runs the scanner.
     let declared = ws
@@ -64,12 +64,12 @@ type Gomod {
       .filter { mod => mod.goFiles!.length > 0 }
   }
 
-  # Each module's own Go files, keyed by module path, as GoMod.unsortedOwnFiles
+  # Each module's own Go files, keyed by module path, as Module.unsortedOwnFiles
   # lists them. Globbing once per module was a workspace call per module, and
   # each module's glob covered the modules nested in it again; this globs once
   # per outermost module and gives each file to the deepest module root above
   # it.
-  let goFilesByModule(ws: Workspace!, mods: [GoMod!]!): Map[[String!]!]! {
+  let goFilesByModule(ws: Workspace!, mods: [Module!]!): Map[[String!]!]! {
     let none: Map[[String!]!]! = [:]
     mods
       .filter { mod =>
@@ -87,7 +87,7 @@ type Gomod {
   path is taken as a module root and no lookup happens, which is what lets a
   caller ask about a root that does not exist on disk.
   """
-  module(ws: Workspace!, path: String!, findUp: Boolean! = true): GoMod! {
+  module(ws: Workspace!, path: String!, findUp: Boolean! = true): Module! {
     at(if (findUp) { findRootUp(ws, path) } else { path })
   }
 
@@ -100,8 +100,8 @@ type Gomod {
   "is this root selected?" or "what does this root mount?" should not oblige it
   to carry a Workspace it has no other use for.
   """
-  at(path: String!): GoMod! {
-    GoMod(path: normalize(path), includeExtraFiles: includeExtraFiles, goFiles: null)
+  at(path: String!): Module! {
+    Module(path: normalize(path), includeExtraFiles: includeExtraFiles, goFiles: null)
   }
 
   """
@@ -113,7 +113,7 @@ type Gomod {
   below, so that directory is the natural unit to lint, whatever Go modules it
   happens to cross.
 
-  `select` takes a tool's selection patterns, as `GoMod.selected` reads them.
+  `select` takes a tool's selection patterns, as `Module.selected` reads them.
   Roots they leave out are dropped before their Go modules are worked out,
   which takes several workspace calls per root: a vendor tree full of
   dependencies' own linter configs would otherwise cost those calls for every
@@ -692,7 +692,9 @@ A tool module keeps its own module type, because the type is what its callers
 see and each tool has its own fields and verbs to put on it. That type holds
 one of these and forwards the mechanics to it.
 """
-type GoMod {
+# This type is distinct from Gomod under the beta.26 naming rules: GoMod
+# and Gomod would both be exported as Gomod.
+type Module {
   """
   Workspace-relative path of this module root.
   """
@@ -712,8 +714,8 @@ type GoMod {
   goFiles: [String!]
 
   # This module with its Go files set.
-  let withGoFiles(files: [String!]!): GoMod! {
-    GoMod(path: path, includeExtraFiles: includeExtraFiles, goFiles: files)
+  let withGoFiles(files: [String!]!): Module! {
+    Module(path: path, includeExtraFiles: includeExtraFiles, goFiles: files)
   }
 
   # byModule with the own Go files of this module and of each module root below

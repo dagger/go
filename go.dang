@@ -321,7 +321,7 @@ type Go {
     }
   }
 
-  # Whether a workspace path is selected by patterns, as gomod's GoMod.selected
+  # Whether a workspace path is selected by patterns, as gomod's Module.selected
   # decides it: a pattern selects its path and everything under it, "**" and
   # "*" select everything, "!" excludes, and no selecting pattern selects all.
   let selectedBy(at: String!, patterns: [String!]!): Boolean! {
@@ -1136,7 +1136,7 @@ type GoModule {
     if (dir == ".") { path } else { subpathOf(normalized(path), dir) }
   }
 
-  # GoMod.subpath, GoMod.selected and Gomod.normalize, in process. Through gomod
+  # Module.subpath, Module.selected and Gomod.normalize, in process. Through gomod
   # each is a module call, with the fixed per-call cost of one, for a few string
   # operations; discovery makes one for every package directory.
   let subpathOf(root: String!, relativePath: String!): String! {
