@@ -342,6 +342,35 @@ type GoDev {
     }
     assert(failed.contains("Go tests in sub:"), "a package failure did not name the package: " + failed)
     assert(failed.contains("ran in sub"), "a test failure lost its subtest diagnostics: " + failed)
+
+    # A source error stays with its module until one of its tests runs.
+    let malformed = directory
+      .withNewFile("good/go.mod", "module example.com/good\n\ngo 1.26.1\n")
+      .withNewFile("good/good_test.go", "package good\nimport \"testing\"\nfunc TestGood(t *testing.T) {}\n")
+      .withNewFile("bad/go.mod", "module example.com/bad\n\ngo 1.26.1\n")
+      .withNewFile("bad/good_test.go", "package bad\nimport \"testing\"\nfunc TestBad(t *testing.T) {}\n")
+      .withNewFile("bad/bad.go", "package bad\nimport (\n")
+      .asWorkspace
+    let modules = go.modules(malformed)
+    let listed = modules.keys.map { key => modules.get(key: key).packages(malformed) }
+    assert(listed.length == 2, "a source error removed a module")
+    assert(listed[0]!.get(key: "bad").tests.keys == ["TestBad"], "a source error removed test names")
+    assert(listed[1]!.get(key: "good").tests.keys == ["TestGood"], "a source error removed valid test names")
+    run(
+      listed[1]!.get(key: "good").tests.get(key: "TestGood").test(selection: listed[1]!),
+    )
+    let malformedFailure = {
+      run(
+        listed[0]!.get(key: "bad").tests.get(key: "TestBad").test(selection: listed[0]!),
+      )
+      "no failure"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(
+      malformedFailure.contains("bad/bad.go:2:10: expected ')', found 'EOF'"),
+      "the affected test lost its source error: " + malformedFailure,
+    )
     null
   }
 
