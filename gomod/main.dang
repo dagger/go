@@ -245,6 +245,29 @@ type Gomod {
   }
 
   """
+  The container go-includes runs in, before a workspace is mounted: the
+  helper built from gomod's own source in a pinned image, so it is the same
+  for every module. A cache that pre-warms Go builds, such as an engine
+  image's, holds it.
+  """
+  includesHelper: Container! {
+    # No cache volumes: the scan is an ordinary result, which another engine
+    # can pull from the remote cache.
+    container
+      .from(goImage(scannerVersion))
+      # The same download retry as withGoCaches.
+      .withEnvVariable("GOPROXY", "https://proxy.golang.org|https://proxy.golang.org|direct")
+      .withoutEntrypoint
+      .withWorkdir("/helpers/go-includes")
+      .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
+      # A fresh engine compiles the standard library for this build, and
+      # skipping inlining there cuts the build by about a quarter. The scan
+      # loses about 25 ms without inlining, and the GC setting it runs with
+      # wins that back (see go-includes/main.go).
+      .withExec(["go", "build", "-gcflags=std=-l", "-o", "/usr/local/bin/go-includes", "."])
+  }
+
+  """
   Scanner container that computes includes for every module in one local pass
   over a content-addressed Go-source snapshot of the workspace. It reads the
   snapshot from the local filesystem, so the exec caches on source content and
@@ -259,25 +282,52 @@ type Gomod {
     # workspace syncs: the fields of {{ }} run at once. Left in one chain, the
     # sync would come first, as the chain's argument.
     let parts = {{
-      # No cache volumes: the scan is an ordinary result, which another engine
-      # can pull from the remote cache.
-      helper: container.from("golang:" + scannerVersion + "-alpine")
-        # The same download retry as withGoCaches.
-        .withEnvVariable("GOPROXY", "https://proxy.golang.org|https://proxy.golang.org|direct")
-        .withoutEntrypoint
-        .withWorkdir("/helpers/go-includes")
-        .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
-        # A fresh engine compiles the standard library for this build, and
-        # skipping inlining there cuts the build by about a quarter. The scan
-        # loses about 25 ms without inlining, and the GC setting it runs with
-        # wins that back (see go-includes/main.go).
-        .withExec(["go", "build", "-gcflags=std=-l", "-o", "/usr/local/bin/go-includes", "."])
-        .sync,
-      source: ws.directory("/", include: ["**/*.go", "**/go.mod"]).sync,
+      helper: includesHelper.sync,
+      source: goSource(ws).sync
     }}
-    parts.helper
+    parts
+      .helper
       .withMountedDirectory("/ws", parts.source)
       .withWorkdir("/ws")
+  }
+
+  """
+  Include patterns for every file in the workspace that a Go build can need
+  and that its name alone picks out: Go files, cgo and assembly sources,
+  go.mod, go.sum and the rest of a module's includeBase, at any depth.
+  """
+  goSourceInclude: [String!]! = [
+    "**/*.go",
+    "**/*.c",
+    "**/*.cc",
+    "**/*.cpp",
+    "**/*.cxx",
+    "**/*.h",
+    "**/*.hh",
+    "**/*.hpp",
+    "**/*.hxx",
+    "**/*.s",
+    "**/*.S",
+    "**/*.syso",
+    "**/go.mod",
+    "**/go.sum",
+    "go.work",
+    "go.work.sum",
+    "vendor/modules.txt",
+    "**/default.pgo",
+  ]
+
+  """
+  The workspace's files that goSourceInclude matches.
+
+  The scan reads it, and so does every module's source, so a build reads them
+  from the client once: the engine answers a repeated workspace read from the
+  same session without reading again. A module's source reads again only the
+  patterns this doesn't cover, such as its embedded files, whose patterns name
+  the directories they are in, so that read skips the rest of the workspace.
+  """
+  goSource(ws: Workspace!): Directory! {
+    ws.directory("/", include: goSourceInclude)
   }
 
   """
@@ -315,9 +365,7 @@ type Gomod {
     let versionFlags = if (goVersion == "") { [] } else { ["--go-version", goVersion] }
     let cgoFlags = if (cgo) { ["--cgo"] } else { [] }
     scanner(ws)
-      .withExec(
-        ["go-includes", "--output-dir", "/output"] + testFlags + generateFlags + goflagsFlags + versionFlags + cgoFlags,
-      )
+      .withExec(["go-includes", "--output-dir", "/output"] + testFlags + generateFlags + goflagsFlags + versionFlags + cgoFlags)
       .directory("/output")
   }
 
@@ -359,6 +407,25 @@ type Gomod {
         .directory("/", include: includePatterns, exclude: exclude)
         .glob(glob)
         .length > 0
+    }
+  }
+
+  """
+  Workspace directories holding Go files that patterns match, in Dagger's own
+  glob syntax: a pattern selects the directories of the files `<pattern>/*.go`
+  matches. Every module's package listing asks for the same directories, so
+  as a call here they are globbed once per listing rather than once per module.
+  """
+  goFileDirectories(ws: Workspace!, patterns: [String!]!): [String!]! {
+    let empty: [String!]! = []
+    patterns.reduce(empty) { dirs, pattern =>
+      dirs + ws
+        .glob(pattern.trimSuffix("/") + "/*.go")
+        .filter { file => file.hasSuffix("/") == false }
+        .map { file =>
+          let dir = file.split("/").dropLast(1).join("/")
+          if (dir == "") { "." } else { dir }
+        }
     }
   }
 
@@ -409,10 +476,18 @@ type Gomod {
   defaultGoVersion: String! { scannerVersion }
 
   """
-  The image goContainer starts from for a Go version.
+  The image goContainer starts from for a Go version. The version this
+  module's tools build with is named by digest, so a container from it
+  needs no registry lookup and is the same in every session. This is the
+  only definition of that image: go builds gobuild's own tool in it too,
+  so the tools of this workspace and gobuild's share one Go image.
   """
   goImage(version: String!): String! {
-    "golang:" + version + "-alpine"
+    if (version == scannerVersion) {
+      "golang:" + version + "-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb"
+    } else {
+      "golang:" + version + "-alpine"
+    }
   }
 
   """
@@ -630,9 +705,11 @@ type GoMod {
       .glob(subpath("**/*.go"))
       .filter { file => file.hasSuffix("/") == false }
       .map { file => file.trimPrefix("/").trimPrefix("./") }
-      .map { file => {{owner: deepestRoot(file, roots), file: file}} }
+      .map { file => {{owner: deepestRoot(file, roots), file}} }
       .filter { pair =>
-        goIgnores(if (pair.owner == ".") { pair.file } else { pair.file.trimPrefix(pair.owner + "/") }) == false
+        goIgnores(if (pair.owner == ".") { pair.file } else {
+          pair.file.trimPrefix(pair.owner + "/")
+        }) == false
       }
     mergeGroups(byModule, grouped(owned))
   }
@@ -666,7 +743,7 @@ type GoMod {
       .dropLast(1)
       .reduce({{dir: "", owner: path}}) { state, segment =>
         let dir = if (state.dir == "") { segment } else { state.dir + "/" + segment }
-        {{dir: dir, owner: if (roots.has(dir)) { dir } else { state.owner }}}
+        {{dir, owner: if (roots.has(dir)) { dir } else { state.owner }}}
       }
       .owner
   }
@@ -756,7 +833,7 @@ type GoMod {
       .dropLast(1)
       .reduce({{dir: "", found: false}}) { state, segment =>
         let dir = if (state.dir == "") { segment } else { state.dir + "/" + segment }
-        {{dir: dir, found: state.found or roots.has(dir)}}
+        {{dir, found: state.found or roots.has(dir)}}
       }
       .found
   }
@@ -787,20 +864,13 @@ type GoMod {
   let scanned(ws: Workspace!, test: Boolean!, generate: Boolean!): Directory! {
     let testFlags = if (test) { ["--test"] } else { [] }
     let generateFlags = if (generate) { ["--generate"] } else { [] }
-    # As Gomod.scanner, the helper builds while the workspace syncs.
+    # As in Gomod.scanner, the helper builds while the workspace syncs.
     let parts = {{
-      helper: container
-        .from("golang:" + gomod.scannerVersion + "-alpine")
-        # The same download retry as withGoCaches.
-        .withEnvVariable("GOPROXY", "https://proxy.golang.org|https://proxy.golang.org|direct")
-        .withoutEntrypoint
-        .withWorkdir("/helpers/go-includes")
-        .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
-        .withExec(["go", "build", "-gcflags=std=-l", "-o", "/usr/local/bin/go-includes", "."])
-        .sync,
-      source: ws.directory("/", include: ["**/*.go", "**/go.mod"]).sync,
+      helper: gomod.includesHelper.sync,
+      source: ws.directory("/", include: gomod.goSourceInclude).sync
     }}
-    parts.helper
+    parts
+      .helper
       .withMountedDirectory("/ws", parts.source)
       .withWorkdir("/ws")
       .withExec(["go-includes", "--output-dir", "/output"] + testFlags + generateFlags)
@@ -1019,7 +1089,38 @@ type GoMod {
   Source from an existing scan with the required test/generate mode.
   """
   sourceFromScan(ws: Workspace!, scan: Directory!, extra: [String!]! = []): Directory! {
-    ws.directory("/", include: includeExtraFiles + scanLines(scan, ".inc") + extra)
+    let goSourceInclude = gomod.goSourceInclude
+    let patterns = includeExtraFiles + scanLines(scan, ".inc") + extra
+    # A "!" pattern takes back files the patterns before it selected, which
+    # only one read of the whole list in order does. Any "!" counts: Dagger
+    # cleans a pattern's path before it looks for one, so "./!a.go" is "!a.go".
+    if (patterns.any { p => p.contains("!") }) {
+      ws.directory("/", include: patterns)
+    } else {
+      let covered = patterns.filter { p => coveredByGoSource(goSourceInclude, p) }
+      let rest = patterns.filter { p => coveredByGoSource(goSourceInclude, p) == false }
+      let goSource = ws.directory("/", include: goSourceInclude)
+      # Every pattern goSource was read with is among covered at the workspace
+      # root, so goSource is already that selection.
+      let own = if (goSourceInclude.all { p => covered.contains(p) }) {
+        goSource
+      } else {
+        goSource.filter(include: covered)
+      }
+      if (rest.length == 0) { own } else {
+        own.withDirectory(".", ws.directory("/", include: rest))
+      }
+    }
+  }
+
+  # Whether every path the include pattern p matches is one goSource holds:
+  # p is one of its patterns, or its last element is the last element of one
+  # of its "**/" patterns, which matches that name at any depth.
+  let coveredByGoSource(goSourceInclude: [String!]!, p: String!): Boolean! {
+    goSourceInclude.contains(p) or goSourceInclude.any { g =>
+      let name = g.trimPrefix("**/")
+      g.hasPrefix("**/") and (p == name or p.hasSuffix("/" + name))
+    }
   }
 
   """

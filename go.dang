@@ -15,6 +15,11 @@ type Go {
   """
   base: Container
 
+  # The container module downloads run with, if set: its environment, such
+  # as GOPROXY and GOPRIVATE, its credentials and its mounts. No compile
+  # reads it.
+  let downloads: Container
+
   new(
     """
     Go version for every module, overriding go.mod. Ignored when base is set.
@@ -24,6 +29,14 @@ type Go {
     Base image for Go containers. Must include a Go toolchain.
     """
     base: Container = null,
+    """
+    Container module downloads run with: its environment, such as GOPROXY
+    and GOPRIVATE, its credentials and its mounts, such as git configuration
+    or an SSH agent. Compiles never read it, so their results are shared
+    with builds that download differently. Null downloads with the Go
+    containers' own settings.
+    """
+    downloads: Container = null,
     """
     Extra workspace files to mount for Go commands, as include patterns.
     """
@@ -66,6 +79,7 @@ type Go {
       }
       self.version = if (base == null) { version } else { null }
       self.base = base
+      self.downloads = downloads
       self.includeExtraFiles = includeExtraFiles
       self.test = test
       self.generate = generate
@@ -81,6 +95,14 @@ type Go {
   Settings that were given but are ignored.
   """
   warnings: [String!]! = []
+
+  """
+  The image a Go container at version starts from, as every build here
+  names it.
+  """
+  image(version: String!): String! {
+    gomod.goImage(version)
+  }
 
   """
   Extra workspace files mounted for Go commands, as include patterns.
@@ -174,19 +196,47 @@ type Go {
   # The scan, discovering the tests go test builds as the test containers are
   # configured. With no settings to pass, it is the one scan every module and
   # tool shares. The default containers have no C compiler, so no cgo.
+  #
+  # A custom base brings its own GOFLAGS, cgo and toolchain. Its environment
+  # gives the first two without building it. Only its go knows its toolchain
+  # version, and whether cgo is on when CGO_ENABLED isn't "0" or "1" (go reads
+  # an empty value as unset, and then decides by whether there is a C
+  # compiler), so the base is built and asked only when a test file's
+  # constraints name a Go release or cgo.
   let discoveryScan(ws: Workspace!): Directory! {
     if (base == null) {
       lib.scan(ws, test: true, goflags: goflags ?? "", goVersion: version ?? "")
     } else {
-      let env = baseGoEnv
-      lib.scan(ws, test: true, goflags: env.GOFLAGS, goVersion: env.GOVERSION, cgo: env.CGO_ENABLED == "1")
+      let cgoEnv = base!.envVariable("CGO_ENABLED")
+      let fromEnv = lib.scan(
+        ws,
+        test: true,
+        goflags: goflags ?? base!.envVariable("GOFLAGS") ?? "",
+        cgo: cgoEnv == "1",
+      )
+      let toolchain = fromEnv.file("_discovery_index_.json").asJSON
+      let release = JSON.decode(`${toolchain.field(path: ["toolchain", "release"]).contents}`) :: Boolean!
+      let cgo = JSON.decode(`${toolchain.field(path: ["toolchain", "cgo"]).contents}`) :: Boolean!
+      if (release or (cgo and cgoEnv != "0" and cgoEnv != "1")) {
+        let env = baseGoEnv
+        lib.scan(
+          ws,
+          test: true,
+          goflags: env.GOFLAGS,
+          goVersion: env.GOVERSION,
+          cgo: env.CGO_ENABLED == "1",
+        )
+      } else {
+        fromEnv
+      }
     }
   }
 
-  # A custom base brings its own toolchain, C compiler and GOFLAGS, so ask its
-  # go, with goflags over the image's GOFLAGS.
+  # Ask a custom base's go, with goflags over the image's GOFLAGS.
   let baseGoEnv: {{GOVERSION: String!, CGO_ENABLED: String!, GOFLAGS: String!}}! {
-    let probed = if (goflags == null) { base! } else { base!.withEnvVariable("GOFLAGS", goflags!) }
+    let probed = if (goflags == null) { base! } else {
+      base!.withEnvVariable("GOFLAGS", goflags!)
+    }
     let env = probed.withoutEntrypoint.withExec(["go", "env", "-json", "GOVERSION", "CGO_ENABLED", "GOFLAGS"]).stdout
     JSON.decode(env) :: {{GOVERSION: String!, CGO_ENABLED: String!, GOFLAGS: String!}}!
   }
@@ -310,21 +360,6 @@ type Go {
       and excluding.any { p => paths.any { at => selectedBy(at, [p]) == false } } == false
   }
 
-  # Workspace directories holding Go files that patterns match, in Dagger's own
-  # glob syntax, as the generate setting is matched.
-  let matchingDirectories(ws: Workspace!, patterns: [String!]!): [String!]! {
-    let empty: [String!]! = []
-    patterns.reduce(empty) { dirs, pattern =>
-      dirs + ws
-        .glob(pattern.trimSuffix("/") + "/*.go")
-        .filter { file => file.hasSuffix("/") == false }
-        .map { file =>
-          let dir = file.split("/").dropLast(1).join("/")
-          if (dir == "") { "." } else { dir }
-        }
-    }
-  }
-
   # Workspace paths of the packages with something to do: tests to run in a
   # module the test setting selects, a main package the build setting selects,
   # or go:generate commands the generate setting selects.
@@ -333,17 +368,13 @@ type Go {
     let generateAll = generate.length == 1 and generate.contains("**")
     let included = generate.filter { p => p.hasPrefix("!") == false }
     let excluded = generate.filter { p => p.hasPrefix("!") }.map { p => p.trimPrefix("!") }
+    # One gomod call, which every module's listing shares, rather than a glob
+    # of the workspace per module.
     let includeDirs = if (generateAll) { empty } else {
-      matchingDirectories(
-        ws,
-        included,
-      )
+      lib.goFileDirectories(ws, included)
     }
     let excludeDirs = if (generateAll) { empty } else {
-      matchingDirectories(
-        ws,
-        excluded,
-      )
+      lib.goFileDirectories(ws, excluded)
     }
     # Split once per line: each field taken is work for every package line,
     # which counts on every build.
@@ -676,6 +707,52 @@ type GoPlatforms @collection {
 }
 
 """
+What a Go module's archives read from the cache that every build of the
+packages with the same toolchain, flags and go.sum shares. The results are
+references the cache keeps for as long as it keeps this: a caller takes each
+one's ID in its own session, as an engine image's entries do.
+"""
+type GoArchiveBuilds {
+  """
+  Each package's build, in the order the walk ran them: a directory of what
+  its exec wrote, with its archives.
+  """
+  builds: [Directory!]!
+
+  """
+  Each module download, in the order of its module cache directory name: a
+  directory of its plan pack and zip.
+  """
+  downloads: [Directory!]!
+
+  """
+  gobuild's gohdr, the tool the builds' execs run.
+  """
+  tool: File!
+
+  """
+  golangci-lint's write-manifest, which writes the archives' manifest.
+  """
+  manifestTool: File!
+
+  """
+  The source write-manifest is built from, golangci-lint's manifest module at
+  gobuild's pin, which a fresh engine would otherwise fetch to find its build.
+  """
+  manifestSource: Directory!
+
+  """
+  Go's own tools the builds run, built by its toolchain: pack.
+  """
+  tools: Directory!
+
+  """
+  gomod's go-includes helper.
+  """
+  helper: Container!
+}
+
+"""
 A platform a Go package can be built for.
 """
 type GoPlatform {
@@ -816,6 +893,13 @@ type GoModule {
   the GoModule type here is this module's own rather than the library's.
   """
   let lib: Gomod! { gomod(includeExtraFiles: includeExtraFiles) }
+
+  """
+  The per-package builder. Its own tool is built in the image of the Go
+  version the library's tools build with, which the library pins, so a build
+  pulls one Go image, which an engine image can ship.
+  """
+  let builder: Gobuild! { gobuild(toolImage: gomod.goImage(gomod.scannerVersion)) }
 
   """
   Whether tests are skipped for this module.
@@ -1238,7 +1322,12 @@ type GoModule {
     testEnvFrom(base(ws), source(ws, test: true), testData(ws), gomod.daggerConfigs(ws))
   }
 
-  let testEnvFrom(base: Container!, source: Directory!, testData: Directory!, configs: Directory!): Container! {
+  let testEnvFrom(
+    base: Container!,
+    source: Directory!,
+    testData: Directory!,
+    configs: Directory!,
+  ): Container! {
     gomod
       .withTool(base, "otelgotest", testRunner)
       .withDirectory(".", source)
@@ -1309,17 +1398,22 @@ type GoModule {
     if (selected.length == 0) { raise "no tests selected in module " + path }
     let empty: [String!]! = []
     let narrowed = discovered.any { tests => tests.narrowed }
-    let whole = packages.narrowed == false and narrowed == false
-    let dirs = if (whole) { ["./..."] } else {
-      tool.sorted(selected.map { tests => packageArg(tests.directory) })
-    }
+    # Only packages holding selected tests run: "./..." would also run the
+    # module's other packages, and one of them failing would fail every check.
+    # Discovery's order is stable, so the command is too without a sort.
+    let dirs = selected.map { tests => packageArg(tests.directory) }
     # Every check of the module evaluates this, so the names are only
     # gathered and sorted for the narrowed run that needs them.
     let run = if (narrowed) {
       let names = tool.sorted(selected.reduce(empty) { all, tests => all + tests.names }.uniq)
       ["-run", "^(" + names.join("|") + ")$"]
     } else { empty }
-    let executed = testEnvFrom(baseFor(inputs.version), inputs.source, inputs.testData, inputs.configs)
+    let executed = testEnvFrom(
+      baseFor(inputs.version),
+      inputs.source,
+      inputs.testData,
+      inputs.configs,
+    )
       .withWorkdir(path)
       .withEnvVariable("_EXPERIMENTAL_DAGGER_CLI_BIN", "/dev/.dagger/dagger")
       .withExec(
@@ -1336,7 +1430,9 @@ type GoModule {
       .withFile("/usr/local/bin/go-test-report", gomod.testReportIndexer)
       .withNewFile(
         "/go-test-selection.json",
-        JSON.encode(selected.map { tests => {{pkg: tests.pkg, names: tests.names}} }),
+        JSON.encode(
+          selected.map { tests => {{pkg: tests.pkg, names: tests.names}} },
+        ),
       )
       .withExec([
         "/usr/local/bin/go-test-report",
@@ -1471,7 +1567,7 @@ type GoModule {
     pkg: String!,
     name: String!,
   ): Directory! {
-    gobuild.binary(
+    builder.binary(
       base: ctr,
       # The toolchain image the base starts from, or the custom base it was
       # made from, so package execs can run in it without the base's
@@ -1484,6 +1580,7 @@ type GoModule {
       workdir: path,
       pkg: packageArg(pkg),
       output: name,
+      downloads: tool.downloads,
       flags: buildFlags,
     )
   }
@@ -1518,13 +1615,21 @@ type GoModule {
   # One package's binary for a platform. Only a main package selected by the
   # build setting has one.
   let binaryFile(ws: Workspace!, platform: String!, pkgPath: String!): File! {
-    buildFile(ws, platform, selectedMain(ws, pkgPath), binaryFileName(ws, pkgPath, platform))
+    buildFile(ws, platform, selectedMain(ws, pkgPath), binaryFileName(
+      ws,
+      pkgPath,
+      platform,
+    ))
   }
 
   # One package's binary for a platform with what go build writes next to
   # it: the C header of a c-archive or c-shared build.
   let binaryOutputs(ws: Workspace!, platform: String!, pkgPath: String!): Directory! {
-    buildOutputs(ws, platform, selectedMain(ws, pkgPath), binaryFileName(ws, pkgPath, platform))
+    buildOutputs(ws, platform, selectedMain(ws, pkgPath), binaryFileName(
+      ws,
+      pkgPath,
+      platform,
+    ))
   }
 
   # A package's directory relative to the module, which must be a main
@@ -1562,7 +1667,7 @@ type GoModule {
         .withExec(["go", "test", "-c", "-vet=off"] + buildFlags + ["-o", "/out/" + name, packageArg(rel)])
         .file("/out/" + name)
     } else {
-      gobuild.testBinary(
+      builder.testBinary(
         base: ctr,
         image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
         from: if (baseImage == null) { null } else { baseImage.withoutEntrypoint },
@@ -1572,6 +1677,7 @@ type GoModule {
         workdir: path,
         pkg: packageArg(rel),
         flags: buildFlags,
+        downloads: tool.downloads,
       )
     }
     out.sync rescue {
@@ -1582,37 +1688,124 @@ type GoModule {
 
   """
   The compiled packages a lint of this module reads, for golangci-lint's
-  export driver: a directory of their archives, the full output of go tool
-  compile -pack, under archives/, and manifest.json, which describes them:
-  the Go version, target and build tags they were compiled for, and for each
-  package, by import path, its archive and a digest of the files it was
-  compiled from.
+  export driver: a directory of their export data, the archives go tool
+  compile -pack -linkobj writes without the object code, under archives/,
+  the Go files cgo wrote for each cgo
+  package under cgo/, and manifest.json, which describes them: the Go
+  version, target and build tags they were compiled for, and for each
+  package, by its ID as go list -test names it, its archive, its cgo files
+  and output, and a digest of the files it was compiled from.
 
-  The packages are this module's, main packages included, and every package
-  they and their tests import, for the engine's platform, with buildFlags.
-  Each compiles in a cached exec of its own, as a binary's packages do, so
-  a package compiled the same way for a build is shared.
+  The packages are what go list -export -deps -test compiles for the
+  module: its packages, main packages included, their test variants and
+  external test packages, what is recompiled against those, and every
+  package they import, for the engine's platform, with buildFlags. With them
+  the driver compiles nothing and runs no cgo. Each compiles in a cached
+  exec of its own, as a binary's packages do, so a package compiled the same
+  way for a build or a test binary is shared.
   """
-  archives(ws: Workspace!): Directory! {
+  archives(
+    ws: Workspace!,
+    """
+    Only the packages from other modules and the standard library, keyed by
+    their content alone: an edit of this module's own packages leaves them
+    as they are.
+    """
+    dependencies: Boolean! = false,
+    """
+    The packages whose imports are archived, as go list patterns from the
+    module's directory, e.g. ["."] for what its root package type-checks
+    against.
+    """
+    packages: [String!]! = ["./..."],
+    """
+    Without the packages' test variants and external test packages, and
+    what only they import, which a lint reads.
+    """
+    noTests: Boolean! = false,
+  ): Directory! {
     let ctr = platformBase(ws, gomod.hostPlatform)
     let flags = buildFlags + (ctr.envVariable("GOFLAGS") ?? "").split(" ").filter { f => f != "" }
     if (gccgo(flags)) {
       raise "Go module " + path + ": a gccgo build has no archives for the export driver, which reads gc's"
     }
-    let out = gobuild.archives(
+    let out = builder.archives(
       base: ctr,
       image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
       from: if (baseImage == null) { null } else { baseImage.withoutEntrypoint },
-      source: source(ws, test: true),
+      source: source(ws, test: noTests == false),
       headers: lib.scan(ws).sync.file("_headers_.gohdr"),
       mountPath: mountPath,
       workdir: path,
       flags: buildFlags,
+      dependencies: dependencies,
+      downloads: tool.downloads,
+      packages: packages,
+      tests: noTests == false,
     )
     out.sync rescue {
       err: Error => raise "Go archives of module " + path + ": " + err.message
     }
     out
+  }
+
+  """
+  What archives reads from the cache that every build of the packages with
+  the same toolchain, flags and go.sum shares (GoArchiveBuilds). A cache
+  that is to have exactly these results, such as the cache an engine image
+  pre-warms, is filled from them. The arguments are archives'.
+  """
+  archiveBuilds(
+    ws: Workspace!,
+    """
+    Only the packages from other modules and the standard library.
+    """
+    dependencies: Boolean! = false,
+    """
+    The packages whose imports are compiled, as go list patterns from the
+    module's directory.
+    """
+    packages: [String!]! = ["./..."],
+    """
+    Without the packages' test variants and external test packages, and
+    what only they import.
+    """
+    noTests: Boolean! = false,
+  ): GoArchiveBuilds! {
+    let ctr = platformBase(ws, gomod.hostPlatform)
+    let flags = buildFlags + (ctr.envVariable("GOFLAGS") ?? "").split(" ").filter { f => f != "" }
+    if (gccgo(flags)) {
+      raise "Go module " + path + ": a gccgo build has no archives"
+    }
+    {
+      let cache = builder.archiveBuilds(
+        base: ctr,
+        image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
+        from: if (baseImage == null) { null } else { baseImage.withoutEntrypoint },
+        source: source(ws, test: noTests == false),
+        headers: lib.scan(ws).sync.file("_headers_.gohdr"),
+        mountPath: mountPath,
+        workdir: path,
+        flags: buildFlags,
+        dependencies: dependencies,
+        downloads: tool.downloads,
+        packages: packages,
+        tests: noTests == false,
+      )
+      # A list of objects from a call becomes a list by a selection on
+      # each: sync gives back the object it's selected on.
+      GoArchiveBuilds(
+        builds: cache.builds.{{sync}}.map { build => build.sync },
+        downloads: cache.downloads.{{sync}}.map { download => download.sync },
+        tool: cache.tool,
+        manifestTool: cache.manifestTool,
+        manifestSource: cache.manifestSource,
+        tools: cache.tools,
+        helper: gomod.includesHelper,
+      )
+    } rescue {
+      err: Error => raise "Go archive builds of module " + path + ": " + err.message
+    }
   }
 
   # The binaries of the main packages among pkgPaths, one build each: they
@@ -1694,7 +1887,11 @@ type GoTest {
   Run go tests
   """
   test(selection: GoPackages!): Void @check {
-    module.runTests(inputs, selection).assertPassed(directory, module.packagePath(directory), name)
+    module.runTests(inputs, selection).assertPassed(
+      directory,
+      module.packagePath(directory),
+      name,
+    )
   }
 }
 

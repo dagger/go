@@ -1,0 +1,220 @@
+package main
+
+import (
+	"reflect"
+	"testing"
+)
+
+func TestParseGoSums(t *testing.T) {
+	got := parseGoSums([]string{
+		"github.com/A/b v1.0.0 h1:zip=\n" +
+			"github.com/A/b v1.0.0/go.mod h1:mod=\n" +
+			"example.com/only v0.1.0/go.mod h1:onlymod=\n" +
+			"not a line\n" +
+			"example.com/bad v1 nothash\n",
+		// A second go.sum repeats an entry and adds one.
+		"github.com/A/b v1.0.0 h1:zip=\n" +
+			"golang.org/x/sys v0.42.0 h1:sys=\n",
+	})
+	want := []sumEntry{
+		{path: "example.com/only", version: "v0.1.0", mod: "h1:onlymod="},
+		{path: "github.com/A/b", version: "v1.0.0", zip: "h1:zip=", mod: "h1:mod="},
+		{path: "golang.org/x/sys", version: "v0.42.0", zip: "h1:sys="},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("parseGoSums:\n got %+v\nwant %+v", got, want)
+	}
+}
+
+func TestEscapeModule(t *testing.T) {
+	for in, want := range map[string]string{
+		"github.com/Azure/go-autorest": "github.com/!azure/go-autorest",
+		"golang.org/x/sys":             "golang.org/x/sys",
+		"v1.0.0-RC1":                   "v1.0.0-!r!c1",
+	} {
+		if got := escapeModule(in); got != want {
+			t.Errorf("escapeModule(%q) = %q, want %q", in, got, want)
+		}
+		if got := unescapeModule(escapeModule(in)); got != in {
+			t.Errorf("unescapeModule(escapeModule(%q)) = %q", in, got)
+		}
+	}
+}
+
+func TestMatchPrefixPatterns(t *testing.T) {
+	for _, c := range []struct {
+		patterns, path string
+		want           bool
+	}{
+		{"example.com", "example.com/private/repo", true},
+		{"example.com/private", "example.com/private/repo", true},
+		{"example.com/private", "example.com/public/repo", false},
+		{"*.corp.example.com", "git.corp.example.com/team/repo", true},
+		{"*.corp.example.com", "corp.example.com/repo", false},
+		{"github.com/org/*", "github.com/org/repo/sub", true},
+		{"github.com/org/*", "github.com/other/repo", false},
+		{" a.com , example.com/x/ ", "example.com/x/y", true},
+		{"", "example.com", false},
+		{"example.com/a/b/c", "example.com/a", false},
+	} {
+		if got := matchPrefixPatterns(c.patterns, c.path); got != c.want {
+			t.Errorf("matchPrefixPatterns(%q, %q) = %v, want %v", c.patterns, c.path, got, c.want)
+		}
+	}
+}
+
+func TestProviders(t *testing.T) {
+	byPath := map[string][]sumEntry{
+		"github.com/a/b":           {{path: "github.com/a/b", version: "v1.0.0", zip: "h1:x"}},
+		"github.com/a/b/v2":        {{path: "github.com/a/b/v2", version: "v2.1.0", zip: "h1:y"}},
+		"golang.org/x/sys":         {{path: "golang.org/x/sys", version: "v0.42.0", zip: "h1:z"}},
+		"cloud.google.com/go":      {{path: "cloud.google.com/go", version: "v0.1.0", zip: "h1:c"}},
+		"cloud.google.com/go/auth": {{path: "cloud.google.com/go/auth", version: "v0.2.0", zip: "h1:d"}},
+	}
+	for ip, want := range map[string]string{
+		"github.com/a/b":                 "github.com/a/b",
+		"github.com/a/b/pkg/sub":         "github.com/a/b",
+		"github.com/a/b/v2/pkg":          "github.com/a/b/v2",
+		"github.com/a/bc":                "",
+		"golang.org/x/sys/unix":          "golang.org/x/sys",
+		"cloud.google.com/go/auth/oauth": "cloud.google.com/go/auth",
+		"cloud.google.com/go/storage":    "cloud.google.com/go",
+		"fmt":                            "",
+		"dagger/gobuild/internal/dagger": "",
+	} {
+		got := ""
+		if es := providers(byPath, ip); len(es) > 0 {
+			got = es[0].path
+		}
+		if got != want {
+			t.Errorf("providers(%q) = %q, want %q", ip, got, want)
+		}
+	}
+}
+
+func TestSourceImports(t *testing.T) {
+	src := parseSourceImports(newTarget("linux\narm64\n0\ngo1.27.3\n", nil), "mod . example.com/root\n"+
+		"mod tools example.com/root/tools\n"+
+		".\tmain.go\t-\texample.com/root/lib fmt\n"+
+		"lib\tlib.go\t-\tgithub.com/dep/x\n"+
+		"tools/cmd\tmain.go\t-\texample.com/root/tools/inner\n"+
+		"tools/inner\tinner.go\t-\tgolang.org/x/sys/unix\n")
+	for ip, want := range map[string]string{
+		"example.com/root":             ".",
+		"example.com/root/lib":         "lib",
+		"example.com/root/tools/cmd":   "tools/cmd",
+		"example.com/root/tools/inner": "tools/inner",
+		"example.com/root/missing":     "",
+		"github.com/dep/x":             "",
+	} {
+		dir, ok := src.dirOf(ip)
+		if !ok {
+			dir = ""
+		}
+		if dir != want {
+			t.Errorf("dirOf(%q) = %q, want %q", ip, dir, want)
+		}
+	}
+}
+
+func TestTargetMatchFile(t *testing.T) {
+	tg := newTarget("linux\narm64\n0\ngo1.27.3\n", []string{"extended"})
+	for _, c := range []struct {
+		name, expr string
+		want       bool
+	}{
+		{"a.go", "-", true},
+		{"a_linux.go", "-", true},
+		{"a_windows.go", "-", false},
+		{"a_arm64.go", "-", true},
+		{"a_amd64.go", "-", false},
+		{"a_linux_arm64.go", "-", true},
+		{"a_darwin_arm64.go", "-", false},
+		{"a_linux_test.go", "-", true},
+		{"tools.go", "tools", false},
+		{"x.go", "ignore", false},
+		{"x.go", "linux && !cgo", true},
+		{"x.go", "cgo", false},
+		{"x.go", "unix", true},
+		{"x.go", "go1.27", true},
+		{"x.go", "go1.28", false},
+		{"x.go", "extended", true},
+		{"x.go", "windows || darwin", false},
+	} {
+		if got := tg.matchFile(c.name, c.expr); got != c.want {
+			t.Errorf("matchFile(%q, %q) = %v, want %v", c.name, c.expr, got, c.want)
+		}
+	}
+}
+
+// planDirsOf follows imports from the package built, whatever their files'
+// build constraints, through the source and the downloaded modules' packages,
+// and no further: not into another package of a module, nor a module not
+// downloaded.
+func TestPlanDirsOf(t *testing.T) {
+	src := parseSourceImports(newTarget("linux\namd64\n0\ngo1.27.3\n", nil), "mod . example.com/root\n"+
+		"mod sub example.com/root/sub\n"+
+		"cmd\tmain.go\t-\texample.com/root/lib fmt\n"+
+		"lib\tlib_windows.go\t-\tgithub.com/dep/x/win\n"+
+		"lib\tlib.go\t-\texample.com/root/sub/inner\n"+
+		"sub/inner\tinner.go\t-\tgithub.com/dep/x\n"+
+		"unread\tunread.go\t-\tgithub.com/dep/y\n")
+	byPath := map[string][]sumEntry{
+		"github.com/dep/x": {{path: "github.com/dep/x", version: "v1.0.0", zip: "h1:x"}},
+		"github.com/dep/y": {{path: "github.com/dep/y", version: "v1.0.0", zip: "h1:y"}},
+		"github.com/dep/z": {{path: "github.com/dep/z", version: "v1.0.0", zip: "h1:z"}},
+	}
+	pkgs := map[string]modulePackages{
+		"github.com/dep/x@v1.0.0": {
+			all: map[string][]string{
+				"github.com/dep/x":       {"github.com/dep/z/zz"},
+				"github.com/dep/x/win":   {"golang.org/x/sys/windows"},
+				"github.com/dep/x/other": nil,
+			},
+			dirs: map[string]string{
+				"github.com/dep/x":       "github.com/dep/x@v1.0.0",
+				"github.com/dep/x/win":   "github.com/dep/x@v1.0.0/win",
+				"github.com/dep/x/other": "github.com/dep/x@v1.0.0/other",
+			},
+		},
+	}
+	got := planDirsOf(src, "cmd", byPath, pkgs)
+	want := planDirs{
+		src:  []string{"cmd", "lib", "sub/inner"},
+		mods: []string{"github.com/dep/x@v1.0.0", "github.com/dep/x@v1.0.0/win"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("planDirsOf:\n got %+v\nwant %+v", got, want)
+	}
+}
+
+// A package in a testdata directory is followed when the build names it, and
+// left out of a build of every package, as "./..." leaves it out.
+func TestPlanDirsOfTestdata(t *testing.T) {
+	src := parseSourceImports(newTarget("linux\namd64\n0\ngo1.27.3\n", nil), "mod . example.com/root\n"+
+		"mod testdata/fixture example.com/fixture\n"+
+		"lib\tlib.go\t-\t\n"+
+		"testdata/fixture/cmd\tmain.go\t-\texample.com/fixture/inner\n"+
+		"testdata/fixture/inner\tinner.go\t-\t\n")
+	if got, want := planDirsOf(src, "testdata/fixture/cmd", nil, nil).src, []string{"testdata/fixture/cmd", "testdata/fixture/inner"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("planDirsOf(testdata/fixture/cmd).src = %q, want %q", got, want)
+	}
+	if got, want := planDirsOf(src, "", nil, nil).src, []string{"lib"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("planDirsOf(every package).src = %q, want %q", got, want)
+	}
+}
+
+// A package in a directory a go.mod replaces a module with is followed by the
+// replaced module's import paths, whatever module path its own go.mod
+// declares, as the go command accepts.
+func TestPlanDirsOfReplace(t *testing.T) {
+	src := parseSourceImports(newTarget("linux\namd64\n0\ngo1.27.3\n", nil), "mod . example.com/app\n"+
+		"mod fork example.com/fork\n"+
+		"repl fork example.com/original\n"+
+		".\tmain.go\t-\texample.com/original/pkg\n"+
+		"fork/pkg\tpkg.go\t-\t\n"+
+		"fork/other\tother.go\t-\t\n")
+	if got, want := planDirsOf(src, ".", nil, nil).src, []string{".", "fork/pkg"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("planDirsOf(.).src = %q, want %q", got, want)
+	}
+}

@@ -13,7 +13,10 @@ type GoDev {
   let mountPathFixturePath: String! = "testdata/go-module-mount-path"
   let noPackagesFixturePath: String! = "testdata/go-module-no-packages"
   let vendoredFixturePath: String! = "testdata/go-module-vendored"
+  let downloadsFixturePath: String! = "testdata/go-module-downloads"
   let unreadableFixturePath: String! = "fixtures/go-module-unreadable"
+  # The golangci-lint archivesCheck lints with, a release that lints Go 1.27.
+  let lintVersion: String! = "2.15.0"
   # The other modules in this repository keep their own fixtures, and several
   # of theirs fail on purpose: golangci-lint's does not even compile.
   let siblingFixtures: [String!]! = ["!golangci-lint", "!staticcheck"]
@@ -834,7 +837,8 @@ type GoDev {
   A module whose go directive asks for a newer Go than the base's builds with
   the toolchain the go command switches to, as go build would, and the
   binary reports that Go; so does a dependency that asks for it too, served
-  from a file proxy in the base, the toolchain from the default proxy.
+  from a file proxy in the base, the toolchain from the default proxy. The
+  module's archives are that Go's too, as their manifest says.
   """
   toolchainSwitchCheck: Void @check {
     let dep = directory
@@ -861,7 +865,93 @@ type GoDev {
     let built = go(base: base).modules(ws).get(key: ".").packages(ws).get(key: ".").binary(ws)
     let out = base.withFile("/usr/local/bin/switch", built).withExec(["switch"]).stdout
     assert(out == "go1.26.1 42\n", "the binary's Go and its dependency: " + out)
+    # The archives' manifest records the Go that compiled them, the one the
+    # go command switched to.
+    let manifest = go(base: base).module(ws, ".").archives(ws).file("manifest.json").contents
+    assert(manifest.contains("\"goVersion\": \"go1.26.1\""), "the archives' manifest: " + manifest)
     null
+  }
+
+  """
+  A build plans from the Go headers of the packages it may load: an import
+  added to a package outside the build leaves its plan as it was, and one
+  added to a package of the build makes a new plan. The base's go command
+  stamps the binary with a random value each time it plans (go build -n), so
+  the binary says whether its plan was made again.
+  """
+  planReuseCheck: Void @check {
+    let stamping = container
+      .from("golang:1.27.3-alpine")
+      .withNewFile(
+        "/stamp/go",
+        "#!/bin/sh\nif [ \"$1\" = build ]; then\n\tfor a in \"$@\"; do\n\t\tif [ \"$a\" = -n ]; then\n\t\t\tshift\n\t\t\texec /usr/local/go/bin/go build \"-ldflags=-X main.stamp=$(od -An -N8 -tx8 /dev/urandom | tr -d ' ')\" \"$@\"\n\t\tfi\n\tdone\nfi\nexec /usr/local/go/bin/go \"$@\"\n",
+        permissions: 493,
+      )
+      .withEnvVariable("PATH", "/stamp:/go/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+    let ws = directory
+      .withNewFile("go.mod", "module example.com/reuse\n\ngo 1.27\n")
+      .withNewFile("main.go", "package main\n\nimport (\n\t\"fmt\"\n\n\t\"example.com/reuse/lib\"\n)\n\nvar stamp string\n\nfunc main() { fmt.Println(stamp, lib.Answer) }\n")
+      .withNewFile("lib/lib.go", "package lib\n\nconst Answer = 42\n")
+      .withNewFile("other/other.go", "package other\n")
+    let first = stampedSaid(stamping, ws)
+    let outside = stampedSaid(stamping, ws.withNewFile("other/other.go", "package other\n\nimport _ \"fmt\"\n"))
+    let inside = stampedSaid(stamping, ws.withNewFile("lib/lib.go", "package lib\n\nimport _ \"fmt\"\n\nconst Answer = 42\n"))
+    assert(first.contains(" 42") and first != " 42\n", "the stamped binary said: " + first)
+    assert(outside == first, "an import outside the build made a new plan: " + first + " then " + outside)
+    assert(inside != first, "an import in the build left the plan as it was: " + first + " then " + inside)
+    null
+  }
+
+  # What the binary of tree's root package, built in base, prints.
+  let stampedSaid(base: Container!, tree: Directory!): String! {
+    let ws = tree.asWorkspace
+    let built = go(base: base).modules(ws).get(key: ".").packages(ws).get(key: ".").binary(ws)
+    base.withFile("/usr/local/bin/reuse", built).withExec(["reuse"]).stdout
+  }
+
+  """
+  A build builds Go's pack tool only when its toolchain runs it: Go 1.25 and
+  later run "go tool pack" for each package with assembly, the runtime among
+  them, so a build on Go 1.27 builds pack once, and Go 1.24, which runs its
+  own pack, builds none. The base's go command writes a line to a cache
+  volume of the run's own each time it builds pack, and the base carries the
+  run's name, so no earlier run's cached build stands in for it.
+  """
+  packToolCheck: Void @check {
+    let run = Random.string
+    let old = packBuilds("1.24", run)
+    let current = packBuilds("1.27.3", run)
+    assert(old == "", "a build on Go 1.24 built pack: " + old)
+    assert(current == "pack\n", "a build on Go 1.27 built pack other than once: " + current)
+    null
+  }
+
+  # The lines the base's go command wrote for each build of pack, in a
+  # build of a package on Go version, after the build.
+  let packBuilds(version: String!, run: String!): String! {
+    let witness = cacheVolume("go-dev-pack-builds-" + version + "-" + run)
+    let counting = container
+      .from("golang:" + version + "-alpine")
+      .withNewFile(
+        "/count/go",
+        "#!/bin/sh\nfor a in \"$@\"; do\n\tif [ \"$a\" = cmd/pack ]; then\n\t\techo pack >> /witness/builds\n\tfi\ndone\nexec /usr/local/go/bin/go \"$@\"\n",
+        permissions: 493,
+      )
+      .withEnvVariable("PATH", "/count:/go/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+      .withEnvVariable("GO_DEV_PACK_RUN", run)
+      .withMountedCache("/witness", witness)
+    let ws = directory
+      .withNewFile("go.mod", "module example.com/packs\n\ngo 1.24\n")
+      .withNewFile("main.go", "package main\n\nfunc main() { println(\"packs\") }\n")
+      .asWorkspace
+    let built = go(base: counting).modules(ws).get(key: ".").packages(ws).get(key: ".").binary(ws)
+    assert(built.size > 0, "the build on Go " + version + " made an empty binary")
+    container
+      .from("alpine:3.23")
+      .withEnvVariable("GO_DEV_PACK_RUN", run)
+      .withMountedCache("/witness", witness)
+      .withExec(["sh", "-c", "cat /witness/builds 2>/dev/null || true"])
+      .stdout
   }
 
   """
@@ -921,6 +1011,63 @@ type GoDev {
     let built = go(base: base).modules(ws).get(key: ".").packages(ws).get(key: ".").binary(ws)
     let out = base.withFile("/usr/local/bin/depinc", built).withExec(["depinc"]).stdout
     assert(out == "42 7\n", "the dependency's included values: " + out)
+    null
+  }
+
+  # The error of goSumCheck's build with the go.sum made as sum, or "built".
+  let goSumFailure(made: Container!, base: Container!, sum: String!): String! {
+    let ws = made.directory("/ws").withFile("go.sum", made.file("/sums/" + sum)).asWorkspace
+    let outcome = {
+      go(base: base).modules(ws).get(key: ".").packages(ws).get(key: ".").binary(ws).size
+      "built"
+    } rescue {
+      err: Error => err.message
+    }
+    outcome
+  }
+
+  """
+  A downloaded dependency is verified against the project's go.sum, as go
+  build verifies it, and not against the checksum database: with the base's
+  checksum database out of reach, the dependency go.sum names builds and
+  runs; one whose zip or go.mod checksum go.sum lacks, or whose download
+  doesn't match go.sum, fails the build. The dependency comes from a file
+  proxy in the base, as from any module proxy.
+  """
+  goSumCheck: Void @check {
+    let dep = directory
+      .withNewFile("go.mod", "module example.com/sumdep\n\ngo 1.25\n")
+      .withNewFile("sumdep.go", "package sumdep\n\nconst Answer = 42\n")
+    let main = directory
+      .withNewFile("go.mod", "module example.com/summain\n\ngo 1.25\n\nrequire example.com/sumdep v1.0.0\n")
+      .withNewFile("main.go", "package main\n\nimport (\n\t\"fmt\"\n\n\t\"example.com/sumdep\"\n)\n\nfunc main() { fmt.Println(sumdep.Answer) }\n")
+    # The proxy serves the module as go mod download fetches it. The go.sum
+    # is written from it, then made again without the module's zip checksum,
+    # without its go.mod checksum, and with each one wrong.
+    let made = container
+      .from("golang:1.27.3-alpine")
+      .withExec(["apk", "add", "--no-cache", "zip"])
+      .withDirectory("/z/example.com/sumdep@v1.0.0", dep)
+      .withDirectory("/ws", main)
+      .withExec(["sh", "-c", "set -e; p=/proxy/example.com/sumdep/@v; mkdir -p $p; cd /z; zip -qr $p/v1.0.0.zip example.com/sumdep@v1.0.0; cp example.com/sumdep@v1.0.0/go.mod $p/v1.0.0.mod; printf 'v1.0.0\\n' > $p/list; printf '{\"Version\":\"v1.0.0\"}' > $p/v1.0.0.info; cd /ws; GOPROXY=file:///proxy GOSUMDB=off go mod tidy"])
+      .withExec(["sh", "-c", "set -e; cd /ws; z=$(awk '$2 == \"v1.0.0\" { print $3 }' go.sum); m=$(awk '$2 == \"v1.0.0/go.mod\" { print $3 }' go.sum); [ -n \"$z\" ] && [ -n \"$m\" ]; mkdir /sums; grep -v ' v1.0.0 ' go.sum > /sums/nozip; grep -v ' v1.0.0/go.mod ' go.sum > /sums/nomod; sed \"s#v1.0.0 $z#v1.0.0 $m#\" go.sum > /sums/badzip; sed \"s#v1.0.0/go.mod $m#v1.0.0/go.mod $z#\" go.sum > /sums/badmod"])
+    let base = container
+      .from("golang:1.27.3-alpine")
+      .withDirectory("/proxy", made.directory("/proxy"))
+      .withEnvVariable("GOPROXY", "file:///proxy")
+      .withEnvVariable("GOSUMDB", "sum.golang.org https://sumdb.invalid")
+    let ws = made.directory("/ws").asWorkspace
+    let built = go(base: base).modules(ws).get(key: ".").packages(ws).get(key: ".").binary(ws)
+    let out = base.withFile("/usr/local/bin/summain", built).withExec(["summain"]).stdout
+    assert(out == "42\n", "the binary built with go.sum's checksums printed: " + out)
+    let noZip = goSumFailure(made, base, "nozip")
+    assert(noZip.contains("missing go.sum entry"), "a build whose go.sum lacks the module's checksum: " + noZip)
+    let noMod = goSumFailure(made, base, "nomod")
+    assert(noMod.contains("missing go.sum entry"), "a build whose go.sum lacks the module's go.mod checksum: " + noMod)
+    let badZip = goSumFailure(made, base, "badzip")
+    assert(badZip.contains("checksum mismatch"), "a build whose go.sum has another checksum for the module: " + badZip)
+    let badMod = goSumFailure(made, base, "badmod")
+    assert(badMod.contains("checksum mismatch"), "a build whose go.sum has another checksum for the module's go.mod: " + badMod)
     null
   }
 
@@ -984,14 +1131,60 @@ type GoDev {
   }
 
   """
+  The archives of chosen packages are what those packages import, without
+  test variants when asked: what codegen type-checks a module's root package
+  against. A package elsewhere in the module that doesn't load, such as a
+  nested module's directory without its go.mod, doesn't fail them.
+  """
+  archivesPackagesCheck: Void @check {
+    let ws = directory
+      .withNewFile("go.mod", "module example.com/app\n\ngo 1.22\n")
+      .withNewFile("main.go", "package main\n\nimport \"strings\"\n\nfunc main() { println(strings.ToUpper(\"x\")) }\n")
+      .withNewFile("main_test.go", "package main\n\nimport (\n\t\"net/http/httptest\"\n\t\"testing\"\n)\n\nfunc TestX(t *testing.T) { _ = httptest.NewRecorder() }\n")
+      .withNewFile("nested/main.go", "package main\n\nimport \"example.com/elsewhere/missing\"\n\nfunc main() { missing.F() }\n")
+      .asWorkspace
+    let manifest = go(version: "1.27.3").module(ws, ".").archives(ws, dependencies: true, packages: ["."], noTests: true).file("manifest.json").contents
+    assert(manifest.contains("\"strings\": {"), "the root package's import is not archived: " + manifest)
+    assert(manifest.contains("net/http/httptest") == false, "a test-only import is archived without tests: " + manifest)
+  }
+
+  """
+  A module's archive builds are what its archives read from the cache: a
+  build per package the archives hold, each its own, a download per module
+  version the build read, and the build's four tools: gohdr, write-manifest
+  with its source, pack and the includes helper.
+  """
+  archiveBuildsCheck(ws: Workspace!): Void @check {
+    let mod = go(version: "1.27.3").module(ws, downloadsFixturePath)
+    let built = mod.archiveBuilds(ws, dependencies: true, packages: ["."], noTests: true)
+    let archived = mod.archives(ws, dependencies: true, packages: ["."], noTests: true).directory("archives").entries
+    # The fixture's one module version is golang.org/x/sync's.
+    assert(archived.length > 0, "no archives")
+    # Each build's own content: a build listed twice would repeat one.
+    let builds = built.builds.{{digest}}.map { b => b.digest }
+    let downloads = built.downloads.{{digest}}.map { d => d.digest }
+    assert(builds.length == archived.length, "archive builds: " + toString(builds.length) + " builds, for " + toString(archived.length) + " archives")
+    assert(downloads.length == 1, "archive builds: " + toString(downloads.length) + " downloads, for 1 module download")
+    let distinct = builds.reduce([]) { seen, d => if (seen.contains(d)) { seen } else { seen + [d] } }
+    assert(distinct.length == builds.length, "archive builds repeat a build")
+    assert(built.tool.name == "gohdr", "archive builds: the tool is " + built.tool.name + ", not gohdr")
+    assert(built.manifestTool.name == "write-manifest", "archive builds: the manifest tool is " + built.manifestTool.name + ", not write-manifest")
+    assert(built.manifestSource.entries.contains("go.mod"), "archive builds: the manifest tool's source is " + built.manifestSource.entries.join(", ") + ", without go.mod")
+    assert(built.tools.entries.contains("pack"), "archive builds: the tools are " + built.tools.entries.join(", ") + ", without pack")
+  }
+
+  """
   A module's archives are what golangci-lint's export driver reads: the
-  manifest lists every plain package go list -deps -test lists, main
-  packages and what only tests import included, with the settings go env
-  reports and the digest the driver computes from go list's files, cgo's
-  output for a cgo package; and the module's packages type-check against the
-  archives' export data. archivescheck, a copy of the driver's digest, checks
-  them against the go command in a container that mounts the source
-  elsewhere.
+  manifest lists every package go list -deps -test lists, main packages,
+  what only tests import, test variants and external test packages included,
+  with the settings go env reports and the digest the driver computes from
+  go list's files, cgo's output for a cgo package, which the archives carry;
+  and the module's packages type-check against the archives' export data.
+  The dependencies' archives alone leave out the module's packages, and stay
+  the same across an edit of them. golangci-lint, through its export driver at
+  the commit go-dev pins, lints the module from the archives alone: the driver
+  takes every package's export data from them, its digest matching what each
+  archive was compiled from, and compiles nothing.
   """
   archivesCheck: Void @check {
     let source = directory
@@ -1008,27 +1201,33 @@ type GoDev {
     let ws = source.asWorkspace
     let archives = go(base: cgoCxxBase).module(ws, ".").archives(ws)
     let manifest = archives.file("manifest.json").contents
-    let checked = cgoCxxBase
-      .withDirectory("/check", currentModule.source.directory("archivescheck"))
-      .withNewFile("/check/go.mod", "module archivescheck\n\ngo 1.26\n")
-      .withWorkdir("/check")
-      .withExec(["go", "build", "-o", "/usr/local/bin/archivescheck", "."])
-      .withDirectory("/elsewhere", source)
-      .withDirectory("/archives", archives)
-      .withWorkdir("/elsewhere")
-      .withExec(["archivescheck", "/archives"])
-      .stdout
-    assert(
-      checked.trimSpace.split("\n").length == 1 and checked.hasPrefix("checked "),
-      "the archives: " + checked,
-    )
-    let wanted = ["\"example.com/archives/cmd/tool\"", "\"example.com/archives/testonly\"", "\"net/http/httptest\"", "\"runtime/cgo\""]
+    # The archives are built in the lint's own image, so that the driver
+    # finds the C settings cgo's output was made with.
+    let lintBase = golangciLint(version: lintVersion, goVersion: "1.27.3").base
+    let lintArchives = go(base: lintBase).module(ws, ".").archives(ws)
+    let report = golangciLint(version: lintVersion, goVersion: "1.27.3", exportArchives: lintArchives)
+      .module(ws, ".")
+      .lintReport(ws)
+    assert(report.hasPrefix("exit code: 0\n"), "golangci-lint through the archives: " + report)
+    assert(report.contains("\"prebuilt\":"), "the export driver served no archive: " + report)
+    let unserved = ["\"declined\"", "\"compiled\"", "\"golist\"", "\"missing\"", "\"compileErrors\""].filter { k => report.contains(k) }
+    assert(unserved.length == 0, "the export driver didn't serve every package from the archives (" + unserved.join(", ") + "): " + report)
+    let wanted = ["\"example.com/archives/cmd/tool\"", "\"example.com/archives/testonly\"", "\"net/http/httptest\"", "\"runtime/cgo\"", "\"example.com/archives/cg_test [example.com/archives/cg.test]\""]
     let missing = wanted.filter { p => manifest.contains(p + ": {") == false }
     assert(missing.length == 0, "the manifest lacks " + missing.join(", ") + ": " + manifest)
-    assert(
-      manifest.contains("example.com/archives/cg [") == false and manifest.contains(".test\"") == false,
-      "the manifest lists test packages: " + manifest,
-    )
+    assert(manifest.contains(".test\"") == false, "the manifest lists a test main: " + manifest)
+    assert(archives.entries.any { e => e == "cgo/" }, "the archives carry no cgo output: " + archives.entries.join(", "))
+
+    # The dependencies' archives are those of other modules and the standard
+    # library, and an edit of the module's own packages leaves them as they
+    # are: the same directory, by content.
+    let deps = go(base: cgoCxxBase).module(ws, ".").archives(ws, dependencies: true)
+    let depsManifest = deps.file("manifest.json").contents
+    assert(depsManifest.contains("\"net/http/httptest\": {") and depsManifest.contains("\"runtime/cgo\": {"), "the dependencies' manifest lacks the standard library: " + depsManifest)
+    assert(depsManifest.contains("example.com/archives") == false, "the dependencies' manifest lists the module's own packages: " + depsManifest)
+    let edited = source.withNewFile("testonly/testonly.go", "package testonly\n\n// Want is for tests, edited.\nfunc Want() int { return 2 + 2 }\n").asWorkspace
+    let editedDeps = go(base: cgoCxxBase).module(edited, ".").archives(edited, dependencies: true)
+    assert(editedDeps.digest == deps.digest, "an edit of the module's own package changed the dependencies' archives")
 
     # A module with no package to compile has archives of nothing.
     let none = directory
@@ -1138,6 +1337,76 @@ type GoDev {
         .stdout
       if (compared.trimSpace == "") { "" } else { shape + " (Go " + version + "): " + compared.trimSpace }
     }.filter { failure => failure != "" }
+  }
+
+  """
+  Module downloads run with the downloads container's settings, which key
+  them: with GOPROXY=off there, a build that must download its dependency
+  can't, and without a downloads container the same build downloads it.
+  """
+  downloadsCheck(ws: Workspace!): Void @check {
+    let off = container.from("golang:1.27.3-alpine").withEnvVariable("GOPROXY", "off")
+    let offline = {
+      go(version: "1.27.3", downloads: off).module(ws, downloadsFixturePath).packages(ws).get(key: downloadsFixturePath).binary(ws).size
+      "built"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(offline.contains("GOPROXY=off"), "a build downloaded with GOPROXY=off in its downloads container: " + offline)
+    let built = go(version: "1.27.3").module(ws, downloadsFixturePath).packages(ws).get(key: downloadsFixturePath).binary(ws).size
+    assert(built > 0, "the build without a downloads container made an empty binary")
+  }
+
+  """
+  A module the go command fetches directly, as GONOPROXY names it, downloads
+  in the downloads container, with its git configuration, even when
+  GOPRIVATE, which GONOPROXY overrides, doesn't name it: only that
+  configuration finds the module's repository, and the binary runs.
+  """
+  noProxyDownloadsCheck: Void @check {
+    let dep = directory
+      .withNewFile("go.mod", "module git.internal/dep.git\n\ngo 1.25\n")
+      .withNewFile("dep.go", "package dep\n\nconst Answer = 42\n")
+    let main = directory
+      .withNewFile("go.mod", "module example.com/noproxy\n\ngo 1.25\n\nrequire git.internal/dep.git v1.0.0\n")
+      .withNewFile("main.go", "package main\n\nimport (\n\t\"fmt\"\n\n\t\"git.internal/dep.git\"\n)\n\nfunc main() { fmt.Println(dep.Answer) }\n")
+    # The repository is reached only through the downloads container's git
+    # configuration, which maps its URL to a local path.
+    let downloads = container
+      .from("golang:1.27.3-alpine")
+      .withExec(["apk", "add", "--no-cache", "git"])
+      .withDirectory("/src/dep", dep)
+      .withExec(["sh", "-c", "set -e; cd /src/dep; git init -q; git add -A; git -c user.name=t -c user.email=t@example.com commit -qm v1; git tag v1.0.0; git clone -q --bare /src/dep /repos/dep.git; git config --global url./repos/.insteadOf https://git.internal/"])
+      .withEnvVariable("GOPRIVATE", "example.com/none")
+      .withEnvVariable("GONOPROXY", "git.internal")
+      .withEnvVariable("GOSUMDB", "off")
+    let made = downloads
+      .withDirectory("/ws", main)
+      .withWorkdir("/ws")
+      .withExec(["go", "mod", "tidy"])
+    let ws = made.directory("/ws").asWorkspace
+    let built = go(version: "1.27.3", downloads: downloads).modules(ws).get(key: ".").packages(ws).get(key: ".").binary(ws)
+    let out = container.from("golang:1.27.3-alpine").withFile("/usr/local/bin/noproxy", built).withExec(["noproxy"]).stdout
+    assert(out == "42\n", "the binary built with the directly fetched module printed: " + out)
+    null
+  }
+
+  """
+  A failed compile says why: its error carries the compiler's message, not
+  only the exec's exit code.
+  """
+  execErrorCheck: Void @check {
+    let ws = directory
+      .withNewFile("go.mod", "module example.com/broken\n\ngo 1.22\n")
+      .withNewFile("main.go", "package main\n\nfunc main() {\n\tintentionallyUndefinedSymbol()\n}\n")
+      .asWorkspace
+    let failed = {
+      go(version: "1.27.3").module(ws, ".").packages(ws).get(key: ".").binary(ws).size
+      "built"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(failed.contains("undefined: intentionallyUndefinedSymbol"), "a failed compile did not say why: " + failed)
   }
 
   """
@@ -1989,27 +2258,55 @@ type GoDev {
     null
   }
 
-  # Only the unindented CHECKS header counts. Nested TESTS summaries can
-  # report correct Go results even when Dagger attributes the checks incorrectly.
+  # The selected tests are one collection's items. Engines before
+  # dagger/dagger#15088 list the items as top-level checks, tallied in the one
+  # unindented CHECKS header. Later engines list the collection as one check,
+  # passed only when every item passed, with a CHECKS header nested under it
+  # that tallies the items. Only those headers count. Nested TESTS summaries
+  # can report correct Go results even when Dagger attributes the checks
+  # incorrectly.
   let checkSummaryMatches(output: String!, passed: Int!, failed: Int!): Boolean! {
-    let headers = output.split("\n").filter { line =>
-      line.hasPrefix("CHECKS ") or line.hasPrefix("== CHECKS ==")
-    }
+    let lines = output.split("\n")
+    let top = lines.filter { line => checkHeaderAt(line, "") }
+    let items = lines.filter { line => checkHeaderAt(line, "  ") }
     let expected = (if (failed > 0) { ["✘", `${failed}`, "failed"] } else { [] })
       + (if (passed > 0) { ["✔", `${passed}`, "passed"] } else { [] })
-    headers.length == 1 and headers[0]!.trimPrefix("== ").trimPrefix("CHECKS").trimPrefix(" ==")
-      .trimSpace.split(" ").filter { word => word != "" } == expected
+    let collection = if (failed > 0) { ["✘", "1", "failed"] } else { ["✔", "1", "passed"] }
+    let flat = top.length == 1 and items.length == 0 and checkTally(top[0]!) == expected
+    flat or (top.length == 1 and items.length == 1 and checkTally(top[0]!) == collection and checkTally(items[0]!) == expected)
+  }
+
+  let checkHeaderAt(line: String!, indent: String!): Boolean! {
+    line.hasPrefix(indent + "CHECKS ") or line.hasPrefix(indent + "== CHECKS ==")
+  }
+
+  let checkTally(header: String!): [String!]! {
+    header.trimSpace.trimPrefix("== ").trimPrefix("CHECKS").trimPrefix(" ==")
+      .trimSpace.split(" ").filter { word => word != "" }
   }
 
   selectedSummaryCheck: Void @check {
-    let wrong = "CHECKS  ✘ 8 failed\n  TESTS\n    ✘ 1 failed\n    ✔ 7 passed\n"
+    let failing = "CHECKS  ✘ 1 failed\n✘ go/modules/packages/tests/test 1.0s ERROR\n  CHECKS  ✘ 1 failed  ✔ 7 passed\n"
+    assert(checkSummaryMatches(failing, 7, 1), "mixed counts were not recognized")
+    let wrong = "CHECKS  ✘ 1 failed\n✘ go/modules/packages/tests/test 1.0s ERROR\n  CHECKS  ✘ 8 failed\n    ✘ dag://?check=test 1.0s ERROR\n      TESTS\n        ✘ 1 failed\n        ✔ 7 passed\n"
     assert(checkSummaryMatches(wrong, 7, 1) == false, "nested test counts hid failed checks")
     assert(checkSummaryMatches(wrong, 0, 8), "zero passing checks were not recognized")
-    assert(checkSummaryMatches("CHECKS  ✔ 18 passed\n", 8, 0) == false, "accepted a partial count")
-    assert(checkSummaryMatches("CHECKS  ✘ 1 failed  ✔ 7 passed\n", 7, 1), "mixed counts were not recognized")
-    assert(checkSummaryMatches("== CHECKS ==  ✔ 8 passed\n", 8, 0), "agent report was not recognized")
-    assert(checkSummaryMatches("  CHECKS  ✔ 8 passed\n", 8, 0) == false, "accepted a nested header")
-    assert(checkSummaryMatches("CHECKS  ✔ 8 passed\nCHECKS  ✔ 8 passed\n", 8, 0) == false, "accepted duplicate headers")
+    assert(checkSummaryMatches("CHECKS  ✔ 1 passed\n  CHECKS  ✔ 8 passed\n", 8, 0), "passing counts were not recognized")
+    assert(checkSummaryMatches("CHECKS  ✔ 1 passed\n  CHECKS  ✔ 8 passed\n", 1, 0) == false, "read the collection as the item totals")
+    assert(checkSummaryMatches("CHECKS  ✔ 1 passed\nCHECKS  ✔ 1 passed\n  CHECKS  ✔ 8 passed\n", 8, 0) == false, "accepted duplicate collection headers")
+    assert(checkSummaryMatches("CHECKS  ✔ 1 passed\n  CHECKS  ✔ 18 passed\n", 8, 0) == false, "accepted a partial count")
+    assert(checkSummaryMatches("CHECKS  ✔ 1 passed\n  CHECKS  ✘ 1 failed  ✔ 7 passed\n", 7, 1) == false, "accepted a passing collection with failed items")
+    assert(checkSummaryMatches("== CHECKS ==  ✔ 1 passed\n  == CHECKS ==  ✔ 8 passed\n", 8, 0), "agent report was not recognized")
+    let flat = "CHECKS  ✘ 8 failed\n  TESTS\n    ✘ 1 failed\n    ✔ 7 passed\n"
+    assert(checkSummaryMatches(flat, 7, 1) == false, "nested test counts hid failed checks in a flat report")
+    assert(checkSummaryMatches(flat, 0, 8), "zero passing checks were not recognized in a flat report")
+    assert(checkSummaryMatches("CHECKS  ✘ 1 failed  ✔ 7 passed\n", 7, 1), "mixed counts were not recognized in a flat report")
+    assert(checkSummaryMatches("CHECKS  ✔ 18 passed\n", 8, 0) == false, "accepted a partial count in a flat report")
+    assert(checkSummaryMatches("== CHECKS ==  ✔ 8 passed\n", 8, 0), "agent flat report was not recognized")
+    assert(checkSummaryMatches("  CHECKS  ✔ 8 passed\n", 8, 0) == false, "accepted a nested header alone")
+    assert(checkSummaryMatches("CHECKS  ✔ 8 passed\nCHECKS  ✔ 8 passed\n", 8, 0) == false, "accepted duplicate top headers")
+    assert(checkSummaryMatches("CHECKS  ✔ 2 passed\n  CHECKS  ✔ 8 passed\n", 8, 0) == false, "accepted more than one collection")
+    assert(checkSummaryMatches("CHECKS  ✔ 1 passed\n  CHECKS  ✔ 8 passed\n  CHECKS  ✔ 8 passed\n", 8, 0) == false, "accepted duplicate headers")
     null
   }
 
@@ -2023,14 +2320,18 @@ type GoDev {
     failed: Int! = 0,
     messages: [String!]! = [],
     alias: String! = "go",
+    goflags: String! = "",
   ): Void {
+    let settings = if (goflags == "") { "" } else {
+      "[modules." + alias + ".settings]\ngoflags = \"" + goflags + "\"\n"
+    }
     let result = container
       .from("alpine:3.23")
       .withEnvVariable("NO_COLOR", "1")
       .withDirectory("/source", ws.directory("/"))
       .withDirectory("/work", fixture)
       .withNewFile("/work/.git/HEAD", "ref: refs/heads/main\n")
-      .withNewFile("/work/dagger.toml", "[modules." + alias + "]\nsource = \"/source\"\n")
+      .withNewFile("/work/dagger.toml", "[modules." + alias + "]\nsource = \"/source\"\n" + settings)
       .withWorkdir("/work")
       .withExec(
         ["/dev/.dagger/dagger", "--progress=report", "check", "--generated=false"] + args,
@@ -2100,6 +2401,24 @@ type GoDev {
     selectedCheck(ws, constrained, selectionArgs + ["--go-test=TestConstrained"], passed: 7, failed: 1, messages: ["selected failure"])
   }
 
+  # -failfast stops m1/p1 at TestFoo, so TestBar there never runs and fails.
+  # The helper's unit tests check its message: the report may show the shared
+  # run's test spans for TestBar's check instead of its error. m1/p2 is left
+  # out: go test starts no further package after a failure, so whether it runs
+  # depends on whether it started before m1/p1 failed.
+  selectedFailfastCheck(ws: Workspace!): Void @check {
+    let fixture = selectionFixture.withNewFile("m1/p1/tests_test.go", "package p1\nimport \"testing\"\nfunc TestFoo(t *testing.T) { t.Fatal(\"selected failure\") }\nfunc TestBar(t *testing.T) {}\n")
+    selectedCheck(
+      ws,
+      fixture,
+      selectionArgs.filter { arg => arg != "--go-package=m1/p2" },
+      passed: 4,
+      failed: 2,
+      messages: ["selected failure"],
+      goflags: "-failfast",
+    )
+  }
+
   selectedBuildFailureCheck(ws: Workspace!): Void @check {
     let fixture = selectionFixture.withNewFile("m2/p1/broken.go", "package p1\nvar broken = undefinedSymbol\n")
     selectedCheck(ws, fixture, selectionArgs, passed: 6, failed: 2, messages: ["Go tests in m2/p1:"])
@@ -2145,30 +2464,18 @@ type GoDev {
     )
   }
 
+  # Only packages holding selected tests run, so a failing package without
+  # any does not fail the module's tests.
   selectedUncheckedBuildCheck(ws: Workspace!): Void @check {
     let fixture = reportingFixture.withNewFile("reporting/broken/broken.go", "package p1\nvar broken = undefinedSymbol\n")
-    selectedCheck(
-      ws,
-      fixture,
-      ["--go-module=reporting"],
-      passed: 0,
-      failed: 2,
-      messages: ["failures in packages without selected test checks: example.com/reporting/broken"],
-    )
+    selectedCheck(ws, fixture, ["--go-module=reporting"], passed: 2)
   }
 
   selectedUncheckedTeardownCheck(ws: Workspace!): Void @check {
     let fixture = reportingFixture
       .withNewFile("reporting/broken/broken.go", "package p1\n")
       .withNewFile("reporting/broken/main_test.go", teardownSource)
-    selectedCheck(
-      ws,
-      fixture,
-      ["--go-module=reporting"],
-      passed: 0,
-      failed: 2,
-      messages: ["failures in packages without selected test checks: example.com/reporting/broken", "teardown failure"],
-    )
+    selectedCheck(ws, fixture, ["--go-module=reporting"], passed: 2)
   }
 
   selectedVendorCheck(ws: Workspace!): Void @check {
@@ -2187,7 +2494,7 @@ type GoDev {
   """
   gobuildCheck(ws: Workspace!): Void @check {
     container
-      .from("golang:1.26.1-alpine")
+      .from("golang:1.27.3-alpine")
       .withDirectory("/src", ws.directory("/gobuild"))
       .withWorkdir("/src")
       .withExec(["go", "test", "./..."])
@@ -2199,7 +2506,8 @@ type GoDev {
   Test discovery lists only what go test runs: tests in files that build for
   the engine's platform with the test container's Go version, cgo and GOFLAGS
   build tags, and examples with an output comment. A custom base supplies its
-  own toolchain, cgo and GOFLAGS.
+  own toolchain, cgo and GOFLAGS; its go is asked only when a test file's
+  constraints name a Go release, or cgo while CGO_ENABLED is unset.
   """
   buildConstraintsCheck: Void @check {
     let fixture = directory
@@ -2232,6 +2540,36 @@ type GoDev {
     assert(
       raced.get(key: "c").tests.keys == ["TestBuilt", "TestCgo", "TestNewerGo", "TestRace"],
       "discovery did not follow -race's build tag",
+    )
+    # With no Go release or cgo named, GOFLAGS comes from the base's
+    # environment, and the base's go, which isn't on this base's PATH, never
+    # runs.
+    let tagsOnly = directory
+      .withNewFile("d/go.mod", "module example.com/d\n\ngo 1.22\n")
+      .withNewFile("d/d_test.go", "package d\nimport \"testing\"\nfunc TestBuilt(t *testing.T) {}\n")
+      .withNewFile("d/never_test.go", "//go:build never\n\npackage d\nimport \"testing\"\nfunc TestNever(t *testing.T) {}\n")
+      .withNewFile("d/norace_test.go", "//go:build !race\n\npackage d\nimport \"testing\"\nfunc TestNoRace(t *testing.T) {}\n")
+      .withNewFile("d/tagged_test.go", "//go:build integration\n\npackage d\nimport \"testing\"\nfunc TestTagged(t *testing.T) {}\n")
+      .asWorkspace
+    let noGo = base
+      .withEnvVariable("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+      .withEnvVariable("GOFLAGS", "-count=1 -tags=integration")
+    let fromEnv = go(base: noGo).module(tagsOnly, "d").packages(tagsOnly)
+    assert(
+      fromEnv.get(key: "d").tests.keys == ["TestBuilt", "TestNoRace", "TestTagged"],
+      "discovery did not take the custom base's GOFLAGS from its environment",
+    )
+    # An empty CGO_ENABLED is unset to go, which then turns cgo on for a base
+    # with a C compiler, so its go is asked.
+    let cgoOnly = directory
+      .withNewFile("e/go.mod", "module example.com/e\n\ngo 1.22\n")
+      .withNewFile("e/e_test.go", "package e\nimport \"testing\"\nfunc TestBuilt(t *testing.T) {}\n")
+      .withNewFile("e/cgo_test.go", "//go:build cgo\n\npackage e\nimport \"testing\"\nfunc TestCgo(t *testing.T) {}\n")
+      .asWorkspace
+    let emptyCgo = go(base: cgoCxxBase.withEnvVariable("CGO_ENABLED", "")).module(cgoOnly, "e").packages(cgoOnly)
+    assert(
+      emptyCgo.get(key: "e").tests.keys == ["TestCgo", "TestBuilt"],
+      "discovery read an empty CGO_ENABLED as cgo off",
     )
     null
   }

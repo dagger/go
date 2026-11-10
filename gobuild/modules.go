@@ -20,16 +20,28 @@ import (
 // changes only that module's packages and what imports them. A package
 // mounts each module it reads whole, so its C and assembly can include any
 // file of the module, which the plan never names, and nothing is selected
-// file by file.
+// file by file. What no build of a module reads, its tests and testdata,
+// is left out (testExclude), but for what the build does read.
 type modules struct {
 	// root is where they are, GOMODCACHE.
 	root string
-	// all is the module cache the build downloaded, evaluated, for a file
-	// outside any module's directory.
+	// all is the module cache the go command made before any download,
+	// evaluated, for a file outside any module's directory, or a module's
+	// zip downloaded with it.
 	all *dagger.Directory
+	// zips is each module's zip the build downloaded on its own, by its
+	// directory name.
+	zips map[string]*dagger.File
+	// fetchZip downloads the zip of a module zips lacks, by its directory
+	// name; nil when the build downloaded per project.
+	fetchZip func(name string) *dagger.File
 	// sums holds the checksum of each module the build downloaded, by its
 	// directory name, as the go command recorded it in the module cache.
 	sums map[string]string
+	// exclude holds, by module directory name, the patterns of what the
+	// module's extraction leaves out (excludeUnread); a module not in it
+	// is extracted whole.
+	exclude map[string][]string
 
 	mu   sync.Mutex
 	dirs map[string]*dagger.Directory
@@ -52,15 +64,96 @@ func (m *modules) dir(name string) *dagger.Directory {
 		return d
 	}
 	at := strings.LastIndex(name, "@")
-	zip := m.all.File(path.Join("cache/download", name[:at], "@v", name[at+1:]+".zip"))
+	zip, ok := m.zips[name]
+	if !ok && m.fetchZip != nil {
+		zip = m.fetchZip(name)
+	}
+	if zip == nil {
+		zip = m.all.File(path.Join("cache/download", name[:at], "@v", name[at+1:]+".zip"))
+	}
 	// The zip holds the module's files under "<module>@<version>/", the
 	// module path not escaped.
-	d := zip.Extract().Directory(unescapeModule(name))
+	d := zip.Extract(dagger.FileExtractOpts{Exclude: m.exclude[name]}).Directory(unescapeModule(name))
 	if m.dirs == nil {
 		m.dirs = map[string]*dagger.Directory{}
 	}
 	m.dirs[name] = d
 	return d
+}
+
+// testExclude is the patterns of what a module holds that building it
+// never reads: its tests, and its testdata directories, which the go
+// command ignores. In some modules they are most of the files. They match
+// under the module's directory in its zip, mod, the module path not
+// escaped, so the module's own path never matches.
+func testExclude(mod string) []string {
+	mod = escapePattern(mod)
+	return []string{mod + "/**/*_test.go", mod + "/**/testdata"}
+}
+
+// excludeUnread sets, in m.exclude, what each downloaded module blocks read
+// leaves out of its extraction: testExclude, with patterns that put back
+// what the build reads from there, such as a dependency's tests that go
+// test -c compiles, a file a package embeds from testdata, or a directory
+// a package's C reads whole. A module a package reads whole, for its C or
+// assembly, which can include any of its files, is extracted whole. A
+// module the build reads none of those from, nearly every one, extracts
+// the same in every build.
+func (m *modules) excludeUnread(blocks map[string]*block) {
+	whole := map[string]bool{}
+	keep := map[string][]string{}
+	for _, b := range blocks {
+		for _, f := range b.modFiles {
+			name := m.downloaded(f)
+			if name == "" {
+				continue
+			}
+			patterns := keep[name]
+			mod := escapePattern(unescapeModule(name))
+			rel := strings.TrimPrefix(f, name+"/")
+			if rel == "**" {
+				whole[name] = true
+			} else if dir, ok := strings.CutSuffix(rel, "/**"); ok {
+				patterns = appendUniq(patterns, "!"+mod+"/"+escapePattern(dir)+"/**")
+			} else if testExcluded(rel) {
+				patterns = appendUniq(patterns, "!"+mod+"/"+escapePattern(rel))
+			}
+			keep[name] = patterns
+		}
+	}
+	m.exclude = map[string][]string{}
+	for name, patterns := range keep {
+		if whole[name] {
+			continue
+		}
+		sort.Strings(patterns)
+		m.exclude[name] = append(testExclude(unescapeModule(name)), patterns...)
+	}
+}
+
+// testExcluded reports whether testExclude leaves out rel, a path in a
+// module: a test file, or a file in a testdata directory, or in a
+// directory named like a test file.
+func testExcluded(rel string) bool {
+	for _, elem := range strings.Split(rel, "/") {
+		if elem == "testdata" || strings.HasSuffix(elem, "_test.go") {
+			return true
+		}
+	}
+	return false
+}
+
+// escapePattern escapes what a path pattern would read as a wildcard, or as
+// an escape, so the pattern matches p alone.
+func escapePattern(p string) string {
+	var b strings.Builder
+	for _, c := range p {
+		if strings.ContainsRune(`*?[]\`, c) {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(c)
+	}
+	return b.String()
 }
 
 // downloaded is the downloaded module a file, relative to the module cache,
