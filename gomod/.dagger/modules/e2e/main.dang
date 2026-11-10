@@ -20,6 +20,19 @@ type E2e {
     null
   }
 
+  """
+  The library and the module it returns keep distinct APIs under beta.26's
+  naming rules. Collapsing both types to Gomod loses the library's helpers.
+  """
+  moduleTypesCheck: Void @check {
+    let version = gomod.defaultGoVersion
+    assert(gomod.goImage(version).hasPrefix("golang:" + version), "the library lost its Go image helper")
+    let mod = gomod.at(embedPath)
+    assert(mod.path == embedPath, "the library did not return a module")
+    assert(mod.selected([embedPath]), "the returned module lost its selection API")
+    null
+  }
+
   let selects(patterns: [String!]!, path: String!): Boolean! {
     gomod.at(path).selected(patterns)
   }
