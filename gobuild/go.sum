@@ -1,3 +1,5 @@
+dagger.io/dagger v1.0.0-beta.26 h1:z6GokrvSk0FKNKxSxiEzZknASNyVSVRN6I+57xBEL48=
+dagger.io/dagger v1.0.0-beta.26/go.mod h1:D4famx2e2sUbLCvyr+xn61LBFp6piPsdYYCxShHHJb4=
 github.com/99designs/gqlgen v0.17.94 h1:+3EUDVgX/8gDyDL+7NUqCo4cy2ylylwW0GvR1dGiEsA=
 github.com/99designs/gqlgen v0.17.94/go.mod h1:o+XaAMpPA/AX4rqeiK03tZUb/5T+WCgpRDD4aujgdas=
 github.com/Khan/genqlient v0.8.1 h1:wtOCc8N9rNynRLXN3k3CnfzheCUNKBcvXmVv5zt6WCs=
@@ -10,8 +12,6 @@ github.com/cenkalti/backoff/v5 v5.0.3 h1:ZN+IMa753KfX5hd8vVaMixjnqRZ3y8CuJKRKj1x
 github.com/cenkalti/backoff/v5 v5.0.3/go.mod h1:rkhZdG3JZukswDf7f0cwqPNk4K0sa+F97BxZthm/crw=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
 github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
-github.com/dagger/dagger/sdk/go v0.21.5-0.20261106210403-1aaeba312050 h1:+pUCY4+YiTX3w3kY6ow+p7mJGMcSHRHo87cFq39Me2c=
-github.com/dagger/dagger/sdk/go v0.21.5-0.20261106210403-1aaeba312050/go.mod h1:D4famx2e2sUbLCvyr+xn61LBFp6piPsdYYCxShHHJb4=
 github.com/dagger/otel-go v1.43.1-0.20261102220336-aa07da582c21 h1:xluos+yeiPJhAYJJdBTIB78855PgjiwNcQ4JNfEYFuE=
 github.com/dagger/otel-go v1.43.1-0.20261102220336-aa07da582c21/go.mod h1:pz0HA82xCsGqd+Xd69eWemRqqSA+oRSCRextVsOzL7w=
 github.com/dagger/querybuilder v0.0.0-20260402040506-574a5e81cb59 h1:g6vfdGRyz6fAjfHz5FyYPZgHy8qcQ31fHrBl1iCOzxw=
