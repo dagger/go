@@ -196,17 +196,36 @@ type Go {
   # The scan, discovering the tests go test builds as the test containers are
   # configured. With no settings to pass, it is the one scan every module and
   # tool shares. The default containers have no C compiler, so no cgo.
+  #
+  # A custom base brings its own GOFLAGS, cgo and toolchain. Its environment
+  # gives the first two without building it. Only its go knows its toolchain
+  # version, and whether cgo is on when CGO_ENABLED isn't "0" or "1" (go reads
+  # an empty value as unset, and then decides by whether there is a C
+  # compiler), so the base is built and asked only when a test file's
+  # constraints name a Go release or cgo.
   let discoveryScan(ws: Workspace!): Directory! {
     if (base == null) {
       lib.scan(ws, goflags: goflags ?? "", goVersion: version ?? "")
     } else {
-      let env = baseGoEnv
-      lib.scan(ws, goflags: env.GOFLAGS, goVersion: env.GOVERSION, cgo: env.CGO_ENABLED == "1")
+      let cgoEnv = base!.envVariable("CGO_ENABLED")
+      let fromEnv = lib.scan(
+        ws,
+        goflags: goflags ?? base!.envVariable("GOFLAGS") ?? "",
+        cgo: cgoEnv == "1",
+      )
+      let toolchain = fromEnv.file("_discovery_index_.json").asJSON
+      let release = JSON.decode(`${toolchain.field(path: ["toolchain", "release"]).contents}`) :: Boolean!
+      let cgo = JSON.decode(`${toolchain.field(path: ["toolchain", "cgo"]).contents}`) :: Boolean!
+      if (release or (cgo and cgoEnv != "0" and cgoEnv != "1")) {
+        let env = baseGoEnv
+        lib.scan(ws, goflags: env.GOFLAGS, goVersion: env.GOVERSION, cgo: env.CGO_ENABLED == "1")
+      } else {
+        fromEnv
+      }
     }
   }
 
-  # A custom base brings its own toolchain, C compiler and GOFLAGS, so ask its
-  # go, with goflags over the image's GOFLAGS.
+  # Ask a custom base's go, with goflags over the image's GOFLAGS.
   let baseGoEnv: {{GOVERSION: String!, CGO_ENABLED: String!, GOFLAGS: String!}}! {
     let probed = if (goflags == null) { base! } else { base!.withEnvVariable("GOFLAGS", goflags!) }
     let env = probed.withoutEntrypoint.withExec(["go", "env", "-json", "GOVERSION", "CGO_ENABLED", "GOFLAGS"]).stdout
@@ -332,21 +351,6 @@ type Go {
       and excluding.any { p => paths.any { at => selectedBy(at, [p]) == false } } == false
   }
 
-  # Workspace directories holding Go files that patterns match, in Dagger's own
-  # glob syntax, as the generate setting is matched.
-  let matchingDirectories(ws: Workspace!, patterns: [String!]!): [String!]! {
-    let empty: [String!]! = []
-    patterns.reduce(empty) { dirs, pattern =>
-      dirs + ws
-        .glob(pattern.trimSuffix("/") + "/*.go")
-        .filter { file => file.hasSuffix("/") == false }
-        .map { file =>
-          let dir = file.split("/").dropLast(1).join("/")
-          if (dir == "") { "." } else { dir }
-        }
-    }
-  }
-
   # Workspace paths of the packages with something to do: tests to run in a
   # module the test setting selects, a main package the build setting selects,
   # or go:generate commands the generate setting selects.
@@ -355,18 +359,10 @@ type Go {
     let generateAll = generate.length == 1 and generate.contains("**")
     let included = generate.filter { p => p.hasPrefix("!") == false }
     let excluded = generate.filter { p => p.hasPrefix("!") }.map { p => p.trimPrefix("!") }
-    let includeDirs = if (generateAll) { empty } else {
-      matchingDirectories(
-        ws,
-        included,
-      )
-    }
-    let excludeDirs = if (generateAll) { empty } else {
-      matchingDirectories(
-        ws,
-        excluded,
-      )
-    }
+    # One gomod call, which every module's listing shares, rather than a glob
+    # of the workspace per module.
+    let includeDirs = if (generateAll) { empty } else { lib.goFileDirectories(ws, included) }
+    let excludeDirs = if (generateAll) { empty } else { lib.goFileDirectories(ws, excluded) }
     # Split once per line: each field taken is work for every package line,
     # which counts on every build.
     moduleDiscoveryLines(ws, modulePath)

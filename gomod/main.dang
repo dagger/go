@@ -431,6 +431,25 @@ type Gomod {
   }
 
   """
+  Workspace directories holding Go files that patterns match, in Dagger's own
+  glob syntax: a pattern selects the directories of the files `<pattern>/*.go`
+  matches. Every module's package listing asks for the same directories, so
+  as a call here they are globbed once per listing rather than once per module.
+  """
+  goFileDirectories(ws: Workspace!, patterns: [String!]!): [String!]! {
+    let empty: [String!]! = []
+    patterns.reduce(empty) { dirs, pattern =>
+      dirs + ws
+        .glob(pattern.trimSuffix("/") + "/*.go")
+        .filter { file => file.hasSuffix("/") == false }
+        .map { file =>
+          let dir = file.split("/").dropLast(1).join("/")
+          if (dir == "") { "." } else { dir }
+        }
+    }
+  }
+
+  """
   Selection patterns as written, with the beta engines' JSON-fragment spelling
   removed.
 
