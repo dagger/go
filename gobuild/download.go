@@ -273,7 +273,7 @@ func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDirs []
 			}
 		}
 	}
-	for _, dir := range startDirs(src.pkgs, pkgDirs) {
+	for _, dir := range src.startDirs(src.pkgs, pkgDirs) {
 		followSource(dir)
 	}
 	wg.Wait()
@@ -366,7 +366,7 @@ func planDirsOf(src sourceImports, pkgDirs []string, byPath map[string][]sumEntr
 			queue = append(queue, src.all[dir]...)
 		}
 	}
-	for _, dir := range startDirs(src.all, pkgDirs) {
+	for _, dir := range src.startDirs(src.all, pkgDirs) {
 		addSource(dir)
 	}
 	for len(queue) > 0 {
@@ -407,6 +407,10 @@ type sourceImports struct {
 	pkgs  map[string][]string
 	// all is each package's imports whatever its files' build constraints.
 	all map[string][]string
+	// root is the build's working directory, relative to the source: where
+	// every package is matched from, as "./..." matches from there, so a
+	// testdata directory is one below it.
+	root string
 }
 
 type sourceModule struct{ dir, path string }
@@ -459,7 +463,7 @@ func (src sourceImports) outside(pkgDirs ...string) (imports, plan, dirs []strin
 			queue = append(queue, src.pkgs[dir]...)
 		}
 	}
-	for _, dir := range startDirs(src.pkgs, pkgDirs) {
+	for _, dir := range src.startDirs(src.pkgs, pkgDirs) {
 		addSource(dir)
 	}
 	for len(queue) > 0 {
@@ -486,8 +490,8 @@ func (src sourceImports) outside(pkgDirs ...string) (imports, plan, dirs []strin
 
 // startDirs is the source's directories that following starts from: those
 // of pkgDirs that hold a package in pkgs, by directory, or when none does,
-// every one of pkgs outside testdata.
-func startDirs(pkgs map[string][]string, pkgDirs []string) []string {
+// every one of pkgs outside testdata, below the build's working directory.
+func (src sourceImports) startDirs(pkgs map[string][]string, pkgDirs []string) []string {
 	var dirs []string
 	for _, d := range pkgDirs {
 		if _, ok := pkgs[path.Clean(d)]; d != "" && ok && !slices.Contains(dirs, path.Clean(d)) {
@@ -498,11 +502,29 @@ func startDirs(pkgs map[string][]string, pkgDirs []string) []string {
 		return dirs
 	}
 	for dir := range pkgs {
-		if !inTestdata(dir) {
+		if !inTestdata(src.fromRoot(dir)) {
 			dirs = append(dirs, dir)
 		}
 	}
 	return dirs
+}
+
+// fromRoot is a source directory relative to the build's working directory
+// (root) when it is there or below it, and as it is otherwise: a module that
+// is itself under a testdata directory has its own packages, as the go
+// command's "./..." in it has them.
+func (src sourceImports) fromRoot(dir string) string {
+	root := path.Clean(src.root)
+	if root == "." || root == "/" {
+		return dir
+	}
+	if dir == root {
+		return "."
+	}
+	if rel, ok := strings.CutPrefix(dir, root+"/"); ok {
+		return rel
+	}
+	return dir
 }
 
 // ownModules is the paths of the source's modules that go.sum's entries

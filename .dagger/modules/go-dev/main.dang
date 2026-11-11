@@ -1261,6 +1261,13 @@ type GoDev {
     assert(built.manifestTool.entries.contains("write-manifest"), "archive builds: the manifest tool is " + built.manifestTool.entries.join(", ") + ", without write-manifest")
     assert(built.manifestSource.entries.contains("go.mod"), "archive builds: the manifest tool's source is " + built.manifestSource.entries.join(", ") + ", without go.mod")
     assert(built.tools.entries.contains("pack"), "archive builds: the tools are " + built.tools.entries.join(", ") + ", without pack")
+    # The fixture is under testdata/, yet a build of every package of it has
+    # its packages, as the go command's "./..." in it has them: so its module
+    # version is downloaded in its own step, not fetched by the plan.
+    let every = mod.archiveBuilds(ws, dependencies: true, packages: ["./..."], noTests: true).downloads.{{digest}}
+    assert(every.length == 1, "archive builds of every package of a module under testdata/: " + toString(every.length) + " downloads, for 1 module download")
+    let everyArchived = mod.archives(ws).directory("archives").entries
+    assert(everyArchived.length > 0, "the archives of every package of a module under testdata/ hold no archive")
   }
 
   """

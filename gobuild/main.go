@@ -1119,7 +1119,9 @@ go env GOOS GOARCH CGO_ENABLED GOVERSION > /gobuild/goenv
 		if listed.err != nil {
 			return nil, fmt.Errorf("source imports: %w", withStderr(listed.err))
 		}
-		found, err := d.discoverOnce(ctx, toolImage, goenv, tags, parseSourceImports(d.target, listed.out), pkgDirs)
+		src := parseSourceImports(d.target, listed.out)
+		src.root = strings.TrimPrefix(strings.TrimPrefix(cwd, mountPath), "/")
+		found, err := d.discoverOnce(ctx, toolImage, goenv, tags, src, pkgDirs)
 		if err != nil {
 			return nil, fmt.Errorf("go mod download: %w", err)
 		}
