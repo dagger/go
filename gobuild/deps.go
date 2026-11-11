@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -78,7 +79,31 @@ func (m *Gobuild) Dependencies(
 		out.Archives = append(out.Archives, r.file)
 		out.Dirs = append(out.Dirs, r.dir)
 	}
+	if err := fetchIDs(ctx, out.Dirs); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// fetchIDs asks for the IDs of dirs, several at a time. Returning an object
+// sends its ID, which the SDK asks for one object after another; once asked
+// for, an ID is remembered, so the return then asks for none. Each package's
+// directory is unevaluated, so asking costs no evaluation of the package.
+func fetchIDs(ctx context.Context, dirs []*dagger.Directory) error {
+	errs := make([]error, len(dirs))
+	gate := make(chan struct{}, 32)
+	var wg sync.WaitGroup
+	for i, d := range dirs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			gate <- struct{}{}
+			defer func() { <-gate }()
+			_, errs[i] = d.ID(ctx)
+		}()
+	}
+	wg.Wait()
+	return errors.Join(errs...)
 }
 
 // dependencySet is the blocks the dependency call builds: those that read
