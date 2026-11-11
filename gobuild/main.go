@@ -332,13 +332,13 @@ func planTestSet(ctx context.Context, toolImage string, base *dagger.Container, 
 		sizes, err := b.sourceSizes(ctx)
 		sized <- sizesResult{sizes, err}
 	}()
-	// Only the packages with test files for the target are planned, by
-	// import path, in go list's order: go test builds the others no test
-	// binary. The plan's headers name packages by import path alone, and a
-	// plan of several test binaries compiles a package once for each test it
-	// is recompiled for: the listing names each variant, as for archives.
+	// Only the packages with test files for the target are planned, in go
+	// list's order: go test builds the others no test binary, and -e leaves
+	// out one with no file for the target, as ./... does. Headers name a
+	// package by import path alone, and a plan of several test binaries has
+	// a package once per test variant: the listing names each, as archives'.
 	buildFlags := flags[1:]
-	tested := append(append([]string{"go", "list", "-f", "{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}"}, buildFlags...), pkgs...)
+	tested := append(append([]string{"go", "list", "-e", "-f", "{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}"}, buildFlags...), pkgs...)
 	list := append([]string{"go", "list", "-deps", "-test", "-json=ImportPath,Name,Module,DepOnly,Dir,ForTest"}, buildFlags...)
 	test := append(append([]string{"go", "test", "-c", "-n"}, flags...), "-o", "/dev/null")
 	p, err := b.planWith(ctx, headers, "tested=$("+shJoin(tested)+") && printf '%s\\n' $tested > /gobuild/tested.txt && "+
