@@ -123,9 +123,10 @@ type walker struct {
 	// profile is the preprocessed PGO profile, mounted for packages whose
 	// compile reads it; nil without one.
 	profile *profileOutput
-	// testmain is a test binary's _testmain.go, which its main package
-	// compiles; nil for a binary.
-	testmain *dagger.File
+	// testmain is the _testmain.go of the test binary that the block with
+	// this id links, which its main package compiles; nil for a binary. It
+	// waits for the step that writes it, which runs alongside the walk.
+	testmain func(id string) (*dagger.File, error)
 }
 
 // profileOutput is the PGO profile step's output and where scripts read it.
@@ -259,7 +260,12 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node, done map[stri
 				ctr = ctr.WithMountedDirectory(w.profile.path, w.profile.dir, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
 			}
 			if n.Link && w.testmain != nil {
-				ctr = ctr.WithFile("/work/"+n.Name+"/_testmain.go", w.testmain)
+				tm, err := w.testmain(id)
+				if err != nil {
+					r.err = fmt.Errorf("test main: %w", err)
+					return
+				}
+				ctr = ctr.WithFile("/work/"+n.Name+"/_testmain.go", tm)
 			}
 			if srcDir != nil {
 				ctr = ctr.WithMountedDirectory(path.Join(w.roots.Src, at), srcDir, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})

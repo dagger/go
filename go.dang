@@ -573,6 +573,19 @@ type GoPackages @collection {
   }
 
   """
+  Test binaries of the selected packages that have test files, for the
+  engine's platform, each in its package's directory, relative to the
+  workspace, named as go test -c names it, e.g. "pkg/foo/foo.test".
+
+  They are built from one plan of them all, as go test plans several
+  packages, so what they share is planned and compiled once. As with a
+  package's testBinary, go vet is not run.
+  """
+  testBinary(ws: Workspace!): Directory! {
+    module.testBinaryFiles(ws, gomod.hostPlatform, paths)
+  }
+
+  """
   Run go generate in the selected packages.
   """
   generate(ws: Workspace!): Changeset! {
@@ -1691,6 +1704,43 @@ type GoModule {
     }
     out.sync rescue {
       err: Error => raise "Go test binary " + packagePath(rel) + " for " + platform + ": " + err.message
+    }
+    out
+  }
+
+  # The test binaries of the packages among pkgPaths that have test files,
+  # for a platform, from one plan of them all, each in its package's
+  # directory relative to the workspace, named as go test -c names it.
+  let testBinaryFiles(ws: Workspace!, platform: String!, pkgPaths: [String!]!): Directory! {
+    let tested = lib.at(path).testDirectories(ws)
+    let rels = pkgPaths.filter { p => tested.contains(p) }.map { p => relativeDir(p) }
+    let ctr = platformBase(ws, platform)
+    let flags = buildFlags + (ctr.envVariable("GOFLAGS") ?? "").split(" ").filter { f => f != "" }
+    let built = if (rels.length == 0) {
+      directory
+    } else if (gccgo(flags)) {
+      # gccgo builds each as it always has, with go test -c.
+      rels.reduce(directory) { out, rel =>
+        let file = testBinaryFile(ws, platform, packagePath(rel))
+        out.withFile(rel + "/" + file.name, file)
+      }
+    } else {
+      builder.testBinaries(
+        base: ctr,
+        image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
+        from: if (baseImage == null) { null } else { baseImage.withoutEntrypoint },
+        source: source(ws, test: true),
+        headers: lib.scan(ws).sync.file("_headers_.gohdr"),
+        mountPath: mountPath,
+        workdir: path,
+        pkgs: rels.map { rel => packageArg(rel) },
+        flags: buildFlags,
+        downloads: tool.downloads,
+      )
+    }
+    let out = if (path == ".") { built } else { directory.withDirectory(path, built) }
+    out.sync rescue {
+      err: Error => raise "Go test binaries of module " + path + " for " + platform + ": " + err.message
     }
     out
   }

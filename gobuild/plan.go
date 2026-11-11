@@ -124,15 +124,31 @@ func stableName(importPath string) string {
 // parsePlan splits a go build -n plan into per-package blocks and records
 // each block's input files and dependencies.
 func parsePlan(plan string, r roots) (map[string]*block, error) {
-	return parseBlocks(plan, r, false)
+	return parseBlocks(plan, r, planBinary)
+}
+
+// parseTestsPlan is parsePlan for a go test -c plan of several packages'
+// test binaries, written to -o /dev/null: each test main's block links.
+func parseTestsPlan(plan string, r roots) (map[string]*block, error) {
+	return parseBlocks(plan, r, planTests)
 }
 
 // parseArchivePlan is parsePlan for a plan of many packages whose archives
 // are what's wanted: a main package's block is its compile, without the
 // link that follows it, and no block links.
 func parseArchivePlan(plan string, r roots) (map[string]*block, error) {
-	return parseBlocks(plan, r, true)
+	return parseBlocks(plan, r, planArchives)
 }
+
+// planKind is what a plan builds: one binary or test binary, which links
+// once, several test binaries, each linked, or archives, linked by none.
+type planKind int
+
+const (
+	planBinary planKind = iota
+	planTests
+	planArchives
+)
 
 // identifyVariants names each block of a "go list -export -deps -test -n"
 // plan by its package's ID in the listing, ids: "p" for a plain package,
@@ -146,11 +162,12 @@ func parseArchivePlan(plan string, r roots) (map[string]*block, error) {
 // it as main, or with -buildmode=plugin, which compiles both alike, the
 // first by step, is the plain package. The test
 // mains, which compile a _testmain.go no plan holds, are left out: nothing
-// imports them. Each block's name follows its ID, so variants of a package
-// don't share one.
-func identifyVariants(blocks map[string]*block, ids, mains map[string]bool) error {
+// imports them. With testMains, as in a go test -c plan of several test
+// binaries, they stay, each named by its own ID, "p.test". Each block's name
+// follows its ID, so variants of a package don't share one.
+func identifyVariants(blocks map[string]*block, ids, mains map[string]bool, testMains bool) error {
 	for id, b := range blocks {
-		if strings.HasSuffix(b.importPath, ".test") {
+		if strings.HasSuffix(b.importPath, ".test") && !testMains {
 			delete(blocks, id)
 		}
 	}
@@ -184,6 +201,14 @@ func identifyVariants(blocks map[string]*block, ids, mains map[string]bool) erro
 		}
 		b := blocks[id]
 		if b.isProfile {
+			return b.importPath, nil
+		}
+		if strings.HasSuffix(b.importPath, ".test") {
+			// A test main, which only testMains keeps.
+			if !ids[b.importPath] {
+				return "", fmt.Errorf("plan step %s, %s, is no package the listing has", id, b.importPath)
+			}
+			resolved[id] = b.importPath
 			return b.importPath, nil
 		}
 		forTest := ""
@@ -267,7 +292,7 @@ func (b *block) compilesTests() bool {
 	return false
 }
 
-func parseBlocks(plan string, r roots, archives bool) (map[string]*block, error) {
+func parseBlocks(plan string, r roots, kind planKind) (map[string]*block, error) {
 	blocks := map[string]*block{}
 	var cur *block
 	cwd := r.Cwd
@@ -328,7 +353,7 @@ func parseBlocks(plan string, r roots, archives bool) (map[string]*block, error)
 			}
 			linking = ""
 		}
-		if archives && !content && strings.HasPrefix(line, "cat >$WORK/") {
+		if kind == planArchives && !content && strings.HasPrefix(line, "cat >$WORK/") {
 			if m := reLinkCfg.FindStringSubmatch(line); m != nil {
 				linking = m[1]
 				continue
@@ -447,8 +472,13 @@ func parseBlocks(plan string, r roots, archives bool) (map[string]*block, error)
 			return nil, fmt.Errorf("plan step %s has no package header", id)
 		}
 	}
-	if !archives {
+	switch kind {
+	case planBinary:
 		if err := markLink(blocks); err != nil {
+			return nil, err
+		}
+	case planTests:
+		if err := markTestLinks(blocks); err != nil {
 			return nil, err
 		}
 	}
@@ -600,6 +630,30 @@ func markLink(blocks map[string]*block) error {
 	}
 	if main.out == "" {
 		return fmt.Errorf("%w: no link output for %s", errUnsupported, main.importPath)
+	}
+	return nil
+}
+
+// markTestLinks marks the blocks of a plan of several test binaries that
+// link: each test main's, which links its binary where it stays, as with
+// -o /dev/null nothing copies it out.
+func markTestLinks(blocks map[string]*block) error {
+	n := 0
+	for id, b := range blocks {
+		if b.linkAt == 0 {
+			continue
+		}
+		b.isLink = true
+		if m := reTestLinkOut.FindStringSubmatch(b.linkLine()); m != nil && m[1] == id {
+			b.out = m[2]
+		}
+		if b.out == "" {
+			return fmt.Errorf("%w: no link output for %s", errUnsupported, b.importPath)
+		}
+		n++
+	}
+	if n == 0 {
+		return fmt.Errorf("%w: no test binary in the plan", errUnsupported)
 	}
 	return nil
 }

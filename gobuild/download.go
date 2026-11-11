@@ -150,8 +150,8 @@ type downloader struct {
 // command's loader finds them, and returns a directory of their plan packs,
 // their zips by module cache directory name, and their downloads in name
 // order. It follows packages: from
-// the package in the source's directory pkgDir, or with none, every package
-// of the source, through the source's own packages, each imported package's
+// the packages in the source's directories pkgDirs, or with none, every
+// package of the source, through the source's own packages, each imported package's
 // module is downloaded,
 // and its pack lists the package's own imports, which it follows in turn,
 // until no new package turns up: what the build's packages import, whatever
@@ -160,7 +160,7 @@ type downloader struct {
 // the plan reads that discover missed, such as one a replace renames, the
 // plan fetches itself, and the build downloads its zip on its own (lazyZip).
 // With them come the directories whose Go files the plan reads (planDirs).
-func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDir string) (*discovered, error) {
+func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDirs []string) (*discovered, error) {
 	byPath := map[string][]sumEntry{}
 	for _, e := range d.sums {
 		if e.zip != "" {
@@ -273,14 +273,8 @@ func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDir str
 			}
 		}
 	}
-	if _, ok := src.pkgs[path.Clean(pkgDir)]; pkgDir != "" && ok {
-		followSource(path.Clean(pkgDir))
-	} else {
-		for dir := range src.pkgs {
-			if !inTestdata(dir) {
-				followSource(dir)
-			}
-		}
+	for _, dir := range startDirs(src.pkgs, pkgDirs) {
+		followSource(dir)
 	}
 	wg.Wait()
 	names := make([]string, 0, len(modules))
@@ -295,7 +289,7 @@ func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDir str
 		pkgs[name] = m.pkgs
 	}
 	out := &discovered{names: names, zips: map[string]*dagger.File{}}
-	out.dirs, out.planFollowed = planDirsOf(src, pkgDir, byPath, pkgs)
+	out.dirs, out.planFollowed = planDirsOf(src, pkgDirs, byPath, pkgs)
 	for ip := range seenPkgs {
 		out.followed = append(out.followed, ip)
 	}
@@ -357,12 +351,12 @@ type modulePackages struct {
 }
 
 // planDirsOf is the directories a plan reads: of the packages imports reach
-// from the package in pkgDir, or every package of the source, through the
+// from the packages in pkgDirs, or every package of the source, through the
 // source's packages and the downloaded modules', pkgs by module cache
 // directory name, followed whatever their files' build constraints, so
 // never fewer than the go command loads for the build's target; and the
 // import paths it followed that the source doesn't provide.
-func planDirsOf(src sourceImports, pkgDir string, byPath map[string][]sumEntry, pkgs map[string]modulePackages) (dirs planDirs, followed []string) {
+func planDirsOf(src sourceImports, pkgDirs []string, byPath map[string][]sumEntry, pkgs map[string]modulePackages) (dirs planDirs, followed []string) {
 	seenSrc, seenPkg := map[string]bool{}, map[string]bool{}
 	var queue []string
 	addSource := func(dir string) {
@@ -372,14 +366,8 @@ func planDirsOf(src sourceImports, pkgDir string, byPath map[string][]sumEntry, 
 			queue = append(queue, src.all[dir]...)
 		}
 	}
-	if _, ok := src.all[path.Clean(pkgDir)]; pkgDir != "" && ok {
-		addSource(path.Clean(pkgDir))
-	} else {
-		for dir := range src.all {
-			if !inTestdata(dir) {
-				addSource(dir)
-			}
-		}
+	for _, dir := range startDirs(src.all, pkgDirs) {
+		addSource(dir)
 	}
 	for len(queue) > 0 {
 		ip := queue[0]
@@ -455,13 +443,13 @@ func (src sourceImports) dirOf(ip string) (string, bool) {
 
 // outside is what the source's packages import from outside the source:
 // the import paths that their imports, followed through the source alone,
-// from the package in pkgDir or with none, every package of the source,
+// from the packages in pkgDirs or with none, every package of the source,
 // reach and no package of the source provides, by the target's build
 // constraints, as discover follows them (imports), and whatever their
 // constraints, as planDirsOf does (plan); with the source's directories
 // planDirsOf reaches that way (dirs). A standard library package, which no
 // module provides, is left out.
-func (src sourceImports) outside(pkgDir string) (imports, plan, dirs []string) {
+func (src sourceImports) outside(pkgDirs ...string) (imports, plan, dirs []string) {
 	imports, plan = []string{}, []string{}
 	seenDirs, seenPkgs := map[string]bool{}, map[string]bool{}
 	var queue []string
@@ -471,14 +459,8 @@ func (src sourceImports) outside(pkgDir string) (imports, plan, dirs []string) {
 			queue = append(queue, src.pkgs[dir]...)
 		}
 	}
-	if _, ok := src.pkgs[path.Clean(pkgDir)]; pkgDir != "" && ok {
-		addSource(path.Clean(pkgDir))
-	} else {
-		for dir := range src.pkgs {
-			if !inTestdata(dir) {
-				addSource(dir)
-			}
-		}
+	for _, dir := range startDirs(src.pkgs, pkgDirs) {
+		addSource(dir)
 	}
 	for len(queue) > 0 {
 		ip := queue[0]
@@ -493,13 +475,34 @@ func (src sourceImports) outside(pkgDir string) (imports, plan, dirs []string) {
 		}
 	}
 	sort.Strings(imports)
-	srcDirs, followed := planDirsOf(src, pkgDir, nil, nil)
+	srcDirs, followed := planDirsOf(src, pkgDirs, nil, nil)
 	for _, ip := range followed {
 		if inModule(ip) {
 			plan = append(plan, ip)
 		}
 	}
 	return imports, plan, srcDirs.src
+}
+
+// startDirs is the source's directories that following starts from: those
+// of pkgDirs that hold a package in pkgs, by directory, or when none does,
+// every one of pkgs outside testdata.
+func startDirs(pkgs map[string][]string, pkgDirs []string) []string {
+	var dirs []string
+	for _, d := range pkgDirs {
+		if _, ok := pkgs[path.Clean(d)]; d != "" && ok && !slices.Contains(dirs, path.Clean(d)) {
+			dirs = append(dirs, path.Clean(d))
+		}
+	}
+	if len(dirs) > 0 {
+		return dirs
+	}
+	for dir := range pkgs {
+		if !inTestdata(dir) {
+			dirs = append(dirs, dir)
+		}
+	}
+	return dirs
 }
 
 // ownModules is the paths of the source's modules that go.sum's entries

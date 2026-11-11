@@ -693,8 +693,10 @@ type GoDev {
   the package with its test files, its external test package, a dependency
   only its tests import, an embed in a test file, and a package that imports
   it, recompiled against its test variant. The binaries list the same tests
-  and pass and fail the same ones; -race finds the race in TestRace. All of
-  it under Go 1.26 and Go 1.27.
+  and pass and fail the same ones; -race finds the race in TestRace. So is
+  each of a package set's test binaries, built from one plan of them all, with
+  and without -race and the stamp, and with -cover. All of it under Go 1.26
+  and Go 1.27.
   """
   testBinaryCheck: Void @check {
     let failures = testBinaryFailures("1.26.1") + testBinaryFailures("1.27.3")
@@ -712,6 +714,7 @@ type GoDev {
       .withNewFile("lib/ext_test.go", "package lib_test\n\nimport (\n\t\"testing\"\n\n\t\"example.com/tb/lib\"\n\t\"example.com/tb/user\"\n)\n\nfunc TestUser(t *testing.T) {\n\tif user.Twice() != 2*lib.Answer() {\n\t\tt.Fatal(\"wrong\")\n\t}\n}\n")
       .withNewFile("testonly/testonly.go", "package testonly\n\n// Want is what the test wants.\nfunc Want() int { return 42 }\n")
       .withNewFile("user/user.go", "package user\n\nimport \"example.com/tb/lib\"\n\n// Twice is twice the answer.\nfunc Twice() int { return 2 * lib.Answer() }\n")
+      .withNewFile("user/user_test.go", "package user\n\nimport \"testing\"\n\nfunc TestTwice(t *testing.T) {\n\tif Twice() != 84 {\n\t\tt.Fatal(\"wrong\")\n\t}\n}\n")
       # Test files go test -c builds whatever they hold, in command packages,
       # which are package keys whatever their tests.
       .withNewFile("alias/main.go", goMain("alias"))
@@ -800,7 +803,43 @@ type GoDev {
       if (crossed.trimSpace == "same") { "" } else { "Go " + version + ": " + crossed },
       if (windows == "lib.test.exe") { "" } else { "Go " + version + ": the Windows test binary is named " + windows },
     ]
-    (failures + platformFailures).filter { failure => failure != "" }
+    # Every package's test binary from one plan of them all is go test -c's
+    # of that package alone: lib's binary has user recompiled against lib's
+    # test variant, and user's own has user and lib as they are.
+    let setFailures = ["", "-race;" + stamp, "-cover"].map { variant =>
+      let flags = variant.split(";").filter { f => f != "" }
+      let race = flags.contains("-race")
+      let tool = if (race) { go(base: cgo, buildFlags: flags) } else {
+        go(
+          version: version,
+          buildFlags: flags,
+        )
+      }
+      let built = tool.modules(ws).get(key: ".").packages(ws).testBinary(ws)
+      let compared = cgo
+        .withEnvVariable("CGO_ENABLED", if (race) { "1" } else { "0" })
+        .withDirectory("/src", source)
+        .withWorkdir("/src")
+        .withDirectory("/module", built)
+        .withExec(["sh", "-c", """
+          set -e
+          find /module -type f | sort > /found
+          printf '%s\n' /module/alias/alias.test /module/bench/bench.test /module/lib/lib.test /module/tmain/tmain.test /module/user/user.test > /want
+          cmp -s /found /want || { echo "the set holds:"; cat /found; }
+          for p in alias bench lib tmain user; do
+            go test -c -vet=off "$@" -o /plain/$p/$p.test ./$p
+            for b in plain module; do
+              objcopy --remove-section=.note.go.buildid --remove-section=.note.gnu.build-id /$b/$p/$p.test /$b/$p/stripped
+              /$b/$p/$p.test -test.list . > /$b/$p/list
+            done
+            cmp -s /plain/$p/stripped /module/$p/stripped || echo "$p: the bytes differ"
+            cmp -s /plain/$p/list /module/$p/list || echo "$p: the test lists differ"
+          done
+        """, "compare"] + flags)
+        .stdout
+      if (compared.trimSpace == "") { "" } else { "the set's test binaries, " + variant + " (Go " + version + "): " + compared }
+    }
+    (failures + platformFailures + setFailures).filter { failure => failure != "" }
   }
 
   """

@@ -433,6 +433,64 @@ func (r *Gobuild) LinkObjects(ctx context.Context, dirs []*Directory, files []st
 	return convert(response), nil
 }
 
+// GobuildTestBinariesOpts contains options for Gobuild.TestBinaries
+type GobuildTestBinariesOpts struct {
+	// The image base was made from, as for Binary.
+	Image string
+	// The custom container base was made from, as for Binary.
+	From *Container
+	// The directory to run go test in, relative to mountPath.
+	//
+	// Default: "."
+	Workdir string
+	// Flags for go test -c, before the packages, e.g. -race or -ldflags.
+	Flags []string
+	// The container module downloads run with, as for Binary.
+	Downloads *Container
+}
+
+// TestBinaries builds the test binaries of packages pkgs, each as
+// TestBinary builds it, from one plan of them all, as go test plans several
+// packages: the set's setup, plan, test mains and dependency call are made
+// once, and a package more than one binary compiles compiles once. It
+// returns a directory with each binary in its package's directory, relative
+// to workdir, named as go test -c names it, e.g. "a/a.test".
+func (r *Gobuild) TestBinaries(base *Container, source *Directory, headers *File, mountPath string, pkgs []string, opts ...GobuildTestBinariesOpts) *Directory {
+	assertNotNil("base", base)
+	assertNotNil("source", source)
+	assertNotNil("headers", headers)
+	q := r.query.Select("testBinaries")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `image` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Image) {
+			q = q.Arg("image", opts[i].Image)
+		}
+		// `from` optional argument
+		if !querybuilder.IsZeroValue(opts[i].From) {
+			q = q.Arg("from", opts[i].From)
+		}
+		// `workdir` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Workdir) {
+			q = q.Arg("workdir", opts[i].Workdir)
+		}
+		// `flags` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Flags) {
+			q = q.Arg("flags", opts[i].Flags)
+		}
+		// `downloads` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Downloads) {
+			q = q.Arg("downloads", opts[i].Downloads)
+		}
+	}
+	q = q.Arg("base", base)
+	q = q.Arg("source", source)
+	q = q.Arg("headers", headers)
+	q = q.Arg("mountPath", mountPath)
+	q = q.Arg("pkgs", pkgs)
+
+	return new(Directory).WithGraphQLQuery(q)
+}
+
 // GobuildTestBinaryOpts contains options for Gobuild.TestBinary
 type GobuildTestBinaryOpts struct {
 	// The image base was made from, as for Binary.

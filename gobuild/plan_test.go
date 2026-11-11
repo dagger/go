@@ -1123,6 +1123,120 @@ func TestParseArchivePlan(t *testing.T) {
 	}
 }
 
+// A go test -c plan of several packages' test binaries links each one in
+// its test main's block, where -o /dev/null leaves it; parsePlan, which
+// builds one binary, takes no such plan.
+func TestParseTestsPlan(t *testing.T) {
+	testBinary := func(main, pkg, name string) []string {
+		return []string{
+			"mkdir -p $WORK/" + main + "/",
+			"",
+			"#",
+			"# " + pkg + ".test",
+			"#",
+			"",
+			"cat >$WORK/" + main + "/importcfg << 'EOF' # internal",
+			"packagefile " + pkg + "=$WORK/b002/_pkg_.a",
+			"EOF",
+			"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/" + main + "/_pkg_.a -trimpath \"$WORK/" + main + "=>\" -p main -importcfg $WORK/" + main + "/importcfg -pack $WORK/" + main + "/_testmain.go",
+			"cat >$WORK/" + main + "/importcfg.link << 'EOF' # internal",
+			"packagefile " + pkg + ".test=$WORK/" + main + "/_pkg_.a",
+			"packagefile " + pkg + "=$WORK/b002/_pkg_.a",
+			"EOF",
+			"cd .",
+			"/usr/local/go/pkg/tool/linux_amd64/link -o $WORK/" + main + "/" + name + " -importcfg $WORK/" + main + "/importcfg.link -buildmode=exe -buildid=a/b/c/d $WORK/" + main + "/_pkg_.a",
+		}
+	}
+	lines := []string{
+		"mkdir -p $WORK/b002/",
+		"",
+		"#",
+		"# example.com/x",
+		"#",
+		"",
+		"cat >$WORK/b002/importcfg << 'EOF' # internal",
+		"# import config",
+		"EOF",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b002/_pkg_.a -trimpath \"$WORK/b002=>\" -p example.com/x -importcfg $WORK/b002/importcfg -pack ./x.go ./x_test.go",
+	}
+	lines = append(lines, testBinary("b001", "example.com/x", "x.test")...)
+	lines = append(lines, testBinary("b003", "example.com/x", "y.test")...)
+	plan := strings.Join(lines, "\n")
+	if _, err := parsePlan(plan, testRoots); err == nil {
+		t.Fatal("parsePlan took a plan with two links")
+	}
+	blocks, err := parseTestsPlan(plan, testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, out := range map[string]string{"b001": "x.test", "b003": "y.test"} {
+		b := blocks[id]
+		if b == nil || !b.isLink || b.out != out || !slices.Equal(b.deps, []string{"b002"}) {
+			t.Errorf("%s: %+v, want a link to %s after b002", id, b, out)
+		}
+	}
+	if blocks["b002"].isLink {
+		t.Error("the package's block links")
+	}
+	if _, err := parseTestsPlan(strings.Join(lines[:10], "\n"), testRoots); err == nil {
+		t.Error("parseTestsPlan took a plan without a test binary")
+	}
+}
+
+// In a plan of several test binaries the test mains stay, each named by its
+// own ID, and a package two tests compile is named once for each.
+func TestIdentifyVariantsTestMains(t *testing.T) {
+	compile := func(id, pkg string, files []string, deps ...string) []string {
+		lines := []string{"mkdir -p $WORK/" + id + "/", "", "#", "# " + pkg, "#", "", "cat >$WORK/" + id + "/importcfg << 'EOF' # internal"}
+		for _, d := range deps {
+			lines = append(lines, "packagefile x=$WORK/"+d+"/_pkg_.a")
+		}
+		return append(lines, "EOF",
+			"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/"+id+"/_pkg_.a -p "+pkg+" -importcfg $WORK/"+id+"/importcfg -pack "+strings.Join(files, " "))
+	}
+	var lines []string
+	lines = append(lines, compile("b002", "example.com/m/p", []string{"./p/p.go"})...)
+	lines = append(lines, compile("b003", "example.com/m/q", []string{"./q/q.go", "./q/q_test.go"}, "b002")...)
+	lines = append(lines, compile("b004", "example.com/m/q.test", []string{"$WORK/b004/_testmain.go"}, "b003")...)
+	lines = append(lines, compile("b005", "example.com/m/p", []string{"./p/p.go", "./p/p_test.go"})...)
+	lines = append(lines, compile("b006", "example.com/m/q", []string{"./q/q.go"}, "b005")...)
+	lines = append(lines, compile("b007", "example.com/m/p_test", []string{"./p/x_test.go"}, "b005", "b006")...)
+	lines = append(lines, compile("b008", "example.com/m/p.test", []string{"$WORK/b008/_testmain.go"}, "b005", "b007")...)
+	blocks, err := parseArchivePlan(strings.Join(lines, "\n"), testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]bool{
+		"example.com/m/p": true, "example.com/m/q": true, "example.com/m/p.test": true, "example.com/m/q.test": true,
+		"example.com/m/p [example.com/m/p.test]": true, "example.com/m/q [example.com/m/p.test]": true,
+		"example.com/m/q [example.com/m/q.test]": true, "example.com/m/p_test [example.com/m/p.test]": true,
+	}
+	if err := identifyVariants(blocks, ids, map[string]bool{}, true); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"b002": "example.com/m/p",
+		"b003": "example.com/m/q [example.com/m/q.test]",
+		"b004": "example.com/m/q.test",
+		"b005": "example.com/m/p [example.com/m/p.test]",
+		"b006": "example.com/m/q [example.com/m/p.test]",
+		"b007": "example.com/m/p_test [example.com/m/p.test]",
+		"b008": "example.com/m/p.test",
+	}
+	names := map[string]bool{}
+	for id, v := range want {
+		b := blocks[id]
+		if b == nil || b.importPath != v || b.name != stableName(v) {
+			t.Errorf("%s: %+v, want %s", id, b, v)
+			continue
+		}
+		names[b.name] = true
+	}
+	if len(blocks) != len(want) || len(names) != len(want) {
+		t.Errorf("%d blocks with %d names, want %d of each", len(blocks), len(names), len(want))
+	}
+}
+
 // A "go list -export -deps -test -n" plan names each step by import path
 // only: identifyVariants gives each its package's ID, a test variant by its
 // test files, a package recompiled for a test by its imports, and leaves
@@ -1158,7 +1272,7 @@ func TestIdentifyVariants(t *testing.T) {
 		"example.com/m/p_test [example.com/m/p.test]": true,
 	}
 	mains := map[string]bool{"example.com/m/cmd": true}
-	if err := identifyVariants(blocks, ids, mains); err != nil {
+	if err := identifyVariants(blocks, ids, mains, false); err != nil {
 		t.Fatal(err)
 	}
 	want := map[string]string{
@@ -1189,7 +1303,7 @@ func TestIdentifyVariants(t *testing.T) {
 	// both steps: the first is the plain package. Without tests, it has one.
 	plugin := strings.ReplaceAll(strings.Join(lines, "\n"), "-p main ", "-p example.com/m/cmd ")
 	blocks, _ = parseArchivePlan(plugin, testRoots)
-	if err := identifyVariants(blocks, ids, mains); err != nil {
+	if err := identifyVariants(blocks, ids, mains, false); err != nil {
 		t.Fatal(err)
 	}
 	if blocks["b008"].importPath != "example.com/m/cmd" || blocks["b009"].importPath != "example.com/m/cmd [example.com/m/cmd.test]" {
@@ -1197,7 +1311,7 @@ func TestIdentifyVariants(t *testing.T) {
 	}
 	// Step numbers have at least three digits: b1000 comes after b900.
 	blocks, _ = parseArchivePlan(strings.NewReplacer("$WORK/b008/", "$WORK/b900/", "$WORK/b009/", "$WORK/b1000/").Replace(plugin), testRoots)
-	if err := identifyVariants(blocks, ids, mains); err != nil {
+	if err := identifyVariants(blocks, ids, mains, false); err != nil {
 		t.Fatal(err)
 	}
 	if blocks["b900"].importPath != "example.com/m/cmd" || blocks["b1000"].importPath != "example.com/m/cmd [example.com/m/cmd.test]" {
@@ -1205,12 +1319,12 @@ func TestIdentifyVariants(t *testing.T) {
 	}
 	blocks, _ = parseArchivePlan(strings.Join(lines[:len(lines)-len(compile("b009", "example.com/m/cmd", []string{"./cmd/main.go"}))], "\n"), testRoots)
 	if err := identifyVariants(blocks, map[string]bool{"example.com/m/cmd": true, "example.com/m/p": true, "example.com/m/q": true,
-		"example.com/m/p [example.com/m/p.test]": true, "example.com/m/q [example.com/m/p.test]": true, "example.com/m/p_test [example.com/m/p.test]": true}, mains); err != nil || blocks["b008"].importPath != "example.com/m/cmd" {
+		"example.com/m/p [example.com/m/p.test]": true, "example.com/m/q [example.com/m/p.test]": true, "example.com/m/p_test [example.com/m/p.test]": true}, mains, false); err != nil || blocks["b008"].importPath != "example.com/m/cmd" {
 		t.Errorf("a main package without tests: %v, %s", err, blocks["b008"].importPath)
 	}
 	delete(ids, "example.com/m/q [example.com/m/p.test]")
 	blocks, _ = parseArchivePlan(strings.Join(lines, "\n"), testRoots)
-	if err := identifyVariants(blocks, ids, mains); err == nil {
+	if err := identifyVariants(blocks, ids, mains, false); err == nil {
 		t.Error("a step that is no listed package was taken")
 	}
 }
