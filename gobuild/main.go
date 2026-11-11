@@ -227,7 +227,7 @@ func (m *Gobuild) Archives(
 	for _, bl := range blocks {
 		modFiles = append(modFiles, bl.modFiles...)
 	}
-	tool := manifestTools(b.toolImage, b.target.platform())
+	tool := w.manifestTool
 	ctr := b.modules.mount(b.base.
 		WithMountedDirectory(writeManifestDir, tool), modFiles).
 		WithMountedDirectory(b.roots.Src, b.src)
@@ -252,11 +252,8 @@ func (m *Gobuild) Archives(
 	}
 	// The settings the manifest records are the go command's where the plan
 	// ran it, as the plan left it: the toolchain it switched to, with the
-	// module cache it set up for it.
-	env := p.ran.
-		WithMountedDirectory(writeManifestDir, tool).
-		WithExec([]string{"sh", "-c", "cd " + shQuote(b.roots.Cwd) + " && " + writeManifestBin + " env > /gobuild/env.json"}, bare).
-		File("/gobuild/env.json")
+	// module cache it set up for it. The plan's exec records them.
+	env := p.ran.File("/gobuild/env.json")
 	// The manifest is read from its exec's evaluated output, so it is keyed
 	// by its content: the exec reads the whole listing, which any edit
 	// changes.
@@ -287,6 +284,9 @@ type archiveWalked struct {
 	blocks   map[string]*block
 	results  map[string]*result
 	order    []*block
+	// manifestTool is write-manifest, for the build's target, which the
+	// plan's exec ran to record the go command's settings.
+	manifestTool *dagger.Directory
 }
 
 // archiveWalk plans and walks what Archives compiles, with Archives' arguments.
@@ -320,7 +320,8 @@ func archiveWalk(ctx context.Context, toolImage string, base *dagger.Container, 
 		packages = []string{"./..."}
 	}
 	goCmd := shJoin(append(append(listCmd, flags...), packages...)) + " > /gobuild/list.json"
-	p, err := b.planWith(ctx, headers, goCmd)
+	tool := manifestTools(toolImage, b.target.platform())
+	p, err := b.planWith(ctx, headers, goCmd, tool)
 	if err != nil {
 		return nil, err
 	}
@@ -354,7 +355,7 @@ func archiveWalk(ctx context.Context, toolImage string, base *dagger.Container, 
 		}
 	}
 	sort.Slice(order, func(i, j int) bool { return order[i].importPath < order[j].importPath })
-	return &archiveWalked{build: b, plan: p, envFlags: envFlags, blocks: blocks, results: results, order: order}, nil
+	return &archiveWalked{build: b, plan: p, envFlags: envFlags, blocks: blocks, results: results, order: order, manifestTool: tool}, nil
 }
 
 // ArchiveCache is what a build reads from the cache that every build of its
@@ -1073,7 +1074,7 @@ func (b *build) plan(ctx context.Context, headers *dagger.File, flags []string, 
 	}
 	cmd = append(cmd, flags...)
 	cmd = append(cmd, "-o", planOut+"/out", pkg)
-	p, err := b.planWith(ctx, headers, shJoin(cmd))
+	p, err := b.planWith(ctx, headers, shJoin(cmd), nil)
 	if err != nil {
 		return "", nil, ccInfo{}, nil, err
 	}
@@ -1159,14 +1160,21 @@ func (b *build) planHeaders(ctx context.Context, headers *dagger.File) (*dagger.
 }
 
 // planWith makes a plan as plan does, with goCmd the go command that prints
-// it.
-func (b *build) planWith(ctx context.Context, headers *dagger.File, goCmd string) (*planned, error) {
+// it. With manifestTool, write-manifest, the same exec records the go
+// command's settings as the plan left them, for an archives manifest, in
+// /gobuild/env.json: an exec of their own would cost another exec start.
+func (b *build) planWith(ctx context.Context, headers *dagger.File, goCmd string, manifestTool *dagger.Directory) (*planned, error) {
 	planHdr, goDirs, err := b.planHeaders(ctx, headers)
 	if err != nil {
 		return nil, err
 	}
-	ran := b.withModules(b.base.
-		WithMountedDirectory(hdrDir, b.hdr)).
+	base := b.base.WithMountedDirectory(hdrDir, b.hdr)
+	env := ""
+	if manifestTool != nil {
+		base = base.WithMountedDirectory(writeManifestDir, manifestTool)
+		env = " && " + writeManifestBin + " env > /gobuild/env.json"
+	}
+	ran := b.withModules(base).
 		WithMountedDirectory(b.roots.Src, planSource(b.src)).
 		WithMountedFile("/gobuild/src.hdr", planHdr).
 		// An empty build cache, so the plan holds every step.
@@ -1179,7 +1187,7 @@ func (b *build) planWith(ctx context.Context, headers *dagger.File, goCmd string
 			" && cd " + shQuote(b.roots.Cwd) + " && { " + goCmd + " 2> /gobuild/plan.txt" +
 			" || { status=$?; tail -n 40 /gobuild/plan.txt >&2; exit $status; }; }" +
 			" && "+hdrBin+" weigh /gobuild/plan.txt > /gobuild/weights.txt" +
-			" && "+hdrBin+" cc /gobuild/plan.txt > /gobuild/cc.txt"}, bare)
+			" && "+hdrBin+" cc /gobuild/plan.txt > /gobuild/cc.txt" + env}, bare)
 	plan, err := ran.File("/gobuild/plan.txt").Contents(ctx)
 	if err != nil {
 		return nil, b.planError(ctx, err)
