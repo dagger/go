@@ -517,6 +517,7 @@ type GoPackages @collection {
   package(path: String!): GoPackage! @get {
     GoPackage(
       path: path,
+      set: paths,
       mountPath: mountPath,
       tool: tool,
       tests: entries.filter { entry => entry.directory == path }[0]!.tests,
@@ -611,6 +612,10 @@ type GoPackage {
   """
   path: String!
 
+  # The collection's packages this one was taken from, whose test binaries
+  # are planned with its own.
+  let set: [String!]!
+
   let mountPath: String!
 
   let tool: Go!
@@ -636,11 +641,20 @@ type GoPackage {
   This package's test binary for the engine's platform, as go test -c builds
   it. The package must have test files.
 
+  It is planned with the test binaries of the other packages of the
+  collection it was taken from, as the collection's testBinary builds them,
+  and shares that plan, its setup and the compiles of their dependencies
+  with each of their own testBinary: it compiles only what it links, and is
+  ready when its own link is. As on go test's command line, a build flag
+  without a package pattern, such as -gcflags=-N, applies to every package
+  of the collection. Taken from a collection narrowed to the packages
+  wanted, it is planned with those alone.
+
   Unlike go test -c, it does not run go vet on the package: vet is left to
   the lint checks, such as golangci-lint's.
   """
   testBinary(ws: Workspace!): File! {
-    module(ws).testBinaryFile(ws, gomod.hostPlatform, path)
+    module(ws).testBinaryFile(ws, gomod.hostPlatform, path, set)
   }
 
   """
@@ -798,7 +812,8 @@ type GoPlatform {
   but without go vet, which is left to the lint checks.
   """
   testBinary(ws: Workspace!): File! {
-    tool.packageModule(ws, path, mountPath).testBinaryFile(ws, name, path)
+    let alone: [String!]! = []
+    tool.packageModule(ws, path, mountPath).testBinaryFile(ws, name, path, alone)
   }
 }
 
@@ -1561,6 +1576,23 @@ type GoModule {
     out
   }
 
+  # Whether go build flags, with GOFLAGS, apply to the packages named on the
+  # go command line, so that what they reach depends on which: -coverpkg,
+  # and -gcflags, -asmflags or -gccgoflags without a package pattern.
+  let commandLineFlags(flags: [String!]!): Boolean! {
+    flags.any { f =>
+      let name = f.trimPrefix("-").trimPrefix("-").split("=")[0]!
+      let value = f.split("=").dropFirst(1).join("=")
+      if (name == "coverpkg") {
+        true
+      } else if (name == "gcflags" or name == "asmflags" or name == "gccgoflags") {
+        f.contains("=") == false or value.hasPrefix("-") or value.contains("=") == false
+      } else {
+        false
+      }
+    }
+  }
+
   # Whether go build flags, with GOFLAGS, pick the gccgo compiler.
   let gccgo(flags: [String!]!): Boolean! {
     flags.any { f => f == "-compiler=gccgo" or f == "--compiler=gccgo" }
@@ -1665,13 +1697,21 @@ type GoModule {
   }
 
   # One package's test binary for a platform, named as go test -c names it.
-  # A gc build runs one cached exec per package, as a binary's does.
-  let testBinaryFile(ws: Workspace!, platform: String!, pkgPath: String!): File! {
+  # A gc build runs one cached exec per package, as a binary's does. With
+  # other packages in set, it is planned with theirs (GoPackage.testBinary).
+  let testBinaryFile(ws: Workspace!, platform: String!, pkgPath: String!, set: [String!]!): File! {
     let rel = relativeDir(pkgPath)
     # go test -c's own rule: a package with test files has a test binary,
     # whatever they hold.
-    if (lib.at(path).testDirectories(ws).contains(pkgPath) == false) {
+    let tested = lib.at(path).testDirectories(ws)
+    if (tested.contains(pkgPath) == false) {
       raise "Go package " + pkgPath + " has no test files"
+    }
+    let ctrFlags = buildFlags + (platformBase(ws, platform).envVariable("GOFLAGS") ?? "").split(" ").filter { f => f != "" }
+    # A flag whose packages are go test's command line's would reach the
+    # set's other packages too: the binary is planned alone.
+    let planned = if (commandLineFlags(ctrFlags)) { [] } else {
+      set.filter { p => tested.contains(p) }.map { p => packageArg(relativeDir(p)) }
     }
     let name = if (platform.hasPrefix("windows/")) {
       binaryFileName(ws, pkgPath, platform).trimSuffix(".exe") + ".test.exe"
@@ -1701,6 +1741,7 @@ type GoModule {
         flags: buildFlags,
         downloads: tool.downloads,
         sharedImports: tool.sharedImports,
+        set: if (planned.length > 1) { planned } else { null },
       )
     }
     out.sync rescue {

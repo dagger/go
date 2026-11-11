@@ -564,6 +564,13 @@ type GobuildTestBinaryOpts struct {
 	// Import paths whose packages are compiled in dependency calls of their
 	// own, as for Binary.
 	SharedImports []string
+	// The go test package arguments of the test binaries planned with this
+	// one, pkg's among them, such as its collection's. The plan, its setup,
+	// the test mains and the dependency call are those of TestBinaries of the
+	// set, which every TestBinary of the set shares, and this one compiles
+	// only what its binary links, so it is ready when its own link is. Its
+	// flags apply as to the set's.
+	Set []string
 }
 
 // TestBinary builds the test binary of package pkg as "go test -c" would,
@@ -602,6 +609,10 @@ func (r *Gobuild) TestBinary(base *Container, source *Directory, headers *File, 
 		// `sharedImports` optional argument
 		if !querybuilder.IsZeroValue(opts[i].SharedImports) {
 			q = q.Arg("sharedImports", opts[i].SharedImports)
+		}
+		// `set` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Set) {
+			q = q.Arg("set", opts[i].Set)
 		}
 	}
 	q = q.Arg("base", base)

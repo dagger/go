@@ -1479,3 +1479,19 @@ func TestDependencyListing(t *testing.T) {
 		t.Errorf("dependencyListing =\n%s\nwant\n%s", got, want)
 	}
 }
+
+// A package's test binary from a plan of several builds the block that links
+// it and what that block depends on, and nothing of the other binaries.
+func TestClosure(t *testing.T) {
+	blocks := map[string]*block{
+		"b001": {id: "b001", deps: []string{"b003", "b004"}},
+		"b002": {id: "b002", deps: []string{"b004", "b005"}},
+		"b003": {id: "b003", deps: []string{"b004"}},
+		"b004": {id: "b004"},
+		"b005": {id: "b005"},
+	}
+	got := closure(blocks, "b001")
+	if !reflect.DeepEqual(got, map[string]bool{"b001": true, "b003": true, "b004": true}) {
+		t.Errorf("closure of b001: %v", got)
+	}
+}

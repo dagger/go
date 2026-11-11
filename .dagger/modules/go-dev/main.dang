@@ -688,8 +688,11 @@ type GoDev {
   """
   A package's test binary is the one go test -c builds without vet, byte for
   byte but for its build IDs, with and without -race and an -ldflags stamp,
-  -cover and -coverpkg, and for packages whose test files hold only an
-  aliased testing import, a benchmark or a TestMain:
+  -cover, -coverpkg and -gcflags without a package pattern, and for packages
+  whose test files hold only an aliased testing import, a benchmark or a
+  TestMain. Each is taken from its module's collection, so it is planned with
+  the collection's other test binaries, except with -coverpkg or that
+  -gcflags, which plan it alone. Each covers:
   the package with its test files, its external test package, a dependency
   only its tests import, an embed in a test file, and a package that imports
   it, recompiled against its test variant. The binaries list the same tests
@@ -734,7 +737,7 @@ type GoDev {
       .withExec(["apk", "add", "--no-cache", "build-base", "binutils"])
       .withEnvVariable("CGO_ENABLED", "1")
     # Each variant is "<package>;<flag>;...": -race is built with cgo.
-    let variants = ["lib", "lib;-race;" + stamp, "lib;-cover", "lib;-coverpkg=./...", "alias", "bench", "tmain"]
+    let variants = ["lib", "lib;-race;" + stamp, "lib;-cover", "lib;-coverpkg=./...", "lib;-gcflags=-N -l", "alias", "bench", "tmain"]
     let failures = variants.map { variant =>
       let pkg = variant.split(";").takeFirst(1).join("")
       let flags = variant.split(";").dropFirst(1)

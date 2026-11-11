@@ -863,7 +863,14 @@ func DaggerDispatch(ctx context.Context, parentJSON []byte, parentName string, f
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg sharedImports", err))
 				}
 			}
-			return (*Gobuild).TestBinary(&parent, ctx, base, image, from, source, headers, mountPath, workdir, pkg, flags, downloads, sharedImports)
+			var set []string
+			if inputArgs["set"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["set"]), &set)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg set", err))
+				}
+			}
+			return (*Gobuild).TestBinary(&parent, ctx, base, image, from, source, headers, mountPath, workdir, pkg, flags, downloads, sharedImports, set)
 		case "":
 			var parent Gobuild
 			err = json.Unmarshal(parentJSON, &parent)

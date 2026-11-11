@@ -167,7 +167,18 @@ func (m *Gobuild) TestBinary(
 	// own, as for Binary.
 	// +optional
 	sharedImports []string,
+	// The go test package arguments of the test binaries planned with this
+	// one, pkg's among them, such as its collection's. The plan, its setup,
+	// the test mains and the dependency call are those of TestBinaries of the
+	// set, which every TestBinary of the set shares, and this one compiles
+	// only what its binary links, so it is ready when its own link is. Its
+	// flags apply as to the set's.
+	// +optional
+	set []string,
 ) (*dagger.File, error) {
+	if len(set) > 0 {
+		return setMember(ctx, m.ToolImage, base, image, from, downloads, source, headers, mountPath, workdir, pkg, set, flags, sharedImports)
+	}
 	_, linked, err := run(ctx, m.ToolImage, base, image, from, downloads, source, headers, mountPath, workdir, pkg, flags, true, sharedImports)
 	if err != nil {
 		return nil, err
@@ -221,11 +232,72 @@ func (m *Gobuild) TestBinaries(
 	return runTests(ctx, m.ToolImage, base, image, from, downloads, source, headers, mountPath, workdir, pkgs, flags, sharedImports)
 }
 
+// setMember builds pkg's test binary from the plan of set's, as TestBinary
+// with a set does.
+func setMember(ctx context.Context, toolImage string, base *dagger.Container, image string, from, downloads *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir, pkg string, set, flags, shared []string) (*dagger.File, error) {
+	t, err := planTestSet(ctx, toolImage, base, image, from, downloads, source, headers, mountPath, workdir, set, flags, shared)
+	if err != nil {
+		return nil, err
+	}
+	dir := path.Join(mountPath, workdir, pkg)
+	if t != nil {
+		for i, d := range t.dirs {
+			if d != dir {
+				continue
+			}
+			results, err := t.walk(ctx, closure(t.blocks, t.links[i]))
+			if err != nil {
+				return nil, err
+			}
+			return results[t.links[i]].file, nil
+		}
+	}
+	return nil, fmt.Errorf("go test package %s: no test files for the target among its set's", pkg)
+}
+
 // runTests builds pkgs' test binaries from one plan, as TestBinaries does.
 func runTests(ctx context.Context, toolImage string, base *dagger.Container, image string, from, downloads *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir string, pkgs, flags, shared []string) (*dagger.Directory, error) {
 	out := core.NewDirectory()
+	t, err := planTestSet(ctx, toolImage, base, image, from, downloads, source, headers, mountPath, workdir, pkgs, flags, shared)
+	if err != nil || t == nil {
+		return out, err
+	}
+	results, err := t.walk(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	for i, id := range t.links {
+		rel := "."
+		if t.dirs[i] != t.cwd {
+			rel = strings.TrimPrefix(t.dirs[i], t.cwd+"/")
+		}
+		out = out.WithFile(path.Join(rel, t.blocks[id].out), results[id].file)
+	}
+	return out, nil
+}
+
+// testsPlan is one plan of several packages' test binaries, which a set of
+// them builds from (runTests), or one of them (TestBinary with its set).
+type testsPlan struct {
+	b       *build
+	p       *planned
+	blocks  map[string]*block
+	headers *dagger.File
+	flags   []string
+	cwd     string
+	// The packages with test files for the target, by import path, in go
+	// list's order; each one's directory and the source directory of its
+	// test files; and the id of the block that links its test binary.
+	ips, dirs, srcDirs, links []string
+}
+
+// planTestSet plans pkgs' test binaries as runTests builds them: the same
+// setup, plan and listing for every caller with the same pkgs, flags and
+// shared imports, so the engine runs each of their steps once. It is nil
+// when none of pkgs has test files for the target.
+func planTestSet(ctx context.Context, toolImage string, base *dagger.Container, image string, from, downloads *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir string, pkgs, flags, shared []string) (*testsPlan, error) {
 	if len(pkgs) == 0 {
-		return out, nil
+		return nil, nil
 	}
 	cwd := path.Join(mountPath, workdir)
 	// Vet is go test's, as for one test binary (run).
@@ -268,7 +340,7 @@ func runTests(ctx context.Context, toolImage string, base *dagger.Container, ima
 	}
 	ips := strings.Fields(testedList)
 	if len(ips) == 0 {
-		return out, nil
+		return nil, nil
 	}
 	blocks, err := parseTestsPlan(p.plan, b.roots)
 	if err != nil {
@@ -298,21 +370,35 @@ func runTests(ctx context.Context, toolImage string, base *dagger.Container, ima
 	for i, dir := range dirs {
 		srcDirs[i] = strings.TrimPrefix(strings.TrimPrefix(dir, b.roots.Src), "/")
 	}
-	results, err := b.walk(ctx, blocks, p.weights, p.cc, p.goDirs, func(w *walker) error {
-		w.testmain = b.testmains(ctx, headers, flags, ips, srcDirs, links)
+	return &testsPlan{b: b, p: p, blocks: blocks, headers: headers, flags: flags, cwd: cwd,
+		ips: ips, dirs: dirs, srcDirs: srcDirs, links: links}, nil
+}
+
+// walk builds the plan's packages, or with keep, only those it keeps, and
+// returns their results by block id. The dependency call and the test mains
+// are the whole plan's either way, so every walk of the plan shares them.
+func (t *testsPlan) walk(ctx context.Context, keep map[string]bool) (map[string]*result, error) {
+	return t.b.walk(ctx, t.blocks, t.p.weights, t.p.cc, t.p.goDirs, keep, func(w *walker) error {
+		w.testmain = t.b.testmains(ctx, t.headers, t.flags, t.ips, t.srcDirs, t.links)
 		return nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	for i, id := range links {
-		rel := "."
-		if dirs[i] != cwd {
-			rel = strings.TrimPrefix(dirs[i], cwd+"/")
+}
+
+// closure is the block with id and every block it depends on.
+func closure(blocks map[string]*block, id string) map[string]bool {
+	seen := map[string]bool{}
+	var visit func(id string)
+	visit = func(id string) {
+		if seen[id] {
+			return
 		}
-		out = out.WithFile(path.Join(rel, blocks[id].out), results[id].file)
+		seen[id] = true
+		for _, d := range blocks[id].deps {
+			visit(d)
+		}
 	}
-	return out, nil
+	visit(id)
+	return seen
 }
 
 // testLinks is, for each package of ips, by import path, its directory,
@@ -547,7 +633,7 @@ func archiveWalk(ctx context.Context, toolImage string, base *dagger.Container, 
 	if dependencies {
 		walked = dependencyBlocks(blocks, own)
 	}
-	results, err := b.walk(ctx, walked, p.weights, p.cc, p.goDirs, nil)
+	results, err := b.walk(ctx, walked, p.weights, p.cc, p.goDirs, nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -813,7 +899,7 @@ func run(ctx context.Context, toolImage string, base *dagger.Container, image st
 		return nil, nil, fmt.Errorf("source sizes: %w", sr.err)
 	}
 	weighSource(blocks, weights, sr.sizes)
-	results, err := b.walk(ctx, blocks, weights, cc, goDirs, func(w *walker) error {
+	results, err := b.walk(ctx, blocks, weights, cc, goDirs, nil, func(w *walker) error {
 		if test {
 			// Only the link reads it: the packages build meanwhile.
 			dir := strings.TrimPrefix(strings.TrimPrefix(path.Join(b.roots.Cwd, pkg), b.roots.Src), "/")
@@ -831,7 +917,7 @@ func run(ctx context.Context, toolImage string, base *dagger.Container, image st
 // by block id. goDirs is the plan's list of the source's Go files in
 // directories named like Go files. prepare, when set, readies the walker once
 // the module downloads have started.
-func (b *build) walk(ctx context.Context, blocks map[string]*block, weights map[string]int64, cc ccInfo, goDirs *dagger.File, prepare func(*walker) error) (map[string]*result, error) {
+func (b *build) walk(ctx context.Context, blocks map[string]*block, weights map[string]int64, cc ccInfo, goDirs *dagger.File, keep map[string]bool, prepare func(*walker) error) (map[string]*result, error) {
 	// A package with C or assembly in the source reads its files that
 	// aren't Go (nonGoSource), which the Go files in directories named like
 	// Go files are left out of by name.
@@ -852,7 +938,17 @@ func (b *build) walk(ctx context.Context, blocks map[string]*block, weights map[
 			break
 		}
 	}
-	sources := syncSources(ctx, b.src, nonGo, blocks)
+	// A walk that keeps some blocks reads only their sources.
+	synced := blocks
+	if keep != nil {
+		synced = map[string]*block{}
+		for id, bl := range blocks {
+			if keep[id] {
+				synced[id] = bl
+			}
+		}
+	}
+	sources := syncSources(ctx, b.src, nonGo, synced)
 	for _, bl := range blocks {
 		bl.addCFlags(cc)
 	}
@@ -890,8 +986,10 @@ func (b *build) walk(ctx context.Context, blocks map[string]*block, weights map[
 	if err != nil {
 		return nil, err
 	}
-	for id := range done {
-		delete(nodes, id)
+	for id := range nodes {
+		if done[id] != nil || (keep != nil && !keep[id]) {
+			delete(nodes, id)
+		}
 	}
 	return w.walk(ctx, nodes, done)
 }
