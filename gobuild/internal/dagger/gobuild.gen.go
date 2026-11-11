@@ -266,7 +266,7 @@ func (r *Gobuild) Binary(base *Container, source *Directory, headers *File, moun
 // call: every build that compiles the same packages the same way, whatever
 // its own source, finds it in one request, instead of one or two for each
 // package, and an edit of the build's own source leaves it as it is.
-func (r *Gobuild) Dependencies(base *Container, hdr *Directory, tools *Directory, platform string, modRoot string, moduleNames []string, moduleDirs []*Directory, packages string, links bool) *GobuildDependencyBuilds {
+func (r *Gobuild) Dependencies(base *Container, hdr *Directory, tools *Directory, platform string, modRoot string, moduleNames []string, moduleDirs []*Directory, packages string) *GobuildDependencyBuilds {
 	assertNotNil("base", base)
 	assertNotNil("hdr", hdr)
 	assertNotNil("tools", tools)
@@ -279,7 +279,6 @@ func (r *Gobuild) Dependencies(base *Container, hdr *Directory, tools *Directory
 	q = q.Arg("moduleNames", moduleNames)
 	q = q.Arg("moduleDirs", moduleDirs)
 	q = q.Arg("packages", packages)
-	q = q.Arg("links", links)
 
 	return &GobuildDependencyBuilds{
 		query:     q,
@@ -681,7 +680,8 @@ func (r *GobuildDependencyBuilds) Archives(ctx context.Context) ([]File, error) 
 	return convert(response), nil
 }
 
-// Each package's work directory, which holds its archive.
+// Each package's work directory, which holds its archive and, when the
+// package splits, the object code a link reads.
 func (r *GobuildDependencyBuilds) Dirs(ctx context.Context) ([]Directory, error) {
 	q := r.query.Select("dirs")
 
@@ -766,39 +766,6 @@ func (r *GobuildDependencyBuilds) UnmarshalJSON(bs []byte) error {
 	}
 	*r = GobuildDependencyBuilds{query: selectNode(Connect().QueryBuilder(), id, "GobuildDependencyBuilds")}
 	return nil
-}
-
-// Each package's object code, which a link reads: its archive unless
-// the package splits. Empty when the call's caller doesn't link.
-func (r *GobuildDependencyBuilds) LinkObjects(ctx context.Context) ([]File, error) {
-	q := r.query.Select("linkObjects")
-
-	q = q.Select("id")
-
-	type linkObjects struct {
-		Id ID
-	}
-
-	convert := func(fields []linkObjects) []File {
-		out := []File{}
-
-		for i := range fields {
-			val := *loaded[*File](q, fields[i].Id)
-			out = append(out, val)
-		}
-
-		return out
-	}
-	var response []linkObjects
-
-	q = q.Bind(&response)
-
-	err := q.Execute(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	return convert(response), nil
 }
 
 // Discovery is what the discovery call (Discover) found: the modules a

@@ -106,28 +106,24 @@ func (r *ArchiveCache) UnmarshalJSON(bs []byte) error {
 
 func (r DependencyBuilds) MarshalJSON() ([]byte, error) {
 	var concrete struct {
-		Archives    []*dagger.File
-		LinkObjects []*dagger.File
-		Dirs        []*dagger.Directory
+		Archives []*dagger.File
+		Dirs     []*dagger.Directory
 	}
 	concrete.Archives = r.Archives
-	concrete.LinkObjects = r.LinkObjects
 	concrete.Dirs = r.Dirs
 	return json.Marshal(&concrete)
 }
 
 func (r *DependencyBuilds) UnmarshalJSON(bs []byte) error {
 	var concrete struct {
-		Archives    []*dagger.File
-		LinkObjects []*dagger.File
-		Dirs        []*dagger.Directory
+		Archives []*dagger.File
+		Dirs     []*dagger.Directory
 	}
 	err := json.Unmarshal(bs, &concrete)
 	if err != nil {
 		return err
 	}
 	r.Archives = concrete.Archives
-	r.LinkObjects = concrete.LinkObjects
 	r.Dirs = concrete.Dirs
 	return nil
 }
@@ -555,14 +551,7 @@ func DaggerDispatch(ctx context.Context, parentJSON []byte, parentName string, f
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg packages", err))
 				}
 			}
-			var links bool
-			if inputArgs["links"] != nil {
-				err = json.Unmarshal([]byte(inputArgs["links"]), &links)
-				if err != nil {
-					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg links", err))
-				}
-			}
-			return (*Gobuild).Dependencies(&parent, ctx, base, hdr, tools, platform, modRoot, moduleNames, moduleDirs, packages, links)
+			return (*Gobuild).Dependencies(&parent, ctx, base, hdr, tools, platform, modRoot, moduleNames, moduleDirs, packages)
 		case "Discover":
 			var parent Gobuild
 			err = json.Unmarshal(parentJSON, &parent)

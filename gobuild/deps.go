@@ -7,6 +7,7 @@ import (
 	"sort"
 	"sync"
 
+	"dagger.io/dagger/core"
 	"dagger/gobuild/internal/dagger"
 )
 
@@ -15,10 +16,8 @@ import (
 type DependencyBuilds struct {
 	// Each package's archive, which its importers' compiles read.
 	Archives []*dagger.File
-	// Each package's object code, which a link reads: its archive unless
-	// the package splits. Empty when the call's caller doesn't link.
-	LinkObjects []*dagger.File
-	// Each package's work directory, which holds its archive.
+	// Each package's work directory, which holds its archive and, when the
+	// package splits, the object code a link reads.
 	Dirs []*dagger.Directory
 }
 
@@ -49,8 +48,6 @@ func (m *Gobuild) Dependencies(
 	// The packages, as a JSON list of the walk's nodes, each named and
 	// importing by its stable name (dependencyNodes).
 	packages string,
-	// Whether the caller links, and so reads each package's object code.
-	links bool,
 ) (*DependencyBuilds, error) {
 	var pkgs []*node
 	if err := json.Unmarshal([]byte(packages), &pkgs); err != nil {
@@ -70,7 +67,7 @@ func (m *Gobuild) Dependencies(
 		nodes[n.ID] = n
 	}
 	w := &walker{base: base, platform: platform, hdr: hdr, tools: tools, mods: mods, roots: roots{Mod: modRoot},
-		heights: nodeHeights(nodes), links: links}
+		heights: nodeHeights(nodes)}
 	results, err := w.walk(ctx, nodes, nil)
 	if err != nil {
 		return nil, err
@@ -78,14 +75,7 @@ func (m *Gobuild) Dependencies(
 	out := &DependencyBuilds{}
 	for _, n := range pkgs {
 		r := results[n.ID]
-		<-r.linkDone
-		if r.linkErr != nil {
-			return nil, fmt.Errorf("%s: %w", n.ImportPath, r.linkErr)
-		}
 		out.Archives = append(out.Archives, r.file)
-		if links {
-			out.LinkObjects = append(out.LinkObjects, r.link)
-		}
 		out.Dirs = append(out.Dirs, r.dir)
 	}
 	return out, nil
@@ -143,10 +133,6 @@ func (b *build) dependencies(ctx context.Context, w *walker, nodes map[string]*n
 	if len(pkgs) == 0 {
 		return nil, nil
 	}
-	links := false
-	for _, n := range nodes {
-		links = links || n.Link
-	}
 	var names []string
 	for _, n := range pkgs {
 		for _, f := range n.ModFiles {
@@ -162,32 +148,42 @@ func (b *build) dependencies(ctx context.Context, w *walker, nodes map[string]*n
 	if err != nil {
 		return nil, err
 	}
-	call := dagger.Connect().Gobuild(b.toolImage).Dependencies(w.base, w.hdr, w.tools, w.platform, b.roots.Mod, names, dirs, string(js), links)
+	call := dagger.Connect().Gobuild(b.toolImage).Dependencies(w.base, w.hdr, w.tools, w.platform, b.roots.Mod, names, dirs, string(js))
 	archives, err := call.Archives(ctx)
 	if err != nil {
 		return nil, execFailure(err)
-	}
-	var linkObjects []dagger.File
-	if links {
-		if linkObjects, err = call.LinkObjects(ctx); err != nil {
-			return nil, err
-		}
 	}
 	outs, err := call.Dirs(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if len(archives) != len(ids) || len(outs) != len(ids) || (links && len(linkObjects) != len(ids)) {
-		return nil, fmt.Errorf("the dependency call built %d archives, %d object codes and %d directories for %d packages", len(archives), len(linkObjects), len(outs), len(ids))
+	if len(archives) != len(ids) || len(outs) != len(ids) {
+		return nil, fmt.Errorf("the dependency call built %d archives and %d directories for %d packages", len(archives), len(outs), len(ids))
+	}
+	// The call returns no object code, so it is the same call whether the
+	// build links or not: a build's archives and its binary make one call.
+	// A build that links reads each package's object code from its
+	// directory here, keyed by its content, while its own packages compile.
+	links := false
+	for _, n := range nodes {
+		links = links || n.Link
 	}
 	done := map[string]*result{}
 	for i, id := range ids {
 		r := &result{file: &archives[i], dir: &outs[i], done: make(chan struct{}), linkDone: make(chan struct{})}
-		if links {
-			r.link = &linkObjects[i]
-		}
 		close(r.done)
-		close(r.linkDone)
+		switch {
+		case !links:
+			close(r.linkDone)
+		case pkgs[i].LinkOutput == pkgs[i].Output:
+			r.link = r.file
+			close(r.linkDone)
+		default:
+			go func() {
+				defer close(r.linkDone)
+				r.link, r.linkErr = r.dir.File(pkgs[i].LinkOutput).Sync(ctx, core.FileSyncOpts{KeyByContent: true})
+			}()
+		}
 		done[id] = r
 	}
 	return done, nil
