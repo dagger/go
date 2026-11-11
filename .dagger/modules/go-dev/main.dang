@@ -1647,6 +1647,19 @@ type GoDev {
       .asWorkspace
     go(version: "1.27.3").module(libOnly, ".", findUp: false).test(libOnly)
 
+    # A nested module's packages are not the parent's: with only another
+    # platform's test file of its own, ./... matches no package.
+    let nestedOnly = directory
+      .withNewFile("go.mod", "module example.com/parent\n\ngo 1.27.3\n")
+      .withNewFile("root_windows_test.go", "package parent\nimport \"testing\"\nfunc TestWindows(t *testing.T) {}\n")
+      .withNewFile("child/go.mod", "module example.com/child\n\ngo 1.27.3\n")
+      .withNewFile("child/lib.go", "package child\n")
+      .asWorkspace
+    let none = { go(version: "1.27.3").module(nestedOnly, ".", findUp: false).test(nestedOnly); "no failure" } rescue {
+      err: Error => err.message
+    }
+    assert(none.contains("no packages to test"), "a nested module's package counted as the parent's: " + none)
+
     # A test file go cannot read is an error, not a file left out.
     let malformed = fixture
       .withNewFile("bad/bad_test.go", "//go:build linux &&\n\npackage bad\nimport \"testing\"\nfunc TestBad(t *testing.T) {}\n")

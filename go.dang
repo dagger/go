@@ -1621,13 +1621,18 @@ type GoModule {
     env
   }
 
-  # The module's Go files that aren't tests', in directories ./... matches.
+  # The module's Go files that aren't tests', in directories ./... matches:
+  # not in a nested module.
   let moduleGoFiles(inputs: GoTestInputs!): [String!]! {
     let prefix = if (path == ".") { "" } else { path + "/" }
+    let nested = inputs.source.glob(prefix + "**/go.mod").map { f => f.trimPrefix(prefix).trimSuffix("go.mod") }
+      .filter { root => root != "" }
     (inputs.source.glob(prefix + "*.go") + inputs.source.glob(prefix + "**/*.go")).uniq.filter { f =>
       let rel = f.trimPrefix(prefix)
       let dir = rel.split("/").dropLast(1).join("/")
-      rel.hasSuffix("_test.go") == false and matchesAll(if (dir == "") { "." } else { dir })
+      rel.hasSuffix("_test.go") == false
+        and matchesAll(if (dir == "") { "." } else { dir })
+        and nested.any { root => rel.hasPrefix(root) } == false
     }
   }
 
