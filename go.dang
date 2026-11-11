@@ -71,7 +71,7 @@ type Go {
     """
     goflags: String = null,
     """
-    Where to mount the workspace in Go containers. Defaults to "/src/<workspace name>".
+    Where to mount the workspace in Go containers. Defaults to "/src".
     """
     mountPath: String = null,
   ) {
@@ -151,48 +151,20 @@ type Go {
   goflags: String
 
   """
-  Configured workspace mount path. Null uses "/src/<workspace name>", or
-  "/src" for a workspace made from a directory or git ref.
+  Configured workspace mount path. Null uses "/src".
   """
   mountPath: String
 
   """
   Container path where the workspace is mounted for Go commands: the
-  configured mountPath, or "/src/<workspace name>".
+  configured mountPath, or "/src".
 
-  A workspace made with asWorkspace has no name: its address is its content
-  digest or commit. Named after that, the mount path would change with every
-  edit, and with it every package's compile, so it is "/src".
+  The path is in every package's compile and in what it records, so a
+  default made from the workspace's name or address would make the same
+  source build again under another name, such as another checkout's
+  directory or CI's repository name.
   """
-  let workspaceMountPath(ws: Workspace!): String! {
-    let synthetic = ws.address.hasPrefix("directory://") or ws.address.hasPrefix("git-ref://")
-    let derived = if (synthetic) { "/src" } else { "/src/" + workspaceName(ws) }
-    mountPath ?? derived
-  }
-
-  """
-  Last segment of the workspace root address, usually the repository name.
-  """
-  let workspaceName(ws: Workspace!): String! {
-    # The canonical address spans the cwd and, for a git workspace, ends with
-    # a version selector: "file:///home/me/hugo/docs" and
-    # "github.com/org/hugo/docs@main" both have cwd "/docs". Drop the selector
-    # first, then the cwd, then take what is left. The selector pattern stops
-    # at "/" and ":" so an ssh user ("ssh://git@github.com/...") is untouched.
-    let cwd = ws.cwd.trimSuffix("/")
-    let location = ws.address.replaceMatches(`@[^/:@]*$`, with: "").trimSuffix("/")
-    let root = if (cwd != "" and location.hasSuffix(cwd)) {
-      location.trimSuffix(cwd)
-    } else {
-      location
-    }
-    root
-      .split("/")
-      .filter { segment => segment != "" }
-      .takeLast(1)
-      .join("")
-      .trimSuffix(".git")
-  }
+  let workspaceMountPath: String! { mountPath ?? "/src" }
 
   """
   The shared library every Go tool in this repository discovers modules and
@@ -437,7 +409,7 @@ type Go {
     }
     GoModules(
       paths: sorted(selected),
-      mountPath: workspaceMountPath(ws),
+      mountPath: workspaceMountPath,
       tool: self,
     )
   }
@@ -483,7 +455,7 @@ type Go {
   }
 
   let goModule(ws: Workspace!, modPath: String!): GoModule! {
-    goModuleAt(modPath, workspaceMountPath(ws))
+    goModuleAt(modPath, workspaceMountPath)
   }
 
   # files is the module's Go files when the caller already has them, as

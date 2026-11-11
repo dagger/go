@@ -1607,12 +1607,10 @@ type GoDev {
   }
 
   """
-  The workspace mounts at a configurable path that defaults to
-  "/src/<workspace name>".
-
-  Only the local checkout is covered here: the cwd and git version selector
-  handling in the name derivation needs a session started at a remote or
-  subdirectory address, which a check cannot set up.
+  The workspace mounts at a configurable path that defaults to "/src",
+  whatever the workspace is called: the path is in every package's compile,
+  so a default made from the workspace's name would build the same source
+  again under another name.
   """
   mountPathCheck(ws: Workspace!): Void @check {
     let mod = go(version: "1.27.3", mountPath: "/src/hugo").module(ws, mountPathFixturePath)
@@ -1624,17 +1622,10 @@ type GoDev {
     # both live under /src/hugo.
     mod.test(ws)
 
-    let derived = go(version: "1.27.3").module(ws, mountPathFixturePath).mountPath
-    assert(
-      derived.hasPrefix("/src/") and derived != "/src/",
-      "default mount path did not derive a workspace name: " + derived,
-    )
-    assert(
-      derived.contains("/fixtures") == false and derived.contains("/testdata") == false,
-      "default mount path leaked a workspace path into the name: " + derived,
-    )
-    # A workspace made from a directory is addressed by its content digest,
-    # which every edit changes, so it is mounted at /src whatever it holds.
+    # A local checkout has a name, its directory's; the default ignores it.
+    let local = go(version: "1.27.3").module(ws, mountPathFixturePath).mountPath
+    assert(local == "/src", "local checkout was mounted at " + local)
+    # As is a workspace made from a directory, addressed by its content digest.
     let one = directory.withNewFile("go.mod", "module example.com/one\n\ngo 1.27.3\n").asWorkspace
     let two = directory.withNewFile("go.mod", "module example.com/two\n\ngo 1.27.3\n").asWorkspace
     assert(one.address != two.address, "two directories made the same workspace address: " + one.address)
