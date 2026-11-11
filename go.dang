@@ -582,7 +582,8 @@ type GoPackages @collection {
   command line, a build flag without a package pattern, such as -gcflags=-N,
   applies to every selected package, including where one is another's
   dependency. A package whose test files build constraints leave out has no
-  test binary. As with a package's testBinary, go vet is not run.
+  test binary. As with a package's testBinary, go vet is not run. A gccgo
+  build has no set: build each package's testBinary.
   """
   testBinary(ws: Workspace!): Directory! {
     module.testBinaryFiles(ws, gomod.hostPlatform, paths)
@@ -1722,11 +1723,7 @@ type GoModule {
     let built = if (rels.length == 0) {
       directory
     } else if (gccgo(flags)) {
-      # gccgo builds each as it always has, with go test -c.
-      rels.reduce(directory) { out, rel =>
-        let file = testBinaryFile(ws, platform, packagePath(rel))
-        out.withFile(rel + "/" + file.name, file)
-      }
+      raise "Go module " + path + ": a gccgo build has no set of test binaries from one plan; build each package's testBinary"
     } else {
       builder.testBinaries(
         base: ctr,
