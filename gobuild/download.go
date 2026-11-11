@@ -656,6 +656,11 @@ func packName(e sumEntry) string {
 // directory is there before the go command runs, so it takes the module as
 // extracted once it has the zip and its checksum, and gohdr packs the
 // module from the zip.
+//
+// When the download fails, it reports the go command's error and, after it,
+// its log of every source it tried (-x), each request and its answer: the
+// error alone names one source, a direct fetch's failure over a proxy's.
+// The error comes first, so a long log cut short (withStderr) never cuts it.
 func downloadModule(ctr *dagger.Container, hdr *dagger.Directory, gomodcache string, e sumEntry) *dagger.Directory {
 	q := e.path + "@" + e.version
 	meta := strings.TrimSuffix(zipPath(e), ".zip")
@@ -663,7 +668,7 @@ func downloadModule(ctr *dagger.Container, hdr *dagger.Directory, gomodcache str
 		"c=" + shQuote(gomodcache) + "\n" +
 		"[ ! -d \"$c/cache/download\" ] || [ \"$c\" -ef " + modCacheDir + " ] || export GOPROXY=\"file://$c/cache/download,${GOPROXY:-https://proxy.golang.org,direct}\"\n" +
 		"export GOMODCACHE=" + modCacheDir + " GOFLAGS=-modcacherw GOTOOLCHAIN=local GOWORK=off GOSUMDB=off\n" +
-		"cd /gobuild/empty\ngo mod download -json " + shQuote(q) + " >/gobuild/download.json || { cat /gobuild/download.json >&2; exit 1; }\n" +
+		"cd /gobuild/empty\ngo mod download -x -json " + shQuote(q) + " >/gobuild/download.json 2>/gobuild/download.log || { cat /gobuild/download.json /gobuild/download.log >&2; exit 1; }\n" +
 		"[ \"$(cat " + shQuote(modCacheDir+"/"+meta+".ziphash") + ")\" = " + shQuote(e.zip) + " ] || { echo " +
 		shQuote(q+": checksum mismatch: go.sum has "+e.zip) + " >&2; exit 1; }\n" +
 		hdrBin + " packmod " + modCacheDir + " " + shQuote(modCacheDir+"/"+packName(e)) + " " +
