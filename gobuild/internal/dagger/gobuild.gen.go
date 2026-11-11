@@ -449,12 +449,16 @@ type GobuildTestBinariesOpts struct {
 	Downloads *Container
 }
 
-// TestBinaries builds the test binaries of packages pkgs, each as
-// TestBinary builds it, from one plan of them all, as go test plans several
-// packages: the set's setup, plan, test mains and dependency call are made
-// once, and a package more than one binary compiles compiles once. It
-// returns a directory with each binary in its package's directory, relative
-// to workdir, named as go test -c names it, e.g. "a/a.test".
+// TestBinaries builds the test binaries of packages pkgs as go test -c
+// builds them together, each as TestBinary builds one, from one plan of them
+// all: the set's setup, plan, test mains and dependency call are made once,
+// and a package more than one binary compiles compiles once. As on go test's
+// command line, a build flag without a package pattern, such as
+// -gcflags=-N, applies to every one of pkgs, including where one is
+// another's dependency. It returns a directory with each binary in its
+// package's directory, relative to workdir, named as go test -c names it,
+// e.g. "a/a.test". A package with no test files for the target, whose files
+// build constraints leave out, has none, as go test builds it none.
 func (r *Gobuild) TestBinaries(base *Container, source *Directory, headers *File, mountPath string, pkgs []string, opts ...GobuildTestBinariesOpts) *Directory {
 	assertNotNil("base", base)
 	assertNotNil("source", source)

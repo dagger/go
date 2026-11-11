@@ -723,6 +723,10 @@ type GoDev {
       .withNewFile("bench/bench_test.go", "package main\n\nimport \"testing\"\n\nfunc BenchmarkNothing(b *testing.B) {}\n")
       .withNewFile("tmain/main.go", goMain("tmain"))
       .withNewFile("tmain/main_test.go", "package main\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestMain(m *testing.M) { os.Exit(m.Run()) }\n")
+      # Test files only for another GOOS: go test builds the package no test
+      # binary on Linux.
+      .withNewFile("winonly/main.go", goMain("winonly"))
+      .withNewFile("winonly/main_windows_test.go", "package main\n\nimport \"testing\"\n\nfunc TestWindows(t *testing.T) {}\n")
     let ws = source.asWorkspace
     let stamp = "-ldflags=-X example.com/tb/lib.stamp=STAMPED"
     let cgo = container
@@ -805,7 +809,8 @@ type GoDev {
     ]
     # Every package's test binary from one plan of them all is go test -c's
     # of that package alone: lib's binary has user recompiled against lib's
-    # test variant, and user's own has user and lib as they are.
+    # test variant, and user's own has user and lib as they are. winonly,
+    # whose only test file is Windows', has none.
     let setFailures = ["", "-race;" + stamp, "-cover"].map { variant =>
       let flags = variant.split(";").filter { f => f != "" }
       let race = flags.contains("-race")

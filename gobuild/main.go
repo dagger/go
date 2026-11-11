@@ -163,12 +163,16 @@ func (m *Gobuild) TestBinary(
 	return linked.file, nil
 }
 
-// TestBinaries builds the test binaries of packages pkgs, each as
-// TestBinary builds it, from one plan of them all, as go test plans several
-// packages: the set's setup, plan, test mains and dependency call are made
-// once, and a package more than one binary compiles compiles once. It
-// returns a directory with each binary in its package's directory, relative
-// to workdir, named as go test -c names it, e.g. "a/a.test".
+// TestBinaries builds the test binaries of packages pkgs as go test -c
+// builds them together, each as TestBinary builds one, from one plan of them
+// all: the set's setup, plan, test mains and dependency call are made once,
+// and a package more than one binary compiles compiles once. As on go test's
+// command line, a build flag without a package pattern, such as
+// -gcflags=-N, applies to every one of pkgs, including where one is
+// another's dependency. It returns a directory with each binary in its
+// package's directory, relative to workdir, named as go test -c names it,
+// e.g. "a/a.test". A package with no test files for the target, whose files
+// build constraints leave out, has none, as go test builds it none.
 func (m *Gobuild) TestBinaries(
 	ctx context.Context,
 	// The Go container to build in, as for Binary.
@@ -227,15 +231,27 @@ func runTests(ctx context.Context, toolImage string, base *dagger.Container, ima
 		sizes, err := b.sourceSizes(ctx)
 		sized <- sizesResult{sizes, err}
 	}()
-	// The plan's headers name packages by import path alone, and a plan of
-	// several test binaries compiles a package once for each test it is
-	// recompiled for: the listing names each variant, as for archives.
-	list := []string{"go", "list", "-deps", "-test", "-json=ImportPath,Name,Module,DepOnly,Dir,ForTest"}
-	list = append(list, flags[1:]...)
+	// Only the packages with test files for the target are planned, by
+	// import path, in go list's order: go test builds the others no test
+	// binary. The plan's headers name packages by import path alone, and a
+	// plan of several test binaries compiles a package once for each test it
+	// is recompiled for: the listing names each variant, as for archives.
+	buildFlags := flags[1:]
+	tested := append(append([]string{"go", "list", "-f", "{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}"}, buildFlags...), pkgs...)
+	list := append([]string{"go", "list", "-deps", "-test", "-json=ImportPath,Name,Module,DepOnly,Dir,ForTest"}, buildFlags...)
 	test := append(append([]string{"go", "test", "-c", "-n"}, flags...), "-o", "/dev/null")
-	p, err := b.planWith(ctx, headers, shJoin(append(list, pkgs...))+" > /gobuild/list.json && "+shJoin(append(test, pkgs...)), nil)
+	p, err := b.planWith(ctx, headers, "tested=$("+shJoin(tested)+") && printf '%s\\n' $tested > /gobuild/tested.txt && "+
+		"if [ -n \"$tested\" ]; then "+shJoin(list)+" $tested > /gobuild/list.json && "+shJoin(test)+" $tested; else : > /gobuild/list.json; fi", nil)
 	if err != nil {
 		return nil, err
+	}
+	testedList, err := p.ran.File("/gobuild/tested.txt").Contents(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ips := strings.Fields(testedList)
+	if len(ips) == 0 {
+		return out, nil
 	}
 	blocks, err := parseTestsPlan(p.plan, b.roots)
 	if err != nil {
@@ -252,7 +268,7 @@ func runTests(ctx context.Context, toolImage string, base *dagger.Container, ima
 	if err := identifyVariants(blocks, ids, mains, true); err != nil {
 		return nil, err
 	}
-	links, err := testLinks(blocks, listing, cwd, pkgs)
+	dirs, links, err := testLinks(blocks, listing, ips)
 	if err != nil {
 		return nil, err
 	}
@@ -261,56 +277,62 @@ func runTests(ctx context.Context, toolImage string, base *dagger.Container, ima
 		return nil, fmt.Errorf("source sizes: %w", sr.err)
 	}
 	weighSource(blocks, p.weights, sr.sizes)
+	srcDirs := make([]string, len(dirs))
+	for i, dir := range dirs {
+		srcDirs[i] = strings.TrimPrefix(strings.TrimPrefix(dir, b.roots.Src), "/")
+	}
 	results, err := b.walk(ctx, blocks, p.weights, p.cc, p.goDirs, func(w *walker) error {
-		w.testmain = b.testmains(ctx, headers, flags, pkgs, links)
+		w.testmain = b.testmains(ctx, headers, flags, ips, srcDirs, links)
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	for i, id := range links {
-		out = out.WithFile(path.Join(pkgs[i], blocks[id].out), results[id].file)
+		rel := "."
+		if dirs[i] != cwd {
+			rel = strings.TrimPrefix(dirs[i], cwd+"/")
+		}
+		out = out.WithFile(path.Join(rel, blocks[id].out), results[id].file)
 	}
 	return out, nil
 }
 
-// testLinks is the id of the block that links each of pkgs' test binaries,
-// in order: the test main of the package go list's listing has in its
-// directory, cwd joined with the package argument.
-func testLinks(blocks map[string]*block, listing, cwd string, pkgs []string) ([]string, error) {
-	byDir := map[string]string{}
+// testLinks is, for each package of ips, by import path, its directory,
+// from go list's listing, and the id of the block that links its test
+// binary: its test main's.
+func testLinks(blocks map[string]*block, listing string, ips []string) (dirs, links []string, err error) {
+	dirOf := map[string]string{}
 	dec := json.NewDecoder(strings.NewReader(listing))
 	for {
-		var p struct {
-			ImportPath, Dir, ForTest string
-			DepOnly                  bool
-		}
+		var p struct{ ImportPath, Dir, ForTest string }
 		if err := dec.Decode(&p); err == io.EOF {
 			break
 		} else if err != nil {
-			return nil, fmt.Errorf("go list: %w", err)
+			return nil, nil, fmt.Errorf("go list: %w", err)
 		}
-		if !p.DepOnly && p.ForTest == "" && !strings.HasSuffix(p.ImportPath, ".test") {
-			byDir[p.Dir] = p.ImportPath
+		if p.ForTest == "" && !strings.HasSuffix(p.ImportPath, ".test") {
+			dirOf[p.ImportPath] = p.Dir
 		}
 	}
-	byMain := map[string]string{}
+	linkOf := map[string]string{}
 	for id, bl := range blocks {
 		if bl.isLink {
-			byMain[strings.TrimSuffix(bl.importPath, ".test")] = id
+			linkOf[strings.TrimSuffix(bl.importPath, ".test")] = id
 		}
 	}
-	links := make([]string, len(pkgs))
-	for i, pkg := range pkgs {
-		ip, ok := byDir[path.Join(cwd, pkg)]
+	for _, ip := range ips {
+		dir, ok := dirOf[ip]
 		if !ok {
-			return nil, fmt.Errorf("go test package %s: not in go list's listing", pkg)
+			return nil, nil, fmt.Errorf("go test package %s: not in go list's listing", ip)
 		}
-		if links[i], ok = byMain[ip]; !ok {
-			return nil, fmt.Errorf("go test package %s: no test binary in the plan", pkg)
+		id, ok := linkOf[ip]
+		if !ok {
+			return nil, nil, fmt.Errorf("go test package %s: no test binary in the plan", ip)
 		}
+		dirs, links = append(dirs, dir), append(links, id)
 	}
-	return links, nil
+	return dirs, links, nil
 }
 
 // Archives compiles, one exec per package as Binary builds, every package
@@ -703,7 +725,8 @@ func run(ctx context.Context, toolImage string, base *dagger.Container, image st
 	results, err := b.walk(ctx, blocks, weights, cc, goDirs, func(w *walker) error {
 		if test {
 			// Only the link reads it: the packages build meanwhile.
-			w.testmain = b.testmains(ctx, headers, flags, []string{pkg}, []string{linkID(blocks)})
+			dir := strings.TrimPrefix(strings.TrimPrefix(path.Join(b.roots.Cwd, pkg), b.roots.Src), "/")
+			w.testmain = b.testmains(ctx, headers, flags, []string{pkg}, []string{dir}, []string{linkID(blocks)})
 		}
 		return nil
 	})
@@ -1366,7 +1389,8 @@ func (b *build) planWith(ctx context.Context, headers *dagger.File, goCmd string
 }
 
 // testmains starts the step that writes the _testmain.go of each of pkgs'
-// test binaries, which the blocks links link, in order, and returns what
+// test binaries, whose test files are in the source's directories dirs, and
+// which the blocks links link, in order, and returns what
 // waits for it: each one's file, by the id of the block that links it. A
 // plan never holds them, so go test runs as far as writing them: before the
 // go command runs any tool, which -toolexec=false then stops. Each is in
@@ -1374,11 +1398,10 @@ func (b *build) planWith(ctx context.Context, headers *dagger.File, goCmd string
 // which is the same go test command. It reads the plan's view of the source
 // with pkgs' own test files whole, as the test names and examples come from
 // them, so it runs again when they change.
-func (b *build) testmains(ctx context.Context, headers *dagger.File, flags, pkgs, links []string) func(id string) (*dagger.File, error) {
+func (b *build) testmains(ctx context.Context, headers *dagger.File, flags, pkgs, dirs, links []string) func(id string) (*dagger.File, error) {
 	written := sync.OnceValues(func() (*dagger.Directory, error) {
 		var include []string
-		for _, pkg := range pkgs {
-			dir := strings.TrimPrefix(strings.TrimPrefix(path.Join(b.roots.Cwd, pkg), b.roots.Src), "/")
+		for _, dir := range dirs {
 			include = append(include, path.Join(dir, "*_test.go"))
 		}
 		tests := b.src.Filter(dagger.DirectoryFilterOpts{Include: include})

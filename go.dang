@@ -577,9 +577,12 @@ type GoPackages @collection {
   engine's platform, each in its package's directory, relative to the
   workspace, named as go test -c names it, e.g. "pkg/foo/foo.test".
 
-  They are built from one plan of them all, as go test plans several
-  packages, so what they share is planned and compiled once. As with a
-  package's testBinary, go vet is not run.
+  They are built as go test -c builds several packages, from one plan of
+  them all, so what they share is planned and compiled once. As on go test's
+  command line, a build flag without a package pattern, such as -gcflags=-N,
+  applies to every selected package, including where one is another's
+  dependency. A package whose test files build constraints leave out has no
+  test binary. As with a package's testBinary, go vet is not run.
   """
   testBinary(ws: Workspace!): Directory! {
     module.testBinaryFiles(ws, gomod.hostPlatform, paths)
