@@ -111,10 +111,6 @@ type walker struct {
 	// hdr is gohdr, for every machine an engine runs on (hdrTools).
 	hdr   *dagger.Directory
 	tools *dagger.Directory
-	src   *dagger.Directory
-	// nonGo is the source's files that aren't Go, which a package with C or
-	// assembly there reads (srcNonGo); nil when no package does.
-	nonGo *dagger.Directory
 	// mods is the module cache's modules, each on its own.
 	mods  *modules
 	roots roots
@@ -123,6 +119,9 @@ type walker struct {
 	// profile is the preprocessed PGO profile, mounted for packages whose
 	// compile reads it; nil without one.
 	profile *profileOutput
+	// sources are the packages' directories in src, by block id, which
+	// syncSources started before the walk.
+	sources map[string]*packageSource
 	// testmain is the _testmain.go of the test binary that the block with
 	// this id links, which its main package compiles; nil for a binary. It
 	// waits for the step that writes it, which runs alongside the walk.
@@ -189,22 +188,11 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node, done map[stri
 			defer wg.Done()
 			r := results[id]
 			defer close(r.done)
-			// The source a package reads doesn't depend on its imports, so it
-			// is synced while they build rather than in the package's slot.
-			// The synced directory carries its ID, so the package's exec
-			// doesn't ask for it either. An error shows again where it's
-			// mounted.
 			var srcDir *dagger.Directory
 			var at string
-			if len(n.SrcFiles) > 0 {
-				srcDir, at = selected(w.src, n.SrcFiles)
-				if n.SrcNonGo {
-					srcDir = w.nonGo.WithDirectory(path.Join(".", at), srcDir)
-					at = ""
-				}
-				if d, err := srcDir.Sync(ctx); err == nil {
-					srcDir = d
-				}
+			if s := w.sources[id]; s != nil {
+				<-s.done
+				srcDir, at = s.dir, s.at
 			}
 			asyncLink := false
 			defer func() {
@@ -345,6 +333,44 @@ func shortest(errs []string) string {
 		}
 	}
 	return s
+}
+
+// packageSource is the directory a package reads from the workspace's
+// source, and where under the source root it's mounted, once done closes.
+type packageSource struct {
+	dir  *dagger.Directory
+	at   string
+	done chan struct{}
+}
+
+// syncSources selects and syncs the source each block reads, all at once,
+// and returns them by block id as they finish. A package's source depends
+// only on the plan, so it is synced from the moment the plan is read, while
+// the module cache is prepared, the dependency call runs and the package's
+// imports build, rather than in its slot. The synced directory carries its
+// ID, so the package's exec doesn't ask for it either. A failed sync leaves
+// the unsynced directory, whose error shows again where it's mounted.
+func syncSources(ctx context.Context, src, nonGo *dagger.Directory, blocks map[string]*block) map[string]*packageSource {
+	sources := map[string]*packageSource{}
+	for id, bl := range blocks {
+		if bl.isProfile || len(bl.srcFiles) == 0 {
+			continue
+		}
+		s := &packageSource{done: make(chan struct{})}
+		sources[id] = s
+		go func() {
+			defer close(s.done)
+			s.dir, s.at = selected(src, bl.srcFiles)
+			if bl.srcNonGo {
+				s.dir = nonGo.WithDirectory(path.Join(".", s.at), s.dir)
+				s.at = ""
+			}
+			if d, err := s.dir.Sync(ctx); err == nil {
+				s.dir = d
+			}
+		}()
+	}
+	return sources
 }
 
 // selected is the part of dir that files name, and where under the root to

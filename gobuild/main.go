@@ -852,6 +852,7 @@ func (b *build) walk(ctx context.Context, blocks map[string]*block, weights map[
 			break
 		}
 	}
+	sources := syncSources(ctx, b.src, nonGo, blocks)
 	for _, bl := range blocks {
 		bl.addCFlags(cc)
 	}
@@ -863,7 +864,7 @@ func (b *build) walk(ctx context.Context, blocks map[string]*block, weights map[
 	mods.excludeUnread(blocks)
 	heights := heightsOf(blocks, weights)
 	mods.fetch(ctx, blocks, heights)
-	w := &walker{base: b.base, platform: b.target.platform(), hdr: b.hdr, tools: b.tools, src: b.src, mods: mods, roots: b.roots, nonGo: nonGo}
+	w := &walker{base: b.base, platform: b.target.platform(), hdr: b.hdr, tools: b.tools, mods: mods, roots: b.roots, sources: sources}
 	if prepare != nil {
 		if err := prepare(w); err != nil {
 			return nil, err
