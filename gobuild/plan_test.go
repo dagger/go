@@ -802,6 +802,57 @@ func TestParsePlanTest(t *testing.T) {
 	}
 }
 
+// Go 1.25 prints a package's header before its work directory's mkdir, not
+// after it as Go 1.26 does, so after the test main's mkdir the first header
+// is the next package's.
+func TestParsePlanTestHeaderBeforeMkdir(t *testing.T) {
+	plan := strings.Join([]string{
+		"mkdir -p $WORK/b001/",
+		"",
+		"#",
+		"# example.com/x",
+		"#",
+		"",
+		"mkdir -p $WORK/b002/",
+		"cat >$WORK/b002/importcfg << 'EOF' # internal",
+		"# import config",
+		"EOF",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b002/_pkg_.a -trimpath \"$WORK/b002=>\" -p example.com/x -importcfg $WORK/b002/importcfg -pack ./x.go ./x_test.go",
+		"",
+		"#",
+		"# example.com/x.test",
+		"#",
+		"",
+		"cat >$WORK/b001/importcfg << 'EOF' # internal",
+		"# import config",
+		"packagefile example.com/x=$WORK/b002/_pkg_.a",
+		"EOF",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -trimpath \"$WORK/b001=>\" -p main -importcfg $WORK/b001/importcfg -pack $WORK/b001/_testmain.go",
+		"cat >$WORK/b001/importcfg.link << 'EOF' # internal",
+		"packagefile example.com/x.test=$WORK/b001/_pkg_.a",
+		"packagefile example.com/x=$WORK/b002/_pkg_.a",
+		"EOF",
+		"cd .",
+		"GOROOT='/usr/local/go' /usr/local/go/pkg/tool/linux_amd64/link -o $WORK/b001/x.test -importcfg $WORK/b001/importcfg.link -buildmode=exe -buildid=a/b/c/d $WORK/b001/_pkg_.a",
+	}, "\n")
+	for name, parse := range map[string]func(string, roots) (map[string]*block, error){"one": parsePlan, "set": parseTestsPlan} {
+		blocks, err := parse(plan, testRoots)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		main, x := blocks[mainID], blocks["b002"]
+		if main.importPath != "example.com/x.test" || x.importPath != "example.com/x" {
+			t.Fatalf("%s: headers: %q, %q", name, main.importPath, x.importPath)
+		}
+		if !main.isLink || main.out != "x.test" {
+			t.Errorf("%s: test link: isLink %v, out %q", name, main.isLink, main.out)
+		}
+		if !reflect.DeepEqual(x.srcFiles, []string{"x.go", "x_test.go"}) {
+			t.Errorf("%s: package inputs: %v", name, x.srcFiles)
+		}
+	}
+}
+
 // With -cover, a test main's cover run comes after the other packages' steps
 // and before its header, and with -coverpkg its block is not b001: its steps
 // are its own wherever they come, and the block that links is the main one.

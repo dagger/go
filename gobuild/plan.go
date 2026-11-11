@@ -329,7 +329,12 @@ func parseBlocks(plan string, r roots, kind planKind) (map[string]*block, error)
 		// "./$WORK/...". It runs it as the absolute path it is.
 		line := strings.ReplaceAll(lines[i], "./$WORK/", "$WORK/")
 		if line == "#" && i+2 < len(lines) && strings.HasPrefix(lines[i+1], "# ") && lines[i+2] == "#" {
-			if h := strings.TrimPrefix(lines[i+1], "# "); cur != nil && cur.importPath == "" {
+			// Go 1.26 prints a package's header after its work directory's
+			// mkdir, and Go 1.25 before it. A header followed by a new
+			// block's mkdir is that block's: before a test binary's first
+			// package, the block still without a header is the test main's,
+			// whose work directory is made first.
+			if h := strings.TrimPrefix(lines[i+1], "# "); cur != nil && cur.importPath == "" && !mkdirsNewBlock(lines[i+3:], blocks) {
 				cur.importPath = h
 			} else {
 				pending = h
@@ -1204,6 +1209,23 @@ func quoteArg(s string) string {
 		return shQuote(s)
 	}
 	return s
+}
+
+// mkdirsNewBlock reports whether the first of lines that isn't blank makes
+// the work directory of a block not in blocks yet.
+func mkdirsNewBlock(lines []string, blocks map[string]*block) bool {
+	for _, l := range lines {
+		if l == "" {
+			continue
+		}
+		m := mkdirStep(l)
+		if m == nil {
+			return false
+		}
+		_, ok := blocks[m[1]]
+		return !ok
+	}
+	return false
 }
 
 // linkLine is the plan's link command, or "" for a block that doesn't link.
