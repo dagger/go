@@ -1745,7 +1745,8 @@ func lastFlag(name string, flags, goflags []string) (string, bool) {
 // named on the go command line, so that what they reach depends on which:
 // -coverpkg, and -gcflags, -asmflags or -gccgoflags without a package
 // pattern, which the go command reads from the value with its spaces
-// trimmed (cmd/go/internal/load.PerPackageFlag).
+// trimmed (cmd/go/internal/load.PerPackageFlag): an empty value too, which
+// clears the flags of the command line's packages alone.
 func commandLineFlags(flags []string) bool {
 	for i, f := range flags {
 		name, value, hasValue := strings.Cut(strings.TrimLeft(f, "-"), "=")
@@ -1759,7 +1760,7 @@ func commandLineFlags(flags []string) bool {
 		case "coverpkg":
 			return true
 		case "gcflags", "asmflags", "gccgoflags":
-			if v := strings.TrimSpace(value); v != "" && (v[0] == '-' || !strings.Contains(v, "=")) {
+			if v := strings.TrimSpace(value); v == "" || v[0] == '-' || !strings.Contains(v, "=") {
 				return true
 			}
 		}

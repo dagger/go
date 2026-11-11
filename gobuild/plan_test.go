@@ -378,6 +378,8 @@ func TestCommandLineFlags(t *testing.T) {
 		{[]string{"-gcflags= -N -d=checkptr=0"}, true},
 		{[]string{"-gcflags", "-N -l"}, true},
 		{[]string{"-asmflags=-trimpath=x"}, true},
+		{[]string{"-gcflags=all=-N", "-gcflags="}, true},
+		{[]string{"-gcflags= "}, true},
 		{quoted, true},
 		{[]string{"-gcflags=all=-N -l"}, false},
 		{[]string{"-gcflags=example.com/m/...=-N"}, false},
