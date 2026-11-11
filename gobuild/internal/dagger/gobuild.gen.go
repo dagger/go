@@ -394,6 +394,45 @@ func (r *Gobuild) UnmarshalJSON(bs []byte) error {
 	return nil
 }
 
+// LinkObjects is the object code a link reads of each package in dirs, the
+// package directories the dependency call returns: in each, the file named
+// in files, in the same order, keyed by its content. A build that links
+// calls it through the engine, so a later build of the same dependencies
+// finds all of their object code in one request, instead of one for each
+// package.
+func (r *Gobuild) LinkObjects(ctx context.Context, dirs []*Directory, files []string) ([]File, error) {
+	q := r.query.Select("linkObjects")
+	q = q.Arg("dirs", dirs)
+	q = q.Arg("files", files)
+
+	q = q.Select("id")
+
+	type linkObjects struct {
+		Id ID
+	}
+
+	convert := func(fields []linkObjects) []File {
+		out := []File{}
+
+		for i := range fields {
+			val := *loaded[*File](q, fields[i].Id)
+			out = append(out, val)
+		}
+
+		return out
+	}
+	var response []linkObjects
+
+	q = q.Bind(&response)
+
+	err := q.Execute(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return convert(response), nil
+}
+
 // GobuildTestBinaryOpts contains options for Gobuild.TestBinary
 type GobuildTestBinaryOpts struct {
 	// The image base was made from, as for Binary.

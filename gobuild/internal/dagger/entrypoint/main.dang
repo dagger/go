@@ -117,6 +117,13 @@ type Entrypoint implements ModuleEntrypoint {
             .withArg("own", typeDef.withListOf(typeDef.withKind(TypeDefKind.STRING_KIND)), description: "The paths of the build's modules that sums may also provide a package\nof (sourceImports.ownModules), whose packages the call neither\ndownloads nor follows, and reports as followed.", sourceMap: sourceMap("discovery.go", 69, 2))
         )
         .withFunction(
+          function("LinkObjects", typeDef.withListOf(typeDef.withObject("File")))
+            .withDescription("LinkObjects is the object code a link reads of each package in dirs, the\npackage directories the dependency call returns: in each, the file named\nin files, in the same order, keyed by its content. A build that links\ncalls it through the engine, so a later build of the same dependencies\nfinds all of their object code in one request, instead of one for each\npackage.")
+            .withSourceMap(sourceMap("deps.go", 94, 1))
+            .withArg("dirs", typeDef.withListOf(typeDef.withObject("Directory")), description: "The package directories, as the dependency call returns them.", sourceMap: sourceMap("deps.go", 97, 2))
+            .withArg("files", typeDef.withListOf(typeDef.withKind(TypeDefKind.STRING_KIND)), description: "The object code's file in each directory.", sourceMap: sourceMap("deps.go", 99, 2))
+        )
+        .withFunction(
           function("TestBinary", typeDef.withObject("File"))
             .withDescription("TestBinary builds the test binary of package pkg as \"go test -c\" would,\none exec per package as Binary builds a binary: the package compiled with\nits test files, its external test package, the packages it is imported\nthrough recompiled against it, and the test main the go command writes,\nlinked. Unlike go test -c, it does not run go vet, which is left to the\nlint checks. The binary's Go build ID is a hash of what its link reads,\nnot the one go test computes.")
             .withSourceMap(sourceMap("main.go", 129, 1))

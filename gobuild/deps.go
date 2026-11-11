@@ -85,6 +85,39 @@ func (m *Gobuild) Dependencies(
 	return out, nil
 }
 
+// LinkObjects is the object code a link reads of each package in dirs, the
+// package directories the dependency call returns: in each, the file named
+// in files, in the same order, keyed by its content. A build that links
+// calls it through the engine, so a later build of the same dependencies
+// finds all of their object code in one request, instead of one for each
+// package.
+func (m *Gobuild) LinkObjects(
+	ctx context.Context,
+	// The package directories, as the dependency call returns them.
+	dirs []*dagger.Directory,
+	// The object code's file in each directory.
+	files []string,
+) ([]*dagger.File, error) {
+	if len(dirs) != len(files) {
+		return nil, fmt.Errorf("%d object code files for %d directories", len(files), len(dirs))
+	}
+	out := make([]*dagger.File, len(dirs))
+	errs := make([]error, len(dirs))
+	var wg sync.WaitGroup
+	for i, d := range dirs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			out[i], errs[i] = d.File(files[i]).Sync(ctx, core.FileSyncOpts{KeyByContent: true})
+		}()
+	}
+	wg.Wait()
+	if err := errors.Join(errs...); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // fetchIDs asks for the IDs of dirs, several at a time. Returning an object
 // sends its ID, which the SDK asks for one object after another; once asked
 // for, an ID is remembered, so the return then asks for none. Each package's
@@ -187,13 +220,16 @@ func (b *build) dependencies(ctx context.Context, w *walker, nodes map[string]*n
 	}
 	// The call returns no object code, so it is the same call whether the
 	// build links or not: a build's archives and its binary make one call.
-	// A build that links reads each package's object code from its
-	// directory here, keyed by its content, while its own packages compile.
+	// A build that links reads the object code of the packages that split
+	// through the object code call, while its own packages compile.
 	links := false
 	for _, n := range nodes {
 		links = links || n.Link
 	}
 	done := map[string]*result{}
+	var split []*result
+	var splitDirs []*dagger.Directory
+	var splitFiles []string
 	for i, id := range ids {
 		r := &result{file: &archives[i], dir: &outs[i], done: make(chan struct{}), linkDone: make(chan struct{}),
 			importPath: pkgs[i].ImportPath}
@@ -205,12 +241,27 @@ func (b *build) dependencies(ctx context.Context, w *walker, nodes map[string]*n
 			r.link = r.file
 			close(r.linkDone)
 		default:
-			go func() {
-				defer close(r.linkDone)
-				r.link, r.linkErr = r.dir.File(pkgs[i].LinkOutput).Sync(ctx, core.FileSyncOpts{KeyByContent: true})
-			}()
+			split = append(split, r)
+			splitDirs = append(splitDirs, r.dir)
+			splitFiles = append(splitFiles, pkgs[i].LinkOutput)
 		}
 		done[id] = r
+	}
+	if len(split) > 0 {
+		go func() {
+			files, err := dagger.Connect().Gobuild(b.toolImage).LinkObjects(ctx, splitDirs, splitFiles)
+			if err == nil && len(files) != len(split) {
+				err = fmt.Errorf("the object code call read %d files for %d packages", len(files), len(split))
+			}
+			for i, r := range split {
+				if err != nil {
+					r.linkErr = err
+				} else {
+					r.link = &files[i]
+				}
+				close(r.linkDone)
+			}
+		}()
 	}
 	return done, nil
 }

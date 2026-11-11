@@ -636,6 +636,27 @@ func DaggerDispatch(ctx context.Context, parentJSON []byte, parentName string, f
 				}
 			}
 			return (*Gobuild).Discover(&parent, ctx, public, private, privatePatterns, hdr, gomodcache, sums, goenv, tags, imports, planImports, own)
+		case "LinkObjects":
+			var parent Gobuild
+			err = json.Unmarshal(parentJSON, &parent)
+			if err != nil {
+				panic(fmt.Errorf("%s: %w", "failed to unmarshal parent object", err))
+			}
+			var dirs []*core.Directory
+			if inputArgs["dirs"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["dirs"]), &dirs)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg dirs", err))
+				}
+			}
+			var files []string
+			if inputArgs["files"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["files"]), &files)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg files", err))
+				}
+			}
+			return (*Gobuild).LinkObjects(&parent, ctx, dirs, files)
 		case "TestBinary":
 			var parent Gobuild
 			err = json.Unmarshal(parentJSON, &parent)
