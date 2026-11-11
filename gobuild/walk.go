@@ -109,7 +109,7 @@ type walker struct {
 	// output is declared for.
 	platform string
 	// hdr is gohdr, for every machine an engine runs on (hdrTools).
-	hdr *dagger.Directory
+	hdr   *dagger.Directory
 	tools *dagger.Directory
 	src   *dagger.Directory
 	// nonGo is the source's files that aren't Go, which a package with C or

@@ -71,11 +71,11 @@ var (
 	reCompile = regexp.MustCompile(`(/pkg/tool/[^/\s]+/compile) `)
 	// The Go linker, run directly or through a -toolexec program. Only a
 	// command runs it: parsePlan keeps heredoc data, which may name it, out.
-	reLink       = regexp.MustCompile(`/pkg/tool/[^/\s]+/link `)
+	reLink = regexp.MustCompile(`/pkg/tool/[^/\s]+/link `)
 	// reToolDir is the host part of the toolchain's tool directory as the
 	// plan names it, by the machine's GOHOSTOS_GOHOSTARCH, e.g. the
 	// "/pkg/tool/linux_amd64/" of /usr/local/go/pkg/tool/linux_amd64/compile.
-	reToolDir = regexp.MustCompile(`/pkg/tool/[^/\s]+/`)
+	reToolDir    = regexp.MustCompile(`/pkg/tool/[^/\s]+/`)
 	reDepArchive = regexp.MustCompile(`\$WORK/(b\d+)/_pkg_\.a`)
 	// cat >TARGET << 'EOF' [# internal]
 	reHeredoc = regexp.MustCompile(`^cat >(\S+) << 'EOF'( # internal)?$`)

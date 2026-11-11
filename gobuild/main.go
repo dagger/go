@@ -1359,8 +1359,8 @@ func (b *build) planWith(ctx context.Context, headers *dagger.File, goCmd string
 		WithExec([]string{"sh", "-c", b.unpackHeaders() +
 			" && cd " + shQuote(b.roots.Cwd) + " && { " + goCmd + " 2> /gobuild/plan.txt" +
 			" || { status=$?; tail -n 40 /gobuild/plan.txt >&2; exit $status; }; }" +
-			" && "+hdrBin+" weigh /gobuild/plan.txt > /gobuild/weights.txt" +
-			" && "+hdrBin+" cc /gobuild/plan.txt > /gobuild/cc.txt" + env}, bare)
+			" && " + hdrBin + " weigh /gobuild/plan.txt > /gobuild/weights.txt" +
+			" && " + hdrBin + " cc /gobuild/plan.txt > /gobuild/cc.txt" + env}, bare)
 	plan, err := ran.File("/gobuild/plan.txt").Contents(ctx)
 	if err != nil {
 		return nil, b.planError(ctx, err)
