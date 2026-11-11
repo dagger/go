@@ -135,7 +135,8 @@ func TestHdrToolUnpackPlanDirs(t *testing.T) {
 // gohdr packmod packs a downloaded module from its zip as a plan reads it,
 // as the go command would extract it: Go files as their headers, C and
 // assembly as their leading comments, the module's metadata whole, any other
-// file empty, and no test file nor anything in a testdata directory.
+// file empty, and no test file; a testdata directory's files as any other,
+// since a build may import a package there by its path.
 // gohdr subset writes, as a pack, exactly what gohdr unpack writes with the
 // plan's directories, and the whole pack's list of Go files in directories
 // named like Go files. A plan mounts it in place of the whole pack, so it
@@ -314,7 +315,8 @@ func TestHdrToolPackmod(t *testing.T) {
 		{"example.com/M@v1.0.0/closed.c", "//go:build ignore\n\n/* Explanation\n*/ int unused;\n"},
 		{"example.com/M@v1.0.0/api.json", "{\"big\": true}\n"},
 		{"example.com/M@v1.0.0/m_test.go", "package m\n"},
-		{"example.com/M@v1.0.0/sub/testdata/fixture.go", "package fixture\n"},
+		{"example.com/M@v1.0.0/sub/testdata/fixture.go", "package fixture\n\nimport \"os\"\n\nvar _ = os.Args\n"},
+		{"example.com/M@v1.0.0/sub/testdata/fixture_test.go", "package fixture\n"},
 	} {
 		w, err := zw.Create(f.name)
 		if err != nil {
@@ -340,13 +342,14 @@ func TestHdrToolPackmod(t *testing.T) {
 		t.Fatalf("unpack: %v\n%s", err, b)
 	}
 	for name, want := range map[string]string{
-		meta:                              "module example.com/M\n",
-		"example.com/!m@v1.0.0/go.mod":    "module example.com/M\n",
-		"example.com/!m@v1.0.0/m.go":      "package m\n\nimport \"fmt\"\n",
-		"example.com/!m@v1.0.0/m_amd64.s": "//go:build !purego\n\n",
-		"example.com/!m@v1.0.0/unused.c":  "/* Copyright notice\n   continued */\n//go:build ignore\n\n",
-		"example.com/!m@v1.0.0/closed.c":  "//go:build ignore\n\n/* Explanation\n*/ ",
-		"example.com/!m@v1.0.0/api.json":  "",
+		meta:                                            "module example.com/M\n",
+		"example.com/!m@v1.0.0/go.mod":                  "module example.com/M\n",
+		"example.com/!m@v1.0.0/m.go":                    "package m\n\nimport \"fmt\"\n",
+		"example.com/!m@v1.0.0/m_amd64.s":               "//go:build !purego\n\n",
+		"example.com/!m@v1.0.0/unused.c":                "/* Copyright notice\n   continued */\n//go:build ignore\n\n",
+		"example.com/!m@v1.0.0/closed.c":                "//go:build ignore\n\n/* Explanation\n*/ ",
+		"example.com/!m@v1.0.0/api.json":                "",
+		"example.com/!m@v1.0.0/sub/testdata/fixture.go": "package fixture\n\nimport \"os\"\n",
 	} {
 		got, err := os.ReadFile(filepath.Join(out, name))
 		if err != nil {
@@ -357,7 +360,7 @@ func TestHdrToolPackmod(t *testing.T) {
 			t.Errorf("%s = %q, want %q", name, got, want)
 		}
 	}
-	for _, name := range []string{"example.com/!m@v1.0.0/m_test.go", "example.com/!m@v1.0.0/sub/testdata/fixture.go"} {
+	for _, name := range []string{"example.com/!m@v1.0.0/m_test.go", "example.com/!m@v1.0.0/sub/testdata/fixture_test.go"} {
 		if _, err := os.Stat(filepath.Join(out, name)); err == nil {
 			t.Errorf("%s was packed", name)
 		}

@@ -1062,6 +1062,40 @@ type GoDev {
     null
   }
 
+  """
+  A package under a dependency's testdata directory, which no pattern
+  matches but an import path names like any other, builds into a binary
+  and into a test binary that imports it only from its tests:
+  google.golang.org/grpc/testdata, which grpc's own programs import. The
+  binary prints what the go command's build of it prints, and the test
+  passes.
+  """
+  depTestdataCheck: Void @check {
+    let src = directory
+      .withNewFile("go.mod", "module example.com/deptestdata\n\ngo 1.24\n\nrequire google.golang.org/grpc v1.67.1\n")
+      .withNewFile("main.go", "package main\n\nimport (\n\t\"fmt\"\n\t\"path/filepath\"\n\n\t\"google.golang.org/grpc/testdata\"\n)\n\nfunc main() { fmt.Println(filepath.Base(filepath.Dir(testdata.Path(\"x509/server_cert.pem\")))) }\n")
+      .withNewFile("lib/lib.go", "package lib\n\n// Answer is the answer.\nfunc Answer() int { return 42 }\n")
+      .withNewFile("lib/lib_test.go", "package lib\n\nimport (\n\t\"path/filepath\"\n\t\"testing\"\n\n\t\"google.golang.org/grpc/testdata\"\n)\n\nfunc TestPath(t *testing.T) {\n\tif got := filepath.Base(filepath.Dir(testdata.Path(\"x509/server_cert.pem\"))); got != \"x509\" || Answer() != 42 {\n\t\tt.Fatalf(\"testdata.Path gave %q\", got)\n\t}\n}\n")
+    # go.sum from go mod tidy, and what the go command's own build prints.
+    let made = container
+      .from("golang:1.27.3-alpine")
+      .withDirectory("/ws", src)
+      .withWorkdir("/ws")
+      .withExec(["sh", "-c", "set -e; go mod tidy; go run . > /plain.txt; go test ./lib"])
+    let want = made.file("/plain.txt").contents
+    assert(want == "x509\n", "the go command's binary printed: " + want)
+    let ws = made.directory("/ws").asWorkspace
+    let packages = go(version: "1.27.3").modules(ws).get(key: ".").packages(ws)
+    let out = container
+      .from("alpine:3.23")
+      .withFile("/usr/local/bin/deptestdata", packages.get(key: ".").binary(ws))
+      .withExec(["deptestdata"])
+      .stdout
+    assert(out == want, "the binary printed: " + out)
+    packages.get(key: "lib").tests.test(ws)
+    null
+  }
+
   # The error of goSumCheck's build with the go.sum made as sum, or "built".
   let goSumFailure(made: Container!, base: Container!, sum: String!): String! {
     let ws = made.directory("/ws").withFile("go.sum", made.file("/sums/" + sum)).asWorkspace

@@ -653,9 +653,11 @@ func linkID(cfg, salt string) error {
 // its files, read from its zip at zipRel under root, the module cache, as
 // the go command extracts them into dir, without extracting them; and the
 // files at rels under root, its metadata. A Go file is its header
-// (goHeader), as the plan reads of the source; a test file and a testdata
-// directory, which no build reads, are left out; any other file is what a
-// plan reads of it (planContent).
+// (goHeader), as the plan reads of the source; a test file, which no build
+// of the module's dependents reads, is left out; any other file is what a
+// plan reads of it (planContent). A testdata directory's files are kept: no
+// pattern matches a package there, but a build may import one by its path,
+// as grpc's programs import google.golang.org/grpc/testdata.
 func packmod(root, out, zipRel, dir string, rels []string) error {
 	type file struct {
 		rel  string
@@ -680,8 +682,7 @@ func packmod(root, out, zipRel, dir string, rels []string) error {
 		if name == "" || strings.HasSuffix(name, "/") {
 			continue
 		}
-		elems := strings.Split(name, "/")
-		if slices.Contains(elems[:len(elems)-1], "testdata") || strings.HasSuffix(elems[len(elems)-1], "_test.go") {
+		if strings.HasSuffix(path.Base(name), "_test.go") {
 			continue
 		}
 		// The go command extracts every file read-only.
