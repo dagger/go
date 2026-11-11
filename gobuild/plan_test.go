@@ -1458,3 +1458,24 @@ func TestDependencyBlocks(t *testing.T) {
 		t.Errorf("dependencyBlocks = %q, want %q", ids, want)
 	}
 }
+
+// The listing Archives writes for the export driver holds the packages
+// outside the module, with their imports, and nothing of the module's own,
+// so that it changes only when the dependencies do.
+func TestDependencyListing(t *testing.T) {
+	list := `{"ImportPath":"example.com/m","Name":"main","Dir":"/src","Module":{"Path":"example.com/m","Main":true},"GoFiles":["main.go"],"Imports":["fmt","example.com/dep"]}
+{"ImportPath":"example.com/dep","Name":"dep","Dir":"/gobuild/modcache/example.com/dep@v1.0.0","Module":{"Path":"example.com/dep","Version":"v1.0.0"},"GoFiles":["dep.go"],"Imports":["fmt","example.com/dep/vendored"],"ImportMap":{"example.com/dep/vendored":"vendored"}}
+{"ImportPath":"fmt","Name":"fmt","Dir":"/usr/local/go/src/fmt","GoFiles":["print.go"],"Imports":["errors"]}
+{"ImportPath":"example.com/m/internal/x","Name":"x","Dir":"/src/internal/x","Module":{"Path":"example.com/m","Main":true}}
+`
+	got, err := dependencyListing(list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"ImportPath":"example.com/dep","Name":"dep","Imports":["fmt","example.com/dep/vendored"],"ImportMap":{"example.com/dep/vendored":"vendored"}}
+{"ImportPath":"fmt","Name":"fmt","Imports":["errors"]}
+`
+	if got != want {
+		t.Errorf("dependencyListing =\n%s\nwant\n%s", got, want)
+	}
+}

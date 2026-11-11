@@ -444,7 +444,15 @@ func (m *Gobuild) Archives(
 	if err != nil {
 		return nil, err
 	}
-	return out.WithFiles("archives", archives).WithFile("manifest.json", manifest), nil
+	list, err := p.ran.File("/gobuild/list.json").Contents(ctx)
+	if err != nil {
+		return nil, err
+	}
+	listing, err := dependencyListing(list)
+	if err != nil {
+		return nil, err
+	}
+	return out.WithFiles("archives", archives).WithFile("manifest.json", manifest).WithNewFile(listingFile, listing), nil
 }
 
 // archiveWalked is the walk Archives makes: the build, its plan and the
@@ -606,9 +614,53 @@ func (m *Gobuild) ArchiveBuilds(
 }
 
 // listFields are the fields of go list's output Archives reads: the
-// packages and their names, and what write-manifest reads, the manifest
-// module's ListFields: their modules and the files their digests cover.
-const listFields = "ImportPath,Name,Dir,ForTest,Module,GoFiles,CgoFiles,CFiles,CXXFiles,MFiles,HFiles,FFiles,SFiles,SwigFiles,SwigCXXFiles,SysoFiles,EmbedFiles"
+// packages and their names, what write-manifest reads, the manifest
+// module's ListFields: their modules and the files their digests cover, and
+// their imports, for the listing (listingFile).
+const listFields = "ImportPath,Name,Dir,ForTest,Module,GoFiles,CgoFiles,CFiles,CXXFiles,MFiles,HFiles,FFiles,SFiles,SwigFiles,SwigCXXFiles,SysoFiles,EmbedFiles,Imports,ImportMap"
+
+// listingFile is the listing Archives writes beside the manifest, the
+// manifest module's ListingFile: the packages outside the module, as its
+// plan listed them, with the manifest module's ListingFields. With it,
+// golangci-lint's export driver answers a caller that type-checks the
+// module from source, such as code generation, with no go command and no
+// module cache.
+const listingFile = "listing.json"
+
+// listingPackage is a package as the listing (listingFile) has it.
+type listingPackage struct {
+	ImportPath string
+	Name       string
+	ForTest    string            `json:",omitempty"`
+	Imports    []string          `json:",omitempty"`
+	ImportMap  map[string]string `json:",omitempty"`
+}
+
+// dependencyListing is the listing (listingFile) of the packages of a
+// "go list -json" listing outside the main module: by their content
+// alone, so an edit of the module's own packages leaves it as it is.
+func dependencyListing(list string) (string, error) {
+	var out strings.Builder
+	enc := json.NewEncoder(&out)
+	dec := json.NewDecoder(strings.NewReader(list))
+	for {
+		var listed struct {
+			listingPackage
+			Module *struct{ Main bool }
+		}
+		if err := dec.Decode(&listed); err == io.EOF {
+			return out.String(), nil
+		} else if err != nil {
+			return "", fmt.Errorf("go list: %w", err)
+		}
+		if listed.Module != nil && listed.Module.Main {
+			continue
+		}
+		if err := enc.Encode(listed.listingPackage); err != nil {
+			return "", err
+		}
+	}
+}
 
 // listedIDs is the set of package IDs in a "go list -json" listing, and the
 // set of its main packages, by import path, and of the packages of the main

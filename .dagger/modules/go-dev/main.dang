@@ -1239,6 +1239,30 @@ type GoDev {
   }
 
   """
+  The dependencies' archives come with the listing golangci-lint's export
+  driver answers code generation from, with no go command: each package
+  outside the module, with its imports. It holds nothing of the module's own
+  packages, so it stays the same across an edit of them.
+  """
+  archivesListingCheck: Void @check {
+    let src = directory
+      .withNewFile("go.mod", "module example.com/app\n\ngo 1.22\n")
+      .withNewFile("main.go", "package main\n\nimport \"strings\"\n\nfunc main() { println(strings.ToUpper(\"x\")) }\n")
+    let listed = dependenciesListing(src)
+    assert(listed.contains("{\"ImportPath\":\"strings\",\"Name\":\"strings\",\"Imports\":["), "the root package's import is not listed with its imports: " + listed)
+    assert(listed.contains("example.com/app") == false, "the listing holds the module's own package: " + listed)
+    let edited = dependenciesListing(src.withNewFile("main.go", "package main\n\nimport \"strings\"\n\nfunc main() { println(strings.ToLower(\"X\")) }\n"))
+    assert(edited == listed, "an edit of the module's own package changed the listing")
+  }
+
+  # The listing of the dependencies' archives of the module at dir's root
+  # package, as codegen asks for them.
+  let dependenciesListing(dir: Directory!): String! {
+    let ws = dir.asWorkspace
+    go(version: "1.27.3").module(ws, ".").archives(ws, dependencies: true, packages: ["."], noTests: true).file("listing.json").contents
+  }
+
+  """
   A module's archive builds are what its archives read from the cache: a
   build per package the archives hold, each its own, a download per module
   version the build read, and the build's four tools: gohdr, write-manifest
@@ -1334,7 +1358,7 @@ type GoDev {
     let empty = go(base: cgoCxxBase).module(none, ".").archives(none)
     let emptyManifest = empty.file("manifest.json").contents
     assert(emptyManifest.contains("\"packages\": {}"), "the manifest of no packages: " + emptyManifest)
-    assert(empty.entries == ["manifest.json"], "the archives of no packages: " + empty.entries.join(", "))
+    assert(empty.entries == ["listing.json", "manifest.json"], "the archives of no packages: " + empty.entries.join(", "))
     null
   }
 
