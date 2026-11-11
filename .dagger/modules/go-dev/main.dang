@@ -1452,7 +1452,8 @@ type GoDev {
 
   """
   A failed compile says why: its error carries the compiler's message, not
-  only the exec's exit code.
+  only the exec's exit code. So does a build that fails before it
+  downloads anything, where the go command first reads the go.mod.
   """
   execErrorCheck: Void @check {
     let ws = directory
@@ -1466,6 +1467,18 @@ type GoDev {
       err: Error => err.message
     }
     assert(failed.contains("undefined: intentionallyUndefinedSymbol"), "a failed compile did not say why: " + failed)
+    # A go.mod that asks for a Go no toolchain has.
+    let unreadable = directory
+      .withNewFile("go.mod", "module example.com/unreadable\n\ngo 1.99\n")
+      .withNewFile("main.go", "package main\n\nfunc main() {}\n")
+      .asWorkspace
+    let setup = {
+      go(version: "1.27.3").module(unreadable, ".").packages(unreadable).get(key: ".").binary(unreadable).size
+      "built"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(setup.contains("1.99"), "a build that failed reading its go.mod did not say why: " + setup)
   }
 
   """

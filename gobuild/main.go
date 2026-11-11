@@ -789,7 +789,7 @@ func newBuild(ctx context.Context, toolImage string, ctr *dagger.Container, imag
 	if gomodcache == "" {
 		out, err := ctr.WithExec([]string{"go", "env", "GOMODCACHE"}, bare).Stdout(ctx)
 		if err != nil {
-			return nil, err
+			return nil, withStderr(err)
 		}
 		gomodcache = strings.TrimSpace(out)
 	}
@@ -903,7 +903,7 @@ go env GOOS GOARCH CGO_ENABLED GOVERSION > /gobuild/goenv
 		WithExec([]string{"sh", "-c", script}, bare).
 		Sync(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("go mod download: %w", err)
+		return nil, fmt.Errorf("go mod download: %w", withStderr(err))
 	}
 	sumFile, err := first.File("/gobuild/sums").Contents(ctx)
 	if err != nil {
@@ -944,7 +944,7 @@ go env GOOS GOARCH CGO_ENABLED GOVERSION > /gobuild/goenv
 		}
 		listed := <-imports
 		if listed.err != nil {
-			return nil, fmt.Errorf("source imports: %w", listed.err)
+			return nil, fmt.Errorf("source imports: %w", withStderr(listed.err))
 		}
 		found, err := d.discoverOnce(ctx, toolImage, goenv, tags, parseSourceImports(d.target, listed.out), pkgDir)
 		if err != nil {
@@ -967,7 +967,7 @@ go env GOOS GOARCH CGO_ENABLED GOVERSION > /gobuild/goenv
 	}
 	listedSums := <-startSums
 	if listedSums.err != nil {
-		return nil, fmt.Errorf("start module cache checksums: %w", listedSums.err)
+		return nil, fmt.Errorf("start module cache checksums: %w", withStderr(listedSums.err))
 	}
 	b.sums = listedSums.sums
 	for _, e := range entries {
