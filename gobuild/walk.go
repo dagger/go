@@ -158,9 +158,12 @@ type result struct {
 	linkErr  error
 	linkDone chan struct{}
 	// dir is the package's work directory, which holds file.
-	dir  *dagger.Directory
-	err  error // set before done closes; dependents read it
-	done chan struct{}
+	dir *dagger.Directory
+	// importPath names the package in its dependents' errors: a package
+	// the dependency call built is no node of the walk that reads it.
+	importPath string
+	err        error // set before done closes; dependents read it
+	done       chan struct{}
 }
 
 // walk runs nodes and returns their results, with done's: the results of
@@ -172,7 +175,7 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node, done map[stri
 	}
 	links := false
 	for id, n := range nodes {
-		results[id] = &result{done: make(chan struct{}), linkDone: make(chan struct{})}
+		results[id] = &result{done: make(chan struct{}), linkDone: make(chan struct{}), importPath: n.ImportPath}
 		links = links || n.Link
 	}
 	limit := packageConcurrency()
@@ -217,7 +220,7 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node, done map[stri
 				}
 				<-dr.done
 				if dr.err != nil {
-					r.err = fmt.Errorf("%s: %w", nodes[d].ImportPath, dr.err)
+					r.err = fmt.Errorf("%s: %w", dr.importPath, dr.err)
 					return
 				}
 				if !n.Link {
@@ -226,7 +229,7 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node, done map[stri
 				}
 				<-dr.linkDone
 				if dr.linkErr != nil {
-					r.err = fmt.Errorf("%s: %w", nodes[d].ImportPath, dr.linkErr)
+					r.err = fmt.Errorf("%s: %w", dr.importPath, dr.linkErr)
 					return
 				}
 				linkFiles = append(linkFiles, dr.link)

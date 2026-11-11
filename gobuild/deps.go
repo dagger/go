@@ -170,7 +170,8 @@ func (b *build) dependencies(ctx context.Context, w *walker, nodes map[string]*n
 	}
 	done := map[string]*result{}
 	for i, id := range ids {
-		r := &result{file: &archives[i], dir: &outs[i], done: make(chan struct{}), linkDone: make(chan struct{})}
+		r := &result{file: &archives[i], dir: &outs[i], done: make(chan struct{}), linkDone: make(chan struct{}),
+			importPath: pkgs[i].ImportPath}
 		close(r.done)
 		switch {
 		case !links:
