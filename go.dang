@@ -1451,7 +1451,14 @@ type GoModule {
         .withoutMount("/root/.cache/go-build")
         .withDirectory(".", inputs.source)
         .withWorkdir(path)
-        .withExec(["sh", "-c", "mkdir -p \"/out/$(dirname \"$1\")\" && go test -c -vet=off -o \"/out/$1\" \"$2\"", "sh", at, packageArg(dir)])
+        # As the set does, a package whose files are all for other
+        # platforms has no binary, rather than failing go test -c.
+        .withExec([
+          "sh", "-c",
+          "mkdir -p /out && t=$(go list -e -f \"$3\" \"$2\") && if [ -n \"$t\" ]; then mkdir -p \"/out/$(dirname \"$1\")\" && go test -c -vet=off -o \"/out/$1\" \"$2\"; fi",
+          "sh", at, packageArg(dir),
+          "{{if or .TestGoFiles .XTestGoFiles (and .Error (or .InvalidGoFiles (not .IgnoredGoFiles)))}}x{{end}}",
+        ])
         .directory("/out")
     } else {
       testBinarySet(inputs, [dir])
@@ -1587,9 +1594,9 @@ type GoModule {
     let tested = lib.at(path).testDirectories(ws).map { p => relativeDir(p) }.filter { dir => matchesAll(dir) }
     let binaries = moduleTestBinaries(inputs, tested)
     # go test fails when ./... matches no package: here, when no package's
-    # test files build for the platform and the module has no other package.
-    let others = discoveredPackages(ws).filter { dir => matchesAll(dir) and tested.contains(dir) == false }
-    if (tested.length > 0 and binaries.length == 0 and others.length == 0) {
+    # test files build for the platform and the module has no Go file that
+    # isn't a test's. Files that build constraints leave out all count.
+    if (tested.length > 0 and binaries.length == 0 and moduleGoFiles(inputs).length == 0) {
       raise "no packages to test"
     }
     let env = testEnvFrom(inputs)
@@ -1614,12 +1621,14 @@ type GoModule {
     env
   }
 
-  # The module-relative directories of this module's packages, as discovery
-  # lists them.
-  let discoveredPackages(ws: Workspace!): [String!]! {
-    discoveryLines(ws)
-      .filter { line => line.hasPrefix("package\t" + path + "\t") }
-      .map { line => line.split("\t").takeFirst(3).takeLast(1).join("") }
+  # The module's Go files that aren't tests', in directories ./... matches.
+  let moduleGoFiles(inputs: GoTestInputs!): [String!]! {
+    let prefix = if (path == ".") { "" } else { path + "/" }
+    (inputs.source.glob(prefix + "*.go") + inputs.source.glob(prefix + "**/*.go")).uniq.filter { f =>
+      let rel = f.trimPrefix(prefix)
+      let dir = rel.split("/").dropLast(1).join("/")
+      rel.hasSuffix("_test.go") == false and matchesAll(if (dir == "") { "." } else { dir })
+    }
   }
 
   # The test binaries of the directories with test files that ./... matches,

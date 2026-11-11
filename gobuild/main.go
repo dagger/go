@@ -338,7 +338,7 @@ func planTestSet(ctx context.Context, toolImage string, base *dagger.Container, 
 	// package by import path alone, and a plan of several test binaries has
 	// a package once per test variant: the listing names each, as archives'.
 	buildFlags := flags[1:]
-	tested := append(append([]string{"go", "list", "-e", "-f", "{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}"}, buildFlags...), pkgs...)
+	tested := append(append([]string{"go", "list", "-e", "-f", testedTemplate}, buildFlags...), pkgs...)
 	list := append([]string{"go", "list", "-deps", "-test", "-json=ImportPath,Name,Module,DepOnly,Dir,ForTest"}, buildFlags...)
 	test := append(append([]string{"go", "test", "-c", "-n"}, flags...), "-o", "/dev/null")
 	p, err := b.planWith(ctx, headers, "tested=$("+shJoin(tested)+") && printf '%s\\n' $tested > /gobuild/tested.txt && "+
@@ -1795,3 +1795,9 @@ func splitGOFLAGS(s string) ([]string, error) {
 		s = s[i:]
 	}
 }
+
+// testedTemplate is go list's template for the packages a test binary set
+// plans: those with test files for the target, and those with an error, so
+// that the plan fails on it, unless the error is only that build constraints
+// leave out every file, a package go test ./... leaves out too.
+const testedTemplate = "{{if or .TestGoFiles .XTestGoFiles (and .Error (or .InvalidGoFiles (not .IgnoredGoFiles)))}}{{.ImportPath}}{{end}}"

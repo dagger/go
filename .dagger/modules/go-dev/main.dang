@@ -1637,6 +1637,24 @@ type GoDev {
       err: Error => err.message
     }
     assert(failure.contains("Go tests in short:"), "a package that does not compile passed, or was not named: " + failure)
+
+    # A library whose only test file is for another platform has no test
+    # binary, and go test ./... passes the module.
+    let libOnly = directory
+      .withNewFile("go.mod", "module example.com/libonly\n\ngo 1.27.3\n")
+      .withNewFile("lib.go", "package lib\n")
+      .withNewFile("lib_windows_test.go", "package lib\nimport \"testing\"\nfunc TestWindows(t *testing.T) { t.Fatal(\"a Windows test ran\") }\n")
+      .asWorkspace
+    go(version: "1.27.3").module(libOnly, ".", findUp: false).test(libOnly)
+
+    # A test file go cannot read is an error, not a file left out.
+    let malformed = fixture
+      .withNewFile("bad/bad_test.go", "//go:build linux &&\n\npackage bad\nimport \"testing\"\nfunc TestBad(t *testing.T) {}\n")
+      .asWorkspace
+    let unread = { go(version: "1.27.3", goflags: "-short").module(malformed, ".", findUp: false).test(malformed); "no failure" } rescue {
+      err: Error => err.message
+    }
+    assert(unread.contains("Go tests in bad:"), "a malformed test file was left out: " + unread)
     null
   }
 
