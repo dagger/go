@@ -281,6 +281,21 @@ func parseBlocks(plan string, r roots, archives bool) (map[string]*block, error)
 	// The block whose link is being left out, from its import config to the
 	// next block.
 	linking := ""
+	// enter makes b the block the next lines are, from where the plan is:
+	// the go command prints "cd" only when the directory changes, so the
+	// current directory is carried into the block explicitly, whenever its
+	// lines start or, as with -cover, resume after another block's. A block
+	// never works in another's work directory, which its exec doesn't have:
+	// the plan left the previous block there, as -cover's runs of the cover
+	// tool do, and the block's own commands change directory before they
+	// need one. Carried in, it would make the block depend on the other.
+	enter := func(b *block) {
+		cur = b
+		if ref := firstWorkRef(cwd); ref != "" && ref != b.id {
+			cwd = r.Cwd
+		}
+		cur.lines = append(cur.lines, "mkdir -p "+shQuote(cwd)+" && cd "+shQuote(cwd))
+	}
 	lines := strings.Split(plan, "\n")
 	for i := 0; i < len(lines); i++ {
 		// go -n prints its work directory as "$WORK", which is not an
@@ -325,7 +340,7 @@ func parseBlocks(plan string, r roots, archives bool) (map[string]*block, error)
 		// header yet is that block's, and a header waiting names it.
 		if !content {
 			if b, ok := blocks[firstWorkRef(line)]; ok && b.importPath == "" && b != cur {
-				cur = b
+				enter(b)
 				if pending != "" {
 					b.importPath, pending = pending, ""
 				}
@@ -338,10 +353,7 @@ func parseBlocks(plan string, r roots, archives bool) (map[string]*block, error)
 				blocks[m[1]] = b
 				pending = ""
 			}
-			cur = b
-			// The go command prints "cd" only when the directory changes, so
-			// carry the current directory into each block explicitly.
-			cur.lines = append(cur.lines, "mkdir -p "+shQuote(cwd)+" && cd "+shQuote(cwd))
+			enter(b)
 		}
 		if cur == nil {
 			continue

@@ -836,6 +836,57 @@ func TestParsePlanTestCover(t *testing.T) {
 	}
 }
 
+// With -cover, a package's cover run can leave the plan in its work
+// directory when the next package's block starts: that block doesn't depend
+// on it, and doesn't start there. The covered package's own steps resume
+// after that block, in the directory the plan is in by then.
+func TestParsePlanCarriesNoOtherWorkDirectory(t *testing.T) {
+	plan := strings.Join([]string{
+		"mkdir -p $WORK/b001/",
+		"echo '{\"OutConfig\":\"$WORK/b001/coveragecfg\"}' > $WORK/b001/pkgcfg.txt # internal",
+		"cd $WORK/b001/",
+		"/usr/local/go/pkg/tool/linux_amd64/cover -pkgcfg ./pkgcfg.txt -mode set -var goCover_x -outfilelist ./coveroutfiles.txt /src/x.go",
+		"mkdir -p $WORK/b002/",
+		"",
+		"#",
+		"# example.com/x",
+		"#",
+		"",
+		"echo '# import config' > $WORK/b002/importcfg # internal",
+		"cd /src",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b002/_pkg_.a -trimpath \"$WORK/b002=>\" -p example.com/x -importcfg $WORK/b002/importcfg -pack ./x.go",
+		"",
+		"#",
+		"# example.com/x",
+		"#",
+		"",
+		"cat >$WORK/b001/importcfg << 'EOF' # internal",
+		"packagefile example.com/x=$WORK/b002/_pkg_.a",
+		"EOF",
+		"/usr/local/go/pkg/tool/linux_amd64/compile -o $WORK/b001/_pkg_.a -trimpath \"$WORK/b001=>\" -p example.com/x -importcfg $WORK/b001/importcfg -pack $WORK/b001/x.cover.go ./x_test.go",
+	}, "\n")
+	blocks, err := parseArchivePlan(plan, testRoots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deps := blocks["b002"].deps; len(deps) != 0 {
+		t.Errorf("b002 depends on %v", deps)
+	}
+	if deps := blocks["b001"].deps; !slices.Equal(deps, []string{"b002"}) {
+		t.Errorf("b001 depends on %v, want [b002]", deps)
+	}
+	if strings.Contains(blocks["b002"].script(blocks, soloCompileC), "b001") {
+		t.Errorf("b002's script names b001:\n%s", blocks["b002"].script(blocks, soloCompileC))
+	}
+	// b001's compile, which resumes after b002's block, runs in the source,
+	// where b002 changed to and its test file is, not in b001's work directory.
+	script := blocks["b001"].script(blocks, soloCompileC)
+	compile := strings.Index(script, "/compile ")
+	if compile < 0 || strings.LastIndex(script[:compile], "cd ") < 0 || !strings.HasPrefix(script[strings.LastIndex(script[:compile], "cd "):], "cd '/src'") {
+		t.Errorf("b001's compile doesn't run in /src:\n%s", script)
+	}
+}
+
 // A heredoc line that names the linker, such as an embedded file's in an
 // embedcfg, is not a link: the main package is the one that runs the linker.
 func TestParsePlanLinkIsTheLinker(t *testing.T) {
