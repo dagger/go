@@ -1612,8 +1612,9 @@ type GoDev {
   """
   A module's tests run as go test ./... runs them, from each package's
   prebuilt test binary: a testing flag in GOFLAGS reaches the binary, a
-  package whose only test file is for another platform passes, and a
-  package without tests that does not compile fails the module.
+  package whose test files are all for another platform passes, a
+  directory with no file for this one is left out, and a package with tests
+  that does not compile fails the module, named.
   """
   moduleTestCheck: Void @check {
     let fixture = directory
@@ -1621,6 +1622,8 @@ type GoDev {
       .withNewFile("short/short_test.go", "package short\nimport \"testing\"\nfunc TestShort(t *testing.T) { if !testing.Short() { t.Fatal(\"-short from GOFLAGS did not reach the test binary\") } }\n")
       .withNewFile("winonly/winonly.go", "package winonly\n")
       .withNewFile("winonly/winonly_windows_test.go", "package winonly\nimport \"testing\"\nfunc TestWindows(t *testing.T) { t.Fatal(\"a Windows test ran\") }\n")
+      # No file of this one builds here, so ./... leaves it out.
+      .withNewFile("wintests/wintests_windows_test.go", "package wintests\nimport \"testing\"\nfunc TestWindows(t *testing.T) { t.Fatal(\"a Windows test ran\") }\n")
       .withNewFile("lib/lib.go", "package lib\nfunc Answer() int { return 42 }\n")
     let ws = fixture.asWorkspace
     # Without -short the fixture fails, and its failing test would show in
@@ -1629,11 +1632,11 @@ type GoDev {
     # go splits GOFLAGS at any white space, a tab too.
     go(version: "1.27.3", goflags: "-count=1\t-short").module(ws, ".", findUp: false).test(ws)
 
-    let broken = fixture.withNewFile("lib/lib.go", "package lib\nvar broken = undefinedSymbol\n").asWorkspace
+    let broken = fixture.withNewFile("short/lib.go", "package short\nvar broken = undefinedSymbol\n").asWorkspace
     let failure = { go(version: "1.27.3", goflags: "-short").module(broken, ".", findUp: false).test(broken); "no failure" } rescue {
       err: Error => err.message
     }
-    assert(failure.contains("undefinedSymbol"), "a package without tests that does not compile passed: " + failure)
+    assert(failure.contains("Go tests in short:"), "a package that does not compile passed, or was not named: " + failure)
     null
   }
 
