@@ -578,18 +578,6 @@ type Gomod {
   toolBuilder: Container! { goContainer(scannerVersion) }
 
   """
-  Streams a shared Go test report into bounded per-check results.
-  """
-  testReportIndexer: File! {
-    toolBuilder
-      .withDirectory("/helpers/go-test-report", currentModule.source.directory("helpers/go-test-report"))
-      .withWorkdir("/helpers/go-test-report")
-      .withEnvVariable("CGO_ENABLED", "0")
-      .withExec(["go", "build", "-o", "/usr/local/bin/go-test-report", "."])
-      .file("/usr/local/bin/go-test-report")
-  }
-
-  """
   Every Dagger module config file in the workspace, at its workspace path.
 
   A test that serves a Dagger module needs that module's config, which is not

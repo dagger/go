@@ -1610,6 +1610,34 @@ type GoDev {
   }
 
   """
+  A module's tests run as go test ./... runs them, from each package's
+  prebuilt test binary: a testing flag in GOFLAGS reaches the binary, a
+  package whose only test file is for another platform passes, and a
+  package without tests that does not compile fails the module.
+  """
+  moduleTestCheck: Void @check {
+    let fixture = directory
+      .withNewFile("go.mod", "module example.com/moduletest\n\ngo 1.27.3\n")
+      .withNewFile("short/short_test.go", "package short\nimport \"testing\"\nfunc TestShort(t *testing.T) { if !testing.Short() { t.Fatal(\"-short from GOFLAGS did not reach the test binary\") } }\n")
+      .withNewFile("winonly/winonly.go", "package winonly\n")
+      .withNewFile("winonly/winonly_windows_test.go", "package winonly\nimport \"testing\"\nfunc TestWindows(t *testing.T) { t.Fatal(\"a Windows test ran\") }\n")
+      .withNewFile("lib/lib.go", "package lib\nfunc Answer() int { return 42 }\n")
+    let ws = fixture.asWorkspace
+    # Without -short the fixture fails, and its failing test would show in
+    # this suite's own report; selectedFailfastCheck covers a flag that must
+    # reach the binary for a check to fail.
+    # go splits GOFLAGS at any white space, a tab too.
+    go(version: "1.27.3", goflags: "-count=1\t-short").module(ws, ".", findUp: false).test(ws)
+
+    let broken = fixture.withNewFile("lib/lib.go", "package lib\nvar broken = undefinedSymbol\n").asWorkspace
+    let failure = { go(version: "1.27.3", goflags: "-short").module(broken, ".", findUp: false).test(broken); "no failure" } rescue {
+      err: Error => err.message
+    }
+    assert(failure.contains("undefinedSymbol"), "a package without tests that does not compile passed: " + failure)
+    null
+  }
+
+  """
   The workspace mounts at a configurable path that defaults to "/src",
   whatever the workspace is called: the path is in every package's compile,
   so a default made from the workspace's name would build the same source
@@ -2595,9 +2623,19 @@ type GoDev {
     )
   }
 
+  # A package that does not compile fails its own tests, with the compiler's
+  # error under them: the report shows the failed build step in place of the
+  # check's message. The module's other package still runs.
   selectedBuildFailureCheck(ws: Workspace!): Void @check {
     let fixture = selectionFixture.withNewFile("m2/p1/broken.go", "package p1\nvar broken = undefinedSymbol\n")
-    selectedCheck(ws, fixture, selectionArgs, passed: 6, failed: 2, messages: ["Go tests in m2/p1:"])
+    selectedCheck(
+      ws,
+      fixture,
+      selectionArgs,
+      passed: 6,
+      failed: 2,
+      messages: ["go-package=m2/p1&go-test=TestFoo", "undefined: undefinedSymbol"],
+    )
   }
 
   let reportingFixture: Directory! {

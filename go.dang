@@ -1326,18 +1326,41 @@ type GoModule {
 
   """
   The otelgotest binary the tests are run with, when the container does not
-  already carry one.
+  already carry one: otel-go's own, at the commit testRunnerCommit names,
+  built by this module's per-package build from otel-go's source.
 
-  Built in a pinned Go container rather than in the module's own, so a module
-  pinned to an older toolchain still gets it, and so the build happens once for
-  the whole workspace instead of once per module.
+  Built with the Go version the library's tools build with rather than the
+  module's own, so a module pinned to an older toolchain still gets it, and
+  so the build happens once for the whole workspace instead of once per
+  module.
   """
   let testRunner: File! {
-    gomod
-      .toolBuilder
-      .withEnvVariable("GOBIN", "/usr/local/bin")
-      .withExec(["go", "install", "github.com/dagger/otel-go/cmd/otelgotest@main"])
-      .file("/usr/local/bin/otelgotest")
+    let source = git("https://github.com/dagger/otel-go").commit(testRunnerCommit).tree.asWorkspace
+    toolBuild(source, ".", "cmd/otelgotest")
+  }
+
+  # The otel-go commit otelgotest is built from: one with its prebuilt mode,
+  # which runs a test binary as go test -json runs one.
+  let testRunnerCommit: String! = "aa07da582c215c85056429e152a261717003244d"
+
+  """
+  The helper that turns each package's go test -json report into one result
+  per selected test, built by this module's per-package build from the
+  library's source.
+  """
+  let testReportIndexer: File! {
+    let source = currentModule.source.directory("gomod/helpers/go-test-report").asWorkspace
+    toolBuild(source, ".", ".")
+  }
+
+  # One main package of a tool's own source, a workspace holding its Go
+  # module at root, for the engine's platform. Its settings are this
+  # module's defaults and its Go is the library's, whatever the module under
+  # test sets: the tool is the same for every module.
+  let toolBuild(source: Workspace!, root: String!, pkg: String!): File! {
+    Go(version: gomod.scannerVersion)
+      .goModuleAt(root, "/src")
+      .binaryFile(source, gomod.hostPlatform, pkg)
   }
 
   # Form source views during input preparation, without setting up tools.
@@ -1348,49 +1371,244 @@ type GoModule {
       configs: gomod.daggerConfigs(ws),
       version: if (baseImage == null) { toolchainVersion(ws) } else { "" },
       importPath: importPath(ws),
+      headers: lib.scan(ws).sync.file("_headers_.gohdr"),
     )
+  }
+
+  # The container the tests run in: this module's Go container, with no Go
+  # cache volume, since nothing in it compiles the module.
+  let testBase(version: String!): Container! {
+    baseFor(version).withoutMount("/go/pkg/mod").withoutMount("/root/.cache/go-build")
   }
 
   """
   Test container with this module's sources, testdata, and otelgotest in
   place, before any test command runs.
   """
-  let testEnv(ws: Workspace!): Container! {
-    testEnvFrom(base(ws), source(ws, test: true), testData(ws), gomod.daggerConfigs(ws))
-  }
-
-  let testEnvFrom(
-    base: Container!,
-    source: Directory!,
-    testData: Directory!,
-    configs: Directory!,
-  ): Container! {
+  let testEnvFrom(inputs: GoTestInputs!): Container! {
     gomod
-      .withTool(base, "otelgotest", testRunner)
-      .withDirectory(".", source)
-      .withDirectory(".", testData)
+      .withTool(testBase(inputs.version), "otelgotest", testRunner)
+      .withDirectory(".", inputs.source)
+      .withDirectory(".", inputs.testData)
       # A test that serves a Dagger module needs that module's config, which is
       # not a Go file and so is not in the source mount. Without it the serve
       # fails with "does not contain a dagger config file" even though the
       # module's Go code is right there.
-      .withDirectory(".", configs)
+      .withDirectory(".", inputs.configs)
       # Nested Dagger clients find the workspace boundary by walking up to .git.
       .withNewFile(".git/HEAD", "ref: refs/heads/main\n")
-  }
-
-  """
-  Container that has run this module's tests.
-  """
-  let testExec(ws: Workspace!): Container! {
-    testEnv(ws)
-      .withWorkdir(path)
       # With its own session rather than the one running the tests, a module
       # address resolves against the user's workspace instead of against this
       # module. A client provisions through a CLI there; the engine mounts a
       # version-matched one on PATH, which newer SDKs find by themselves, while
       # older ones only read _EXPERIMENTAL_DAGGER_CLI_BIN.
       .withEnvVariable("_EXPERIMENTAL_DAGGER_CLI_BIN", "/dev/.dagger/dagger")
-      .withExec(["otelgotest", "./..."], daggerInDaggerNewSession: true)
+  }
+
+  # The test binaries of the module-relative package directories dirs that
+  # have test files for the engine's platform, from one plan of them all, in
+  # a directory relative to the module, each at <dir>/<name>.test as go test
+  # -c names it. As go test, it builds with the containers' GOFLAGS and
+  # without the build setting's flags, which are go build's.
+  let testBinarySet(inputs: GoTestInputs!, dirs: [String!]!): Directory! {
+    builder.testBinaries(
+      base: testBuildBase(inputs),
+      image: if (baseImage == null) { gomod.goImage(inputs.version) } else { "" },
+      from: if (baseImage == null) { null } else { baseImage.withoutEntrypoint },
+      source: inputs.source,
+      headers: inputs.headers,
+      mountPath: mountPath,
+      workdir: path,
+      pkgs: dirs.map { dir => packageArg(dir) },
+      downloads: tool.downloads,
+    )
+  }
+
+  # One package's test binary, as testBinarySet builds it, alone. gccgo
+  # compiles differently from the gc toolchain the per-package build
+  # replays, so a gccgo binary is one go test -c, without the Go cache
+  # volumes, as a package's testBinary builds it.
+  let testBinaryOne(inputs: GoTestInputs!, dir: String!): File! {
+    if (testGccgo(inputs)) {
+      let name = testBinaryName(inputs.importPath, dir)
+      testBuildBase(inputs)
+        .withoutMount("/go/pkg/mod")
+        .withoutMount("/root/.cache/go-build")
+        .withDirectory(".", inputs.source)
+        .withWorkdir(path)
+        .withExec(["go", "test", "-c", "-vet=off", "-o", "/out/" + name, packageArg(dir)])
+        .file("/out/" + name)
+    } else {
+      testBinaryOneGc(inputs, dir)
+    }
+  }
+
+  # Whether the test containers' GOFLAGS pick the gccgo compiler.
+  let testGccgo(inputs: GoTestInputs!): Boolean! {
+    gccgo(goflagsFields(testBuildBase(inputs).envVariable("GOFLAGS") ?? ""))
+  }
+
+  # GOFLAGS' flags: go splits it at any white space.
+  let goflagsFields(goflags: String!): [String!]! {
+    goflags.replaceMatches(`\s+`, with: " ").split(" ").filter { f => f != "" }
+  }
+
+  let testBinaryOneGc(inputs: GoTestInputs!, dir: String!): File! {
+    builder.testBinary(
+      base: testBuildBase(inputs),
+      image: if (baseImage == null) { gomod.goImage(inputs.version) } else { "" },
+      from: if (baseImage == null) { null } else { baseImage.withoutEntrypoint },
+      source: inputs.source,
+      headers: inputs.headers,
+      mountPath: mountPath,
+      workdir: path,
+      pkg: packageArg(dir),
+      downloads: tool.downloads,
+    )
+  }
+
+  let testBuildBase(inputs: GoTestInputs!): Container! {
+    let target = gomod.hostPlatform.split("/")
+    baseFor(inputs.version)
+      .withEnvVariable("GOOS", target.takeFirst(1).join(""))
+      .withEnvVariable("GOARCH", target.takeLast(1).join(""))
+  }
+
+  # The test binaries of dirs, each as a package's build gives it. When the
+  # set builds, every package of it has its binary, or none when its test
+  # files are all for other platforms. When it fails, as go test still runs
+  # the packages that build, each package is built alone, and the one that
+  # fails has its error in place of a binary. A gccgo build has no set.
+  let testBinaries(inputs: GoTestInputs!, dirs: [String!]!): [GoTestBinary!]! {
+    let set = if (testGccgo(inputs)) { null } else {
+      { testBinarySet(inputs, dirs).sync } rescue { err: Error => null }
+    }
+    dirs.map { dir =>
+      let name = testBinaryName(inputs.importPath, dir)
+      let at = if (dir == ".") { name } else { dir + "/" + name }
+      if (set != null) {
+        GoTestBinary(directory: dir, name: name, file: if (set!.exists(at)) { set!.file(at) } else { null })
+      } else {
+        { GoTestBinary(directory: dir, name: name, file: testBinaryOne(inputs, dir).sync) } rescue {
+          err: Error => GoTestBinary(directory: dir, name: name, failure: err.message)
+        }
+      }
+    }
+  }
+
+  # The name go test -c gives a package's test binary on the engine's
+  # platform: its import path's last element, or the one before when that is
+  # a major version such as "v2", then ".test".
+  let testBinaryName(moduleImportPath: String!, dir: String!): String! {
+    let full = if (dir == ".") { moduleImportPath } else { moduleImportPath + "/" + dir }
+    let elements = full.split("/")
+    let last = elements.takeLast(1).join("")
+    let base = if (elements.length > 1 and last.replaceMatches(`^v([2-9]|[1-9][0-9]+)$`, with: "") == "") {
+      elements.dropLast(1).takeLast(1).join("")
+    } else {
+      last
+    }
+    base + ".test"
+  }
+
+  # The test binary flags go test passes from GOFLAGS, as it passes them: the
+  # testing package's flags it forwards (go test's passFlagToTest), each as
+  # -test.<name>=<value>. With -json, go test drops -v, which its own
+  # -test.v=test2json replaces.
+  let goflagsTestFlags(goflags: String!, json: Boolean!): [String!]! {
+    let forwarded = [
+      "artifacts", "bench", "benchmem", "benchtime", "blockprofile", "blockprofilerate", "count",
+      "coverprofile", "cpu", "cpuprofile", "failfast", "fullpath", "fuzz", "fuzzminimizetime",
+      "fuzztime", "list", "memprofile", "memprofilerate", "mutexprofile", "mutexprofilefraction",
+      "outputdir", "parallel", "run", "short", "shuffle", "skip", "timeout", "trace", "v",
+    ]
+    goflagsFields(goflags).filter { f => f.hasPrefix("-") }.map { f =>
+      let named = f.trimPrefix("-").trimPrefix("-")
+      let parts = named.split("=")
+      let name = parts[0]!.trimPrefix("test.")
+      let value = if (parts.length > 1) { parts.dropFirst(1).join("=") } else { "true" }
+      if (forwarded.contains(name) and (json == false or name != "v")) { "-test." + name + "=" + value } else { "" }
+    }.filter { f => f != "" }
+  }
+
+  # Where a package's test binary is mounted in its test container.
+  let testBinaryPath(binary: GoTestBinary!): String! {
+    "/dagger-go-test/" + binary.name
+  }
+
+  # A package's tests run from its test binary as go test runs it: from the
+  # package's directory, with go test's test binary flags, under otelgotest,
+  # which reports what go test -json would. args are the binary's own flags
+  # after GOFLAGS'.
+  let packageTestArgs(env: Container!, inputs: GoTestInputs!, binary: GoTestBinary!, json: Boolean!, args: [String!]!): [String!]! {
+    let pkg = inputs.importPath + (if (binary.directory == ".") { "" } else { "/" + binary.directory })
+    let jsonFlag = if (json) { ["-json"] } else { [] }
+    ["otelgotest"] + jsonFlag + ["-p", pkg, testBinaryPath(binary)]
+      + goflagsTestFlags(env.envVariable("GOFLAGS") ?? "", json) + args
+  }
+
+  let packageTestEnv(env: Container!, binary: GoTestBinary!): Container! {
+    env
+      .withMountedFile(testBinaryPath(binary), binary.file!)
+      .withWorkdir(if (binary.directory == ".") { path } else { path + "/" + binary.directory })
+  }
+
+  """
+  Container that has run every test of this module, a package at a time, as
+  go test ./... runs them. It fails when a package does not build, or when
+  its tests fail. The packages without tests are compiled, as go test
+  compiles them.
+  """
+  let testExec(ws: Workspace!): Container! {
+    let inputs = testInputs(ws)
+    let tested = lib.at(path).testDirectories(ws).map { p => relativeDir(p) }.filter { dir => matchesAll(dir) }
+    # go test ./... compiles the packages without test files too, and fails
+    # when one does not compile.
+    if (testGccgo(inputs)) {
+      testBuildBase(inputs)
+        .withoutMount("/go/pkg/mod")
+        .withoutMount("/root/.cache/go-build")
+        .withDirectory(".", inputs.source)
+        .withWorkdir(path)
+        .withExec(["go", "build", "./..."])
+        .sync
+      null
+    } else {
+      archives(ws, packages: ["./..."], noTests: true).sync
+      null
+    }
+    let binaries = testBinaries(inputs, tested)
+    let env = testEnvFrom(inputs)
+    # A package whose test files are all for other platforms has no test
+    # binary, and go test reports it has none and passes it. Every other
+    # package's exec runs at once, as go test runs packages in parallel: one
+    # file from each, merged and synced.
+    let ran = {
+      binaries.filter { b => b.file != null }.reduce(directory) { out, binary =>
+        let done = packageTestEnv(env, binary)
+          .withExec(packageTestArgs(env, inputs, binary, false, []), daggerInDaggerNewSession: true)
+          .withNewFile("/dagger-go-test/ran", "")
+          .file("/dagger-go-test/ran")
+        out.withFile(binary.directory + "/" + binary.name + ".ran", done)
+      }.sync
+      ""
+    } rescue {
+      err: Error => err.message
+    }
+    let failures = binaries.filter { b => b.failure != null }.map { b =>
+      "Go tests in " + packagePath(b.directory) + ": " + b.failure!
+    } + (if (ran == "") { [] } else { [ran] })
+    if (failures.length > 0) { raise failures.join("\n") }
+    env
+  }
+
+  # Whether the package pattern ./... matches a module-relative directory:
+  # go leaves out vendor and testdata directories, and those whose name
+  # starts with "." or "_".
+  let matchesAll(dir: String!): Boolean! {
+    dir == "." or dir.split("/").any { element =>
+      element == "vendor" or element == "testdata" or element.hasPrefix(".") or element.hasPrefix("_")
+    } == false
   }
 
   """
@@ -1398,24 +1616,28 @@ type GoModule {
   naming the package when they fail.
   """
   let runPackageTests(ws: Workspace!, dir: String!, names: [String!]!): Void {
-    let run = if (names.length == 0) { [] } else { ["-run", "^(" + names.join("|") + ")$"] }
-    testEnv(ws)
-      .withWorkdir(path)
-      # With its own session rather than the one running the tests, a module
-      # address resolves against the user's workspace instead of against this
-      # module. A client provisions through a CLI there; the engine mounts a
-      # version-matched one on PATH, which newer SDKs find by themselves, while
-      # older ones only read _EXPERIMENTAL_DAGGER_CLI_BIN.
-      .withEnvVariable("_EXPERIMENTAL_DAGGER_CLI_BIN", "/dev/.dagger/dagger")
-      .withExec(["otelgotest"] + run + [packageArg(dir)], daggerInDaggerNewSession: true)
-      .sync rescue {
-      err: Error => raise "Go tests in " + packagePath(dir) + ": " + err.message
+    let inputs = testInputs(ws)
+    let run = if (names.length == 0) { [] } else { ["-test.run=^(" + names.join("|") + ")$"] }
+    let binary = testBinaries(inputs, [dir])[0]!
+    if (binary.failure != null) {
+      raise "Go tests in " + packagePath(dir) + ": " + binary.failure!
+    }
+    # A package whose test files are all for other platforms has no test
+    # binary, and go test reports it has none and passes it.
+    if (binary.file != null) {
+      let env = testEnvFrom(inputs)
+      packageTestEnv(env, binary)
+        .withExec(packageTestArgs(env, inputs, binary, false, run), daggerInDaggerNewSession: true)
+        .sync rescue {
+        err: Error => raise "Go tests in " + packagePath(dir) + ": " + err.message
+      }
     }
     null
   }
 
   """
-  One command and report shared by every selected test in this Go module.
+  One report per package for every selected test in this Go module, each
+  from its package's test binary.
   """
   let runTests(inputs: GoTestInputs!, packages: GoPackages!): GoTestResults! {
     let moduleImportPath = inputs.importPath
@@ -1435,51 +1657,80 @@ type GoModule {
     if (selected.length == 0) { raise "no tests selected in module " + path }
     let empty: [String!]! = []
     let narrowed = discovered.any { tests => tests.narrowed }
-    # Only packages holding selected tests run: "./..." would also run the
-    # module's other packages, and one of them failing would fail every check.
-    # Discovery's order is stable, so the command is too without a sort.
-    let dirs = selected.map { tests => packageArg(tests.directory) }
+    # Only packages holding selected tests run: the module's other packages
+    # failing would otherwise fail every check.
+    let binaries = testBinaries(inputs, selected.map { tests => tests.directory })
+    let env = testEnvFrom(inputs)
     # Every check of the module evaluates this, so the names are only
-    # gathered and sorted for the narrowed run that needs them.
+    # gathered and sorted for the narrowed run that needs them. As go test
+    # was given one pattern for every package, each package gets it.
     let run = if (narrowed) {
       let names = tool.sorted(selected.reduce(empty) { all, tests => all + tests.names }.uniq)
-      ["-run", "^(" + names.join("|") + ")$"]
+      ["-test.run=^(" + names.join("|") + ")$"]
     } else { empty }
-    let executed = testEnvFrom(
-      baseFor(inputs.version),
-      inputs.source,
-      inputs.testData,
-      inputs.configs,
-    )
-      .withWorkdir(path)
-      .withEnvVariable("_EXPERIMENTAL_DAGGER_CLI_BIN", "/dev/.dagger/dagger")
-      .withExec(
-        ["otelgotest", "-json"] + run + dirs,
-        expect: ANY,
-        redirectStdout: "/go-test-report.json",
-        redirectStderr: "/go-test-stderr.log",
-        daggerInDaggerNewSession: true,
-      )
-    # Only post-processing needs to create files under /. The test command
-    # above retains the custom base's configured user.
-    let indexed = executed
-      .withUser("0:0")
-      .withFile("/usr/local/bin/go-test-report", gomod.testReportIndexer)
-      .withNewFile(
-        "/go-test-selection.json",
-        JSON.encode(
-          selected.map { tests => {{pkg: tests.pkg, names: tests.names}} },
-        ),
-      )
-      .withExec([
-        "/usr/local/bin/go-test-report",
-        "--report", "/go-test-report.json",
-        "--stderr", "/go-test-stderr.log",
-        "--selection", "/go-test-selection.json",
-        "--exit-code", `${executed.exitCode}`,
-        "--output", "/go-test-results",
-      ])
-    GoTestResults(results: indexed.directory("/go-test-results"), selections: selected)
+    let results = selected.reduce(directory) { out, tests =>
+      # Numeric ranks, as GoTestResults.assertPassed reads them.
+      let index = selected.filter { other => other.pkg < tests.pkg }.length
+      let binary = binaries.filter { b => b.directory == tests.directory }[0]!
+      out.withDirectory(`${index}`, packageResults(env, inputs, binary, tests, run))
+    }
+    GoTestResults(results: results, selections: selected)
+  }
+
+  # One package's results for its selected tests, one file per test by its
+  # rank among them, empty when it passed: what its test binary reported, or
+  # its build failure.
+  let packageResults(
+    env: Container!,
+    inputs: GoTestInputs!,
+    binary: GoTestBinary!,
+    tests: GoTestSelection!,
+    run: [String!]!,
+  ): Directory! {
+    if (binary.failure != null) {
+      let failure = "package failed to build\n" + binary.failure!
+      tests.names.reduce(directory) { out, name =>
+        out.withNewFile(`${tests.names.filter { other => other < name }.length}`, failure)
+      }
+    } else {
+      let selection = JSON.encode([{{pkg: tests.pkg, names: tests.names}}])
+      # A package whose test files are all for other platforms has no test
+      # binary, and go test -json reports it as having no test files.
+      let executed = if (binary.file == null) {
+        env
+          .withNewFile(
+            "/go-test-report.json",
+            JSON.encode({{Action: "start", Package: tests.pkg}}) + "\n"
+              + JSON.encode({{Action: "output", Package: tests.pkg, Output: "?   \t" + tests.pkg + "\t[no test files]\n"}}) + "\n"
+              + JSON.encode({{Action: "skip", Package: tests.pkg}}) + "\n",
+          )
+          .withNewFile("/go-test-stderr.log", "")
+          .withNewFile("/go-test-exit-code", "0")
+      } else {
+        # The shell records the exit status for the report, so the exec is
+        # the same whether the tests pass or fail.
+        packageTestEnv(env, binary).withExec(
+          ["sh", "-c", "\"$@\" > /go-test-report.json 2> /go-test-stderr.log; echo $? > /go-test-exit-code", "sh"]
+            + packageTestArgs(env, inputs, binary, true, run),
+          daggerInDaggerNewSession: true,
+        )
+      }
+      # Only post-processing needs to create files under /. The test command
+      # above retains the custom base's configured user.
+      executed
+        .withUser("0:0")
+        .withFile("/usr/local/bin/go-test-report", testReportIndexer)
+        .withNewFile("/go-test-selection.json", selection)
+        .withExec([
+          "/usr/local/bin/go-test-report",
+          "--report", "/go-test-report.json",
+          "--stderr", "/go-test-stderr.log",
+          "--selection", "/go-test-selection.json",
+          "--exit-code-file", "/go-test-exit-code",
+          "--output", "/go-test-results",
+        ])
+        .directory("/go-test-results/0")
+    }
   }
 
   # Main packages are found by searching the source, like test names, so
@@ -1994,6 +2245,16 @@ type GoTestInputs {
   let configs: Directory!
   let version: String!
   let importPath: String!
+  let headers: File!
+}
+
+# A package's test binary, as go test -c names it: the file, or none when its
+# test files are all for other platforms, or the build's failure.
+type GoTestBinary {
+  let directory: String!
+  let name: String!
+  let file: File
+  let failure: String
 }
 
 # Prepared source and container inputs. Commands stay in evaluation.
