@@ -100,8 +100,16 @@ func (m *Gobuild) Binary(
 	// so it keys downloads alone.
 	// +optional
 	downloads *dagger.Container,
+	// Import paths that many builds import, such as what generated code
+	// imports. The packages they reach outside the module are compiled in
+	// dependency calls of their own: the standard library's, then the rest.
+	// Each is the same call in every build that keeps those packages' module
+	// versions, whatever else the build imports, so a cache that has one, such
+	// as an engine image's, serves it whole.
+	// +optional
+	sharedImports []string,
 ) (*dagger.Directory, error) {
-	blocks, linked, err := run(ctx, m.ToolImage, base, image, from, downloads, source, headers, mountPath, workdir, pkg, flags, false)
+	blocks, linked, err := run(ctx, m.ToolImage, base, image, from, downloads, source, headers, mountPath, workdir, pkg, flags, false, sharedImports)
 	if err != nil {
 		return nil, err
 	}
@@ -155,8 +163,12 @@ func (m *Gobuild) TestBinary(
 	// The container module downloads run with, as for Binary.
 	// +optional
 	downloads *dagger.Container,
+	// Import paths whose packages are compiled in dependency calls of their
+	// own, as for Binary.
+	// +optional
+	sharedImports []string,
 ) (*dagger.File, error) {
-	_, linked, err := run(ctx, m.ToolImage, base, image, from, downloads, source, headers, mountPath, workdir, pkg, flags, true)
+	_, linked, err := run(ctx, m.ToolImage, base, image, from, downloads, source, headers, mountPath, workdir, pkg, flags, true, sharedImports)
 	if err != nil {
 		return nil, err
 	}
@@ -201,12 +213,16 @@ func (m *Gobuild) TestBinaries(
 	// The container module downloads run with, as for Binary.
 	// +optional
 	downloads *dagger.Container,
+	// Import paths whose packages are compiled in dependency calls of their
+	// own, as for Binary.
+	// +optional
+	sharedImports []string,
 ) (*dagger.Directory, error) {
-	return runTests(ctx, m.ToolImage, base, image, from, downloads, source, headers, mountPath, workdir, pkgs, flags)
+	return runTests(ctx, m.ToolImage, base, image, from, downloads, source, headers, mountPath, workdir, pkgs, flags, sharedImports)
 }
 
 // runTests builds pkgs' test binaries from one plan, as TestBinaries does.
-func runTests(ctx context.Context, toolImage string, base *dagger.Container, image string, from, downloads *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir string, pkgs, flags []string) (*dagger.Directory, error) {
+func runTests(ctx context.Context, toolImage string, base *dagger.Container, image string, from, downloads *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir string, pkgs, flags, shared []string) (*dagger.Directory, error) {
 	out := core.NewDirectory()
 	if len(pkgs) == 0 {
 		return out, nil
@@ -222,6 +238,7 @@ func runTests(ctx context.Context, toolImage string, base *dagger.Container, ima
 	if err != nil {
 		return nil, err
 	}
+	b.shared = shared
 	type sizesResult struct {
 		sizes map[string]int64
 		err   error
@@ -388,8 +405,12 @@ func (m *Gobuild) Archives(
 	// they import, as a lint reads them.
 	// +default=true
 	tests bool,
+	// Import paths whose packages are compiled in dependency calls of their
+	// own, as for Binary.
+	// +optional
+	sharedImports []string,
 ) (*dagger.Directory, error) {
-	w, err := archiveWalk(ctx, m.ToolImage, base, image, from, source, headers, mountPath, workdir, flags, dependencies, downloads, packages, tests)
+	w, err := archiveWalk(ctx, m.ToolImage, base, image, from, source, headers, mountPath, workdir, flags, dependencies, downloads, packages, tests, sharedImports)
 	if err != nil {
 		return nil, err
 	}
@@ -471,7 +492,7 @@ type archiveWalked struct {
 }
 
 // archiveWalk plans and walks what Archives compiles, with Archives' arguments.
-func archiveWalk(ctx context.Context, toolImage string, base *dagger.Container, image string, from *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir string, flags []string, dependencies bool, downloads *dagger.Container, packages []string, tests bool) (*archiveWalked, error) {
+func archiveWalk(ctx context.Context, toolImage string, base *dagger.Container, image string, from *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir string, flags []string, dependencies bool, downloads *dagger.Container, packages []string, tests bool, shared []string) (*archiveWalked, error) {
 	cwd := path.Join(mountPath, workdir)
 	// Discovery follows the imports of the one package archived, as a
 	// binary's build follows its package's; of every package otherwise.
@@ -483,6 +504,7 @@ func archiveWalk(ctx context.Context, toolImage string, base *dagger.Container, 
 	if err != nil {
 		return nil, err
 	}
+	b.shared = shared
 	goflags, err := b.base.EnvVariable(ctx, "GOFLAGS")
 	if err != nil {
 		return nil, err
@@ -560,6 +582,10 @@ type ArchiveCache struct {
 	// Go's own tools the build's execs run, built by its toolchain for every
 	// machine an engine runs on: pack, which packages with assembly run.
 	Tools *dagger.Directory
+	// The shared dependency calls the build made (sharedImports), each
+	// call's result by its ID in this session: a cache that is to have the
+	// calls whole, not only each package's build, takes these.
+	SharedDependencies []string
 }
 
 // ArchiveBuilds compiles what Archives compiles, with its arguments, and
@@ -601,8 +627,12 @@ func (m *Gobuild) ArchiveBuilds(
 	// With the packages' test variants, as for Archives.
 	// +default=true
 	tests bool,
+	// Import paths whose packages are compiled in dependency calls of their
+	// own, as for Binary.
+	// +optional
+	sharedImports []string,
 ) (*ArchiveCache, error) {
-	w, err := archiveWalk(ctx, m.ToolImage, base, image, from, source, headers, mountPath, workdir, flags, dependencies, downloads, packages, tests)
+	w, err := archiveWalk(ctx, m.ToolImage, base, image, from, source, headers, mountPath, workdir, flags, dependencies, downloads, packages, tests, sharedImports)
 	if err != nil {
 		return nil, err
 	}
@@ -610,7 +640,15 @@ func (m *Gobuild) ArchiveBuilds(
 	for _, bl := range w.order {
 		dirs = append(dirs, w.results[bl.id].dir)
 	}
-	return &ArchiveCache{Builds: dirs, Downloads: w.build.downloads, Tool: w.build.hdr, ManifestTool: manifestTools(w.build.toolImage, w.build.target.platform()), ManifestSource: manifestSource(), Tools: w.build.tools}, nil
+	shared := make([]string, 0, len(w.build.sharedCalls))
+	for _, call := range w.build.sharedCalls {
+		id, err := call.ID(ctx)
+		if err != nil {
+			return nil, err
+		}
+		shared = append(shared, string(id))
+	}
+	return &ArchiveCache{Builds: dirs, Downloads: w.build.downloads, Tool: w.build.hdr, ManifestTool: manifestTools(w.build.toolImage, w.build.target.platform()), ManifestSource: manifestSource(), Tools: w.build.tools, SharedDependencies: shared}, nil
 }
 
 // listFields are the fields of go list's output Archives reads: the
@@ -739,7 +777,7 @@ func buildTags(flags []string) []string {
 
 // run builds pkg's binary, or with test its test binary, and returns the
 // plan's blocks and the link's result.
-func run(ctx context.Context, toolImage string, base *dagger.Container, image string, from, downloads *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir, pkg string, flags []string, test bool) (map[string]*block, *result, error) {
+func run(ctx context.Context, toolImage string, base *dagger.Container, image string, from, downloads *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir, pkg string, flags []string, test bool, shared []string) (map[string]*block, *result, error) {
 	cwd := path.Join(mountPath, workdir)
 	if test {
 		// Vet is go test's, not the binary's, and is left to the lint
@@ -750,6 +788,7 @@ func run(ctx context.Context, toolImage string, base *dagger.Container, image st
 	if err != nil {
 		return nil, nil, err
 	}
+	b.shared = shared
 	// The source's real sizes are listed alongside the plan, which sees only
 	// the files' headers.
 	type sizesResult struct {
@@ -919,6 +958,11 @@ type build struct {
 	toolImage string
 	// target is what the build compiles for.
 	target target
+	// shared is the import paths whose packages the dependency call compiles
+	// in calls of their own (sharedImports), and sharedCalls those calls,
+	// once made.
+	shared      []string
+	sharedCalls []*dagger.GobuildDependencyBuilds
 }
 
 // newBuild prepares a build of the source; pkgDirs are the directories of

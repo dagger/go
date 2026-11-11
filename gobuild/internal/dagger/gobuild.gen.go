@@ -50,6 +50,9 @@ type GobuildArchiveBuildsOpts struct {
 	//
 	// Default: true
 	Tests bool
+	// Import paths whose packages are compiled in dependency calls of their
+	// own, as for Binary.
+	SharedImports []string
 }
 
 // ArchiveBuilds compiles what Archives compiles, with its arguments, and
@@ -95,6 +98,10 @@ func (r *Gobuild) ArchiveBuilds(base *Container, source *Directory, headers *Fil
 		if !querybuilder.IsZeroValue(opts[i].Tests) {
 			q = q.Arg("tests", opts[i].Tests)
 		}
+		// `sharedImports` optional argument
+		if !querybuilder.IsZeroValue(opts[i].SharedImports) {
+			q = q.Arg("sharedImports", opts[i].SharedImports)
+		}
 	}
 	q = q.Arg("base", base)
 	q = q.Arg("source", source)
@@ -132,6 +139,9 @@ type GobuildArchivesOpts struct {
 	//
 	// Default: true
 	Tests bool
+	// Import paths whose packages are compiled in dependency calls of their
+	// own, as for Binary.
+	SharedImports []string
 }
 
 // Archives compiles, one exec per package as Binary builds, every package
@@ -186,6 +196,10 @@ func (r *Gobuild) Archives(base *Container, source *Directory, headers *File, mo
 		if !querybuilder.IsZeroValue(opts[i].Tests) {
 			q = q.Arg("tests", opts[i].Tests)
 		}
+		// `sharedImports` optional argument
+		if !querybuilder.IsZeroValue(opts[i].SharedImports) {
+			q = q.Arg("sharedImports", opts[i].SharedImports)
+		}
 	}
 	q = q.Arg("base", base)
 	q = q.Arg("source", source)
@@ -216,6 +230,13 @@ type GobuildBinaryOpts struct {
 	// configuration or an SSH agent. Unset, base's. No package exec reads it,
 	// so it keys downloads alone.
 	Downloads *Container
+	// Import paths that many builds import, such as what generated code
+	// imports. The packages they reach outside the module are compiled in
+	// dependency calls of their own: the standard library's, then the rest.
+	// Each is the same call in every build that keeps those packages' module
+	// versions, whatever else the build imports, so a cache that has one, such
+	// as an engine image's, serves it whole.
+	SharedImports []string
 }
 
 // Binary builds the main package pkg as "go build" would and returns a
@@ -248,6 +269,10 @@ func (r *Gobuild) Binary(base *Container, source *Directory, headers *File, moun
 		if !querybuilder.IsZeroValue(opts[i].Downloads) {
 			q = q.Arg("downloads", opts[i].Downloads)
 		}
+		// `sharedImports` optional argument
+		if !querybuilder.IsZeroValue(opts[i].SharedImports) {
+			q = q.Arg("sharedImports", opts[i].SharedImports)
+		}
 	}
 	q = q.Arg("base", base)
 	q = q.Arg("source", source)
@@ -259,6 +284,16 @@ func (r *Gobuild) Binary(base *Container, source *Directory, headers *File, moun
 	return new(Directory).WithGraphQLQuery(q)
 }
 
+// GobuildDependenciesOpts contains options for Gobuild.Dependencies
+type GobuildDependenciesOpts struct {
+	// The packages they import that an earlier dependency call built
+	// (sharedImports), by stable name, and each one's archive, in the same
+	// order.
+	ImportedNames []string
+
+	Imported []*File
+}
+
 // Dependencies builds packages of a build that read none of its source and
 // import nothing that does, one exec per package as a build does: the
 // standard library and the build's dependencies. A build calls it through
@@ -266,11 +301,21 @@ func (r *Gobuild) Binary(base *Container, source *Directory, headers *File, moun
 // call: every build that compiles the same packages the same way, whatever
 // its own source, finds it in one request, instead of one or two for each
 // package, and an edit of the build's own source leaves it as it is.
-func (r *Gobuild) Dependencies(base *Container, hdr *Directory, tools *Directory, platform string, modRoot string, moduleNames []string, moduleDirs []*Directory, packages string) *GobuildDependencyBuilds {
+func (r *Gobuild) Dependencies(base *Container, hdr *Directory, tools *Directory, platform string, modRoot string, moduleNames []string, moduleDirs []*Directory, packages string, opts ...GobuildDependenciesOpts) *GobuildDependencyBuilds {
 	assertNotNil("base", base)
 	assertNotNil("hdr", hdr)
 	assertNotNil("tools", tools)
 	q := r.query.Select("dependencies")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `importedNames` optional argument
+		if !querybuilder.IsZeroValue(opts[i].ImportedNames) {
+			q = q.Arg("importedNames", opts[i].ImportedNames)
+		}
+		// `imported` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Imported) {
+			q = q.Arg("imported", opts[i].Imported)
+		}
+	}
 	q = q.Arg("base", base)
 	q = q.Arg("hdr", hdr)
 	q = q.Arg("tools", tools)
@@ -447,6 +492,9 @@ type GobuildTestBinariesOpts struct {
 	Flags []string
 	// The container module downloads run with, as for Binary.
 	Downloads *Container
+	// Import paths whose packages are compiled in dependency calls of their
+	// own, as for Binary.
+	SharedImports []string
 }
 
 // TestBinaries builds the test binaries of packages pkgs as go test -c
@@ -485,6 +533,10 @@ func (r *Gobuild) TestBinaries(base *Container, source *Directory, headers *File
 		if !querybuilder.IsZeroValue(opts[i].Downloads) {
 			q = q.Arg("downloads", opts[i].Downloads)
 		}
+		// `sharedImports` optional argument
+		if !querybuilder.IsZeroValue(opts[i].SharedImports) {
+			q = q.Arg("sharedImports", opts[i].SharedImports)
+		}
 	}
 	q = q.Arg("base", base)
 	q = q.Arg("source", source)
@@ -509,6 +561,9 @@ type GobuildTestBinaryOpts struct {
 	Flags []string
 	// The container module downloads run with, as for Binary.
 	Downloads *Container
+	// Import paths whose packages are compiled in dependency calls of their
+	// own, as for Binary.
+	SharedImports []string
 }
 
 // TestBinary builds the test binary of package pkg as "go test -c" would,
@@ -543,6 +598,10 @@ func (r *Gobuild) TestBinary(base *Container, source *Directory, headers *File, 
 		// `downloads` optional argument
 		if !querybuilder.IsZeroValue(opts[i].Downloads) {
 			q = q.Arg("downloads", opts[i].Downloads)
+		}
+		// `sharedImports` optional argument
+		if !querybuilder.IsZeroValue(opts[i].SharedImports) {
+			q = q.Arg("sharedImports", opts[i].SharedImports)
 		}
 	}
 	q = q.Arg("base", base)
@@ -710,6 +769,18 @@ func (r *GobuildArchiveCache) ManifestTool() *Directory {
 	q := r.query.Select("manifestTool")
 
 	return new(Directory).WithGraphQLQuery(q)
+}
+
+// The shared dependency calls the build made (sharedImports), each
+// call's result by its ID in this session: a cache that is to have the
+// calls whole, not only each package's build, takes these.
+func (r *GobuildArchiveCache) SharedDependencies(ctx context.Context) ([]string, error) {
+	q := r.query.Select("sharedDependencies")
+
+	var response []string
+
+	q = q.Bind(&response)
+	return response, q.Execute(ctx)
 }
 
 // gohdr, the tool the build's execs run, for every machine an engine

@@ -58,6 +58,15 @@ type Go {
     """
     buildFlags: [String!]! = [],
     """
+    Import paths that many builds import, such as what generated code
+    imports. The packages they reach outside a module are compiled in
+    dependency calls of their own, the standard library's and then the
+    rest's, each the same call in every build that keeps those packages'
+    module versions, so a cache that has one, such as an engine image's,
+    serves it whole.
+    """
+    sharedImports: [String!]! = [],
+    """
     GOFLAGS for every Go container, e.g. "-tags=extended".
     """
     goflags: String = null,
@@ -85,6 +94,7 @@ type Go {
       self.generate = generate
       self.build = build
       self.buildFlags = buildFlags
+      self.sharedImports = sharedImports
       self.goflags = goflags
       self.mountPath = mountPath
       self
@@ -128,6 +138,12 @@ type Go {
   Extra flags for go build only.
   """
   buildFlags: [String!]! = []
+
+  """
+  Import paths whose packages builds compile in dependency calls of their
+  own.
+  """
+  sharedImports: [String!]! = []
 
   """
   GOFLAGS for every Go container.
@@ -776,6 +792,13 @@ type GoArchiveBuilds {
   an engine of that platform runs.
   """
   helperBinary: File!
+
+  """
+  The shared dependency calls the archives made (sharedImports), each
+  call's result by its ID in this session: a cache that is to have those
+  calls whole, not only each package's build, takes these.
+  """
+  sharedDependencies: [String!]!
 }
 
 """
@@ -1607,6 +1630,7 @@ type GoModule {
       pkg: packageArg(pkg),
       output: name,
       downloads: tool.downloads,
+      sharedImports: tool.sharedImports,
       flags: buildFlags,
     )
   }
@@ -1704,6 +1728,7 @@ type GoModule {
         pkg: packageArg(rel),
         flags: buildFlags,
         downloads: tool.downloads,
+        sharedImports: tool.sharedImports,
       )
     }
     out.sync rescue {
@@ -1736,6 +1761,7 @@ type GoModule {
         pkgs: rels.map { rel => packageArg(rel) },
         flags: buildFlags,
         downloads: tool.downloads,
+        sharedImports: tool.sharedImports,
       )
     }
     let out = if (path == ".") { built } else { directory.withDirectory(path, built) }
@@ -1805,6 +1831,7 @@ type GoModule {
       flags: buildFlags,
       dependencies: dependencies,
       downloads: tool.downloads,
+      sharedImports: tool.sharedImports,
       packages: packages,
       tests: noTests == false,
     )
@@ -1859,6 +1886,7 @@ type GoModule {
         flags: buildFlags,
         dependencies: dependencies,
         downloads: tool.downloads,
+        sharedImports: tool.sharedImports,
         packages: packages,
         tests: noTests == false,
       )
@@ -1873,6 +1901,7 @@ type GoModule {
         tools: cache.tools,
         helper: gomod.includesHelper,
         helperBinary: gomod.includesHelperBinary(platform ?? gomod.hostPlatform),
+        sharedDependencies: cache.sharedDependencies,
       )
     } rescue {
       err: Error => raise "Go archive builds of module " + path + ": " + err.message

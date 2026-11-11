@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	"dagger.io/dagger/core"
@@ -49,6 +50,13 @@ func (m *Gobuild) Dependencies(
 	// The packages, as a JSON list of the walk's nodes, each named and
 	// importing by its stable name (dependencyNodes).
 	packages string,
+	// The packages they import that an earlier dependency call built
+	// (sharedImports), by stable name, and each one's archive, in the same
+	// order.
+	// +optional
+	importedNames []string,
+	// +optional
+	imported []*dagger.File,
 ) (*DependencyBuilds, error) {
 	var pkgs []*node
 	if err := json.Unmarshal([]byte(packages), &pkgs); err != nil {
@@ -67,9 +75,19 @@ func (m *Gobuild) Dependencies(
 	for _, n := range pkgs {
 		nodes[n.ID] = n
 	}
+	if len(importedNames) != len(imported) {
+		return nil, fmt.Errorf("%d imported package names for %d archives", len(importedNames), len(imported))
+	}
+	done := map[string]*result{}
+	for i, name := range importedNames {
+		r := &result{file: imported[i], done: make(chan struct{}), linkDone: make(chan struct{}), importPath: name}
+		close(r.done)
+		close(r.linkDone)
+		done[name] = r
+	}
 	w := &walker{base: base, platform: platform, hdr: hdr, tools: tools, mods: mods, roots: roots{Mod: modRoot},
 		heights: nodeHeights(nodes)}
-	results, err := w.walk(ctx, nodes, nil)
+	results, err := w.walk(ctx, nodes, done)
 	if err != nil {
 		return nil, err
 	}
@@ -183,40 +201,43 @@ func dependencyNodes(nodes map[string]*node, set map[string]bool, weights map[st
 	return pkgs, ids
 }
 
-// dependencies builds the walk's packages in set through the dependency
-// call and returns their results, by id, for the walk's other packages to
-// import.
+// dependencies builds the walk's packages in set through dependency calls,
+// one, or with shared imports one per layer (dependencyLayers), and returns
+// their results, by id, for the walk's other packages to import.
 func (b *build) dependencies(ctx context.Context, w *walker, nodes map[string]*node, set map[string]bool, weights map[string]int64) (map[string]*result, error) {
 	pkgs, ids := dependencyNodes(nodes, set, weights)
 	if len(pkgs) == 0 {
 		return nil, nil
 	}
-	var names []string
-	for _, n := range pkgs {
-		for _, f := range n.ModFiles {
-			names = appendUniq(names, w.mods.downloaded(f))
+	archives := make([]dagger.File, len(pkgs))
+	outs := make([]dagger.Directory, len(pkgs))
+	at := map[string]int{}
+	for i, n := range pkgs {
+		at[n.Name] = i
+	}
+	layers, shared := dependencyLayers(pkgs, b.shared)
+	for li, layer := range layers {
+		call, err := b.dependencyCall(ctx, w, pkgs, layer, archives, at)
+		if err != nil {
+			return nil, err
 		}
-	}
-	sort.Strings(names)
-	dirs, err := w.mods.synced(ctx, names)
-	if err != nil {
-		return nil, err
-	}
-	js, err := json.Marshal(pkgs)
-	if err != nil {
-		return nil, err
-	}
-	call := dagger.Connect().Gobuild(b.toolImage).Dependencies(w.base, w.hdr, w.tools, w.platform, b.roots.Mod, names, dirs, string(js))
-	archives, err := call.Archives(ctx)
-	if err != nil {
-		return nil, execFailure(err)
-	}
-	outs, err := call.Dirs(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if len(archives) != len(ids) || len(outs) != len(ids) {
-		return nil, fmt.Errorf("the dependency call built %d archives and %d directories for %d packages", len(archives), len(outs), len(ids))
+		la, err := call.Archives(ctx)
+		if err != nil {
+			return nil, execFailure(err)
+		}
+		lo, err := call.Dirs(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if len(la) != len(layer) || len(lo) != len(layer) {
+			return nil, fmt.Errorf("the dependency call built %d archives and %d directories for %d packages", len(la), len(lo), len(layer))
+		}
+		for k, i := range layer {
+			archives[i], outs[i] = la[k], lo[k]
+		}
+		if li < shared {
+			b.sharedCalls = append(b.sharedCalls, call)
+		}
 	}
 	// The call returns no object code, so it is the same call whether the
 	// build links or not: a build's archives and its binary make one call.
@@ -264,6 +285,111 @@ func (b *build) dependencies(ctx context.Context, w *walker, nodes map[string]*n
 		}()
 	}
 	return done, nil
+}
+
+// dependencyCall is the dependency call for the packages of pkgs at layer,
+// given the archives earlier calls built of what they import.
+func (b *build) dependencyCall(ctx context.Context, w *walker, pkgs []*node, layer []int, archives []dagger.File, at map[string]int) (*dagger.GobuildDependencyBuilds, error) {
+	in := map[string]bool{}
+	for _, i := range layer {
+		in[pkgs[i].Name] = true
+	}
+	var lpkgs []*node
+	var names, importedNames []string
+	for _, i := range layer {
+		n := pkgs[i]
+		lpkgs = append(lpkgs, n)
+		for _, d := range n.Deps {
+			if !in[d] {
+				importedNames = appendUniq(importedNames, d)
+			}
+		}
+		for _, f := range n.ModFiles {
+			names = appendUniq(names, w.mods.downloaded(f))
+		}
+	}
+	sort.Strings(importedNames)
+	imported := make([]*dagger.File, len(importedNames))
+	for k, d := range importedNames {
+		imported[k] = &archives[at[d]]
+	}
+	sort.Strings(names)
+	dirs, err := w.mods.synced(ctx, names)
+	if err != nil {
+		return nil, err
+	}
+	js, err := json.Marshal(lpkgs)
+	if err != nil {
+		return nil, err
+	}
+	return dagger.Connect().Gobuild(b.toolImage).Dependencies(w.base, w.hdr, w.tools, w.platform, b.roots.Mod, names, dirs, string(js),
+		dagger.GobuildDependenciesOpts{ImportedNames: importedNames, Imported: imported}), nil
+}
+
+// dependencyLayers is the dependency calls a build makes for pkgs, as
+// indexes into pkgs, in the order they run: with shared import paths, first
+// the standard library's packages they reach, then their other packages,
+// then the rest; each layer imports only its own packages and earlier
+// layers'. The first n layers are the shared ones. Without shared imports
+// that reach any of pkgs, one call for all of them.
+//
+// What shared imports reach is the same in every build that keeps their
+// modules' versions, so each shared layer is the same call there, whatever
+// else the build imports. The standard library's packages depend on no
+// module version, so a build that changes one still shares the first.
+func dependencyLayers(pkgs []*node, shared []string) (layers [][]int, n int) {
+	byName := map[string]*node{}
+	byPath := map[string]*node{}
+	for _, p := range pkgs {
+		byName[p.Name] = p
+		byPath[p.ImportPath] = p
+	}
+	reached := map[string]bool{}
+	var reach func(p *node)
+	reach = func(p *node) {
+		if reached[p.Name] {
+			return
+		}
+		reached[p.Name] = true
+		for _, d := range p.Deps {
+			if dp, ok := byName[d]; ok {
+				reach(dp)
+			}
+		}
+	}
+	for _, imp := range shared {
+		if p, ok := byPath[imp]; ok {
+			reach(p)
+		}
+	}
+	var std, other, rest []int
+	for i, p := range pkgs {
+		switch {
+		case !reached[p.Name]:
+			rest = append(rest, i)
+		case standard(p.ImportPath):
+			std = append(std, i)
+		default:
+			other = append(other, i)
+		}
+	}
+	for _, l := range [][]int{std, other} {
+		if len(l) > 0 {
+			layers = append(layers, l)
+		}
+	}
+	n = len(layers)
+	if len(rest) > 0 {
+		layers = append(layers, rest)
+	}
+	return layers, n
+}
+
+// standard reports whether importPath names a package of the standard
+// library: its first element has no dot, as the go command decides.
+func standard(importPath string) bool {
+	first, _, _ := strings.Cut(importPath, "/")
+	return !strings.Contains(first, ".")
 }
 
 // nodeHeights is heightsOf for a walk's nodes alone: each one's weight plus

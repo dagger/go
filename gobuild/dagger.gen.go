@@ -66,12 +66,13 @@ func (r *Gobuild) UnmarshalJSON(bs []byte) error {
 
 func (r ArchiveCache) MarshalJSON() ([]byte, error) {
 	var concrete struct {
-		Builds         []*dagger.Directory
-		Downloads      []*dagger.Directory
-		Tool           *dagger.Directory
-		ManifestTool   *dagger.Directory
-		ManifestSource *dagger.Directory
-		Tools          *dagger.Directory
+		Builds             []*dagger.Directory
+		Downloads          []*dagger.Directory
+		Tool               *dagger.Directory
+		ManifestTool       *dagger.Directory
+		ManifestSource     *dagger.Directory
+		Tools              *dagger.Directory
+		SharedDependencies []string
 	}
 	concrete.Builds = r.Builds
 	concrete.Downloads = r.Downloads
@@ -79,17 +80,19 @@ func (r ArchiveCache) MarshalJSON() ([]byte, error) {
 	concrete.ManifestTool = r.ManifestTool
 	concrete.ManifestSource = r.ManifestSource
 	concrete.Tools = r.Tools
+	concrete.SharedDependencies = r.SharedDependencies
 	return json.Marshal(&concrete)
 }
 
 func (r *ArchiveCache) UnmarshalJSON(bs []byte) error {
 	var concrete struct {
-		Builds         []*dagger.Directory
-		Downloads      []*dagger.Directory
-		Tool           *dagger.Directory
-		ManifestTool   *dagger.Directory
-		ManifestSource *dagger.Directory
-		Tools          *dagger.Directory
+		Builds             []*dagger.Directory
+		Downloads          []*dagger.Directory
+		Tool               *dagger.Directory
+		ManifestTool       *dagger.Directory
+		ManifestSource     *dagger.Directory
+		Tools              *dagger.Directory
+		SharedDependencies []string
 	}
 	err := json.Unmarshal(bs, &concrete)
 	if err != nil {
@@ -101,6 +104,7 @@ func (r *ArchiveCache) UnmarshalJSON(bs []byte) error {
 	r.ManifestTool = concrete.ManifestTool
 	r.ManifestSource = concrete.ManifestSource
 	r.Tools = concrete.Tools
+	r.SharedDependencies = concrete.SharedDependencies
 	return nil
 }
 
@@ -313,7 +317,14 @@ func DaggerDispatch(ctx context.Context, parentJSON []byte, parentName string, f
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg tests", err))
 				}
 			}
-			return (*Gobuild).ArchiveBuilds(&parent, ctx, base, image, from, source, headers, mountPath, workdir, flags, dependencies, downloads, packages, tests)
+			var sharedImports []string
+			if inputArgs["sharedImports"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["sharedImports"]), &sharedImports)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg sharedImports", err))
+				}
+			}
+			return (*Gobuild).ArchiveBuilds(&parent, ctx, base, image, from, source, headers, mountPath, workdir, flags, dependencies, downloads, packages, tests, sharedImports)
 		case "Archives":
 			var parent Gobuild
 			err = json.Unmarshal(parentJSON, &parent)
@@ -404,7 +415,14 @@ func DaggerDispatch(ctx context.Context, parentJSON []byte, parentName string, f
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg tests", err))
 				}
 			}
-			return (*Gobuild).Archives(&parent, ctx, base, image, from, source, headers, mountPath, workdir, flags, dependencies, downloads, packages, tests)
+			var sharedImports []string
+			if inputArgs["sharedImports"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["sharedImports"]), &sharedImports)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg sharedImports", err))
+				}
+			}
+			return (*Gobuild).Archives(&parent, ctx, base, image, from, source, headers, mountPath, workdir, flags, dependencies, downloads, packages, tests, sharedImports)
 		case "Binary":
 			var parent Gobuild
 			err = json.Unmarshal(parentJSON, &parent)
@@ -488,7 +506,14 @@ func DaggerDispatch(ctx context.Context, parentJSON []byte, parentName string, f
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg downloads", err))
 				}
 			}
-			return (*Gobuild).Binary(&parent, ctx, base, image, from, source, headers, mountPath, workdir, pkg, output, flags, downloads)
+			var sharedImports []string
+			if inputArgs["sharedImports"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["sharedImports"]), &sharedImports)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg sharedImports", err))
+				}
+			}
+			return (*Gobuild).Binary(&parent, ctx, base, image, from, source, headers, mountPath, workdir, pkg, output, flags, downloads, sharedImports)
 		case "Dependencies":
 			var parent Gobuild
 			err = json.Unmarshal(parentJSON, &parent)
@@ -551,7 +576,21 @@ func DaggerDispatch(ctx context.Context, parentJSON []byte, parentName string, f
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg packages", err))
 				}
 			}
-			return (*Gobuild).Dependencies(&parent, ctx, base, hdr, tools, platform, modRoot, moduleNames, moduleDirs, packages)
+			var importedNames []string
+			if inputArgs["importedNames"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["importedNames"]), &importedNames)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg importedNames", err))
+				}
+			}
+			var imported []*core.File
+			if inputArgs["imported"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["imported"]), &imported)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg imported", err))
+				}
+			}
+			return (*Gobuild).Dependencies(&parent, ctx, base, hdr, tools, platform, modRoot, moduleNames, moduleDirs, packages, importedNames, imported)
 		case "Discover":
 			var parent Gobuild
 			err = json.Unmarshal(parentJSON, &parent)
@@ -733,7 +772,14 @@ func DaggerDispatch(ctx context.Context, parentJSON []byte, parentName string, f
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg downloads", err))
 				}
 			}
-			return (*Gobuild).TestBinaries(&parent, ctx, base, image, from, source, headers, mountPath, workdir, pkgs, flags, downloads)
+			var sharedImports []string
+			if inputArgs["sharedImports"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["sharedImports"]), &sharedImports)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg sharedImports", err))
+				}
+			}
+			return (*Gobuild).TestBinaries(&parent, ctx, base, image, from, source, headers, mountPath, workdir, pkgs, flags, downloads, sharedImports)
 		case "TestBinary":
 			var parent Gobuild
 			err = json.Unmarshal(parentJSON, &parent)
@@ -810,7 +856,14 @@ func DaggerDispatch(ctx context.Context, parentJSON []byte, parentName string, f
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg downloads", err))
 				}
 			}
-			return (*Gobuild).TestBinary(&parent, ctx, base, image, from, source, headers, mountPath, workdir, pkg, flags, downloads)
+			var sharedImports []string
+			if inputArgs["sharedImports"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["sharedImports"]), &sharedImports)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg sharedImports", err))
+				}
+			}
+			return (*Gobuild).TestBinary(&parent, ctx, base, image, from, source, headers, mountPath, workdir, pkg, flags, downloads, sharedImports)
 		case "":
 			var parent Gobuild
 			err = json.Unmarshal(parentJSON, &parent)
