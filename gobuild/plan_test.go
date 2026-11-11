@@ -360,6 +360,36 @@ func TestLastFlag(t *testing.T) {
 }
 
 // GOFLAGS splits as the go command splits it, not as a shell would.
+// A flag whose packages are those on go test's command line plans a test
+// binary alone; one with a package pattern, or another flag, doesn't.
+func TestCommandLineFlags(t *testing.T) {
+	quoted, err := splitGOFLAGS(`"-gcflags=-N -l" -trimpath`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		flags []string
+		want  bool
+	}{
+		{[]string{"-coverpkg=./..."}, true},
+		{[]string{"-coverpkg", "./..."}, true},
+		{[]string{"-gcflags=-N -l"}, true},
+		{[]string{"--gcflags=-N -l"}, true},
+		{[]string{"-gcflags= -N -d=checkptr=0"}, true},
+		{[]string{"-gcflags", "-N -l"}, true},
+		{[]string{"-asmflags=-trimpath=x"}, true},
+		{quoted, true},
+		{[]string{"-gcflags=all=-N -l"}, false},
+		{[]string{"-gcflags=example.com/m/...=-N"}, false},
+		{[]string{"-race", "-ldflags=-X a=b", "-cover"}, false},
+		{nil, false},
+	} {
+		if got := commandLineFlags(c.flags); got != c.want {
+			t.Errorf("commandLineFlags(%q) = %v, want %v", c.flags, got, c.want)
+		}
+	}
+}
+
 func TestSplitGOFLAGS(t *testing.T) {
 	for _, c := range []struct {
 		in   string

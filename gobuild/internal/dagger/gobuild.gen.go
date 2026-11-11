@@ -568,8 +568,10 @@ type GobuildTestBinaryOpts struct {
 	// one, pkg's among them, such as its collection's. The plan, its setup,
 	// the test mains and the dependency call are those of TestBinaries of the
 	// set, which every TestBinary of the set shares, and this one compiles
-	// only what its binary links, so it is ready when its own link is. Its
-	// flags apply as to the set's.
+	// only what its binary links, so it is ready when its own link is. With
+	// a flag, in flags or the base's GOFLAGS, whose packages are those on go
+	// test's command line (commandLineFlags), it is planned alone, so that it
+	// is go test -c's of pkg alone.
 	Set []string
 }
 

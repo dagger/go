@@ -171,13 +171,25 @@ func (m *Gobuild) TestBinary(
 	// one, pkg's among them, such as its collection's. The plan, its setup,
 	// the test mains and the dependency call are those of TestBinaries of the
 	// set, which every TestBinary of the set shares, and this one compiles
-	// only what its binary links, so it is ready when its own link is. Its
-	// flags apply as to the set's.
+	// only what its binary links, so it is ready when its own link is. With
+	// a flag, in flags or the base's GOFLAGS, whose packages are those on go
+	// test's command line (commandLineFlags), it is planned alone, so that it
+	// is go test -c's of pkg alone.
 	// +optional
 	set []string,
 ) (*dagger.File, error) {
 	if len(set) > 0 {
-		return setMember(ctx, m.ToolImage, base, image, from, downloads, source, headers, mountPath, workdir, pkg, set, flags, sharedImports)
+		goflags, err := base.EnvVariable(ctx, "GOFLAGS")
+		if err != nil {
+			return nil, err
+		}
+		envFlags, err := splitGOFLAGS(goflags)
+		if err != nil {
+			return nil, fmt.Errorf("GOFLAGS: %w", err)
+		}
+		if !commandLineFlags(append(envFlags, flags...)) {
+			return setMember(ctx, m.ToolImage, base, image, from, downloads, source, headers, mountPath, workdir, pkg, set, flags, sharedImports)
+		}
 	}
 	_, linked, err := run(ctx, m.ToolImage, base, image, from, downloads, source, headers, mountPath, workdir, pkg, flags, true, sharedImports)
 	if err != nil {
@@ -1727,6 +1739,32 @@ func lastFlag(name string, flags, goflags []string) (string, bool) {
 		return v, true
 	}
 	return last(goflags)
+}
+
+// commandLineFlags reports whether go build flags apply to the packages
+// named on the go command line, so that what they reach depends on which:
+// -coverpkg, and -gcflags, -asmflags or -gccgoflags without a package
+// pattern, which the go command reads from the value with its spaces
+// trimmed (cmd/go/internal/load.PerPackageFlag).
+func commandLineFlags(flags []string) bool {
+	for i, f := range flags {
+		name, value, hasValue := strings.Cut(strings.TrimLeft(f, "-"), "=")
+		if !strings.HasPrefix(f, "-") {
+			continue
+		}
+		if !hasValue && i+1 < len(flags) {
+			value = flags[i+1]
+		}
+		switch name {
+		case "coverpkg":
+			return true
+		case "gcflags", "asmflags", "gccgoflags":
+			if v := strings.TrimSpace(value); v != "" && (v[0] == '-' || !strings.Contains(v, "=")) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // splitGOFLAGS splits GOFLAGS as the go command does (cmd/internal/quoted):

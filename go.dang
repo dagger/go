@@ -645,10 +645,11 @@ type GoPackage {
   collection it was taken from, as the collection's testBinary builds them,
   and shares that plan, its setup and the compiles of their dependencies
   with each of their own testBinary: it compiles only what it links, and is
-  ready when its own link is. As on go test's command line, a build flag
-  without a package pattern, such as -gcflags=-N, applies to every package
-  of the collection. Taken from a collection narrowed to the packages
-  wanted, it is planned with those alone.
+  ready when its own link is. Taken from a collection narrowed to the
+  packages wanted, it is planned with those alone. With -coverpkg, or
+  -gcflags, -asmflags or -gccgoflags without a package pattern, whose
+  packages are those on go test's command line, it is planned alone, so that
+  it stays go test -c's of this package alone.
 
   Unlike go test -c, it does not run go vet on the package: vet is left to
   the lint checks, such as golangci-lint's.
@@ -1576,23 +1577,6 @@ type GoModule {
     out
   }
 
-  # Whether go build flags, with GOFLAGS, apply to the packages named on the
-  # go command line, so that what they reach depends on which: -coverpkg,
-  # and -gcflags, -asmflags or -gccgoflags without a package pattern.
-  let commandLineFlags(flags: [String!]!): Boolean! {
-    flags.any { f =>
-      let name = f.trimPrefix("-").trimPrefix("-").split("=")[0]!
-      let value = f.split("=").dropFirst(1).join("=")
-      if (name == "coverpkg") {
-        true
-      } else if (name == "gcflags" or name == "asmflags" or name == "gccgoflags") {
-        f.contains("=") == false or value.hasPrefix("-") or value.contains("=") == false
-      } else {
-        false
-      }
-    }
-  }
-
   # Whether go build flags, with GOFLAGS, pick the gccgo compiler.
   let gccgo(flags: [String!]!): Boolean! {
     flags.any { f => f == "-compiler=gccgo" or f == "--compiler=gccgo" }
@@ -1707,12 +1691,7 @@ type GoModule {
     if (tested.contains(pkgPath) == false) {
       raise "Go package " + pkgPath + " has no test files"
     }
-    let ctrFlags = buildFlags + (platformBase(ws, platform).envVariable("GOFLAGS") ?? "").split(" ").filter { f => f != "" }
-    # A flag whose packages are go test's command line's would reach the
-    # set's other packages too: the binary is planned alone.
-    let planned = if (commandLineFlags(ctrFlags)) { [] } else {
-      set.filter { p => tested.contains(p) }.map { p => packageArg(relativeDir(p)) }
-    }
+    let planned = set.filter { p => tested.contains(p) }.map { p => packageArg(relativeDir(p)) }
     let name = if (platform.hasPrefix("windows/")) {
       binaryFileName(ws, pkgPath, platform).trimSuffix(".exe") + ".test.exe"
     } else {
