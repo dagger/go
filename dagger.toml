@@ -81,3 +81,6 @@ unifiedClients = true
 # another platform: the entrypoint go-sdk generates for a target of the
 # release that has the field.
 targetVersion = "v1.0.0-beta.26"
+# gobuild is what dagger/go's per-package build runs, so it can't be built
+# by it: its entrypoint builds it with go build.
+daggerGo = false
