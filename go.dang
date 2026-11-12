@@ -1525,15 +1525,21 @@ type GoModule {
   # the packages that build, each package is built alone, and the one that
   # fails has its error in place of a binary. A gccgo build has no set.
   # tools, which the tests will run with, build at the same time as the set,
-  # rather than after it.
-  let testBinaries(inputs: GoTestInputs!, dirs: [String!]!, tools: Directory!): [GoTestBinary!]! {
-    let set = if (testGccgo(inputs)) { null } else {
-      {
-        directory.withDirectory("set", testBinarySet(inputs, dirs)).withDirectory("tools", tools).sync.directory("set")
-      } rescue {
-        err: Error => null
+  # rather than after it: they are a block, so that nothing builds them
+  # before this, and the two are fields of one {{ }}, whose fields run at
+  # once. A tool that fails to build fails the call.
+  let testBinaries(inputs: GoTestInputs!, dirs: [String!]!, &tools: Directory!): [GoTestBinary!]! {
+    let built = {{
+      tools: tools.sync
+      set: if (testGccgo(inputs)) { null } else {
+        {
+          testBinarySet(inputs, dirs).sync
+        } rescue {
+          err: Error => null
+        }
       }
-    }
+    }}
+    let set = built.set
     dirs.map { dir =>
       let name = testBinaryName(inputs.importPath, dir)
       let at = if (dir == ".") { name } else { dir + "/" + name }
@@ -1674,7 +1680,8 @@ type GoModule {
   # without the directories whose test files are all for other platforms,
   # which go test leaves out or reports as having none.
   let moduleTestBinaries(inputs: GoTestInputs!, dirs: [String!]!): [GoTestBinary!]! {
-    testBinaries(inputs, dirs, directory.withFile("otelgotest", testRunner)).filter { b => b.file != null or b.failure != null }
+    let binaries = testBinaries(inputs, dirs) { directory.withFile("otelgotest", testRunner) }
+    binaries.filter { b => b.file != null or b.failure != null }
   }
 
   # Whether the package pattern ./... matches a module-relative directory:
@@ -1693,7 +1700,8 @@ type GoModule {
   let runPackageTests(ws: Workspace!, dir: String!, names: [String!]!): Void {
     let inputs = wsTestInputs(ws)
     let run = if (names.length == 0) { [] } else { ["-test.run=^(" + names.join("|") + ")$"] }
-    let binary = testBinaries(inputs, [dir], directory.withFile("otelgotest", testRunner))[0]!
+    let binaries = testBinaries(inputs, [dir]) { directory.withFile("otelgotest", testRunner) }
+    let binary = binaries[0]!
     if (binary.failure != null) {
       raise "Go tests in " + packagePath(dir) + ": " + binary.failure!
     }
@@ -1734,11 +1742,9 @@ type GoModule {
     let narrowed = discovered.any { tests => tests.narrowed }
     # Only packages holding selected tests run: the module's other packages
     # failing would otherwise fail every check.
-    let binaries = testBinaries(
-      inputs,
-      selected.map { tests => tests.directory },
-      directory.withFile("otelgotest", testRunner).withFile("go-test-report", testReportIndexer),
-    )
+    let binaries = testBinaries(inputs, selected.map { tests => tests.directory }) {
+      directory.withFile("otelgotest", testRunner).withFile("go-test-report", testReportIndexer)
+    }
     let env = testEnvFrom(inputs)
     # Every check of the module evaluates this, so the names are only
     # gathered and sorted for the narrowed run that needs them. As go test
