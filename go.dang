@@ -454,6 +454,26 @@ type Go {
     goModule(ws, lib.module(ws, path, findUp: findUp).path)
   }
 
+  """
+  Every module version a go.sum names, downloaded as builds download them,
+  in one directory laid out as a Go module proxy, for GOPROXY=file://<dir>:
+  a version with a zip checksum as its .zip, .mod and .info, one with only a
+  go.mod checksum as its .mod and .info. It has no version lists, so it
+  answers only for exact versions. Each version is downloaded once, keyed
+  by its path, version and checksums, with the downloads container's
+  settings, reading no module cache the image comes with, and checked
+  against the go.sum. Any download that
+  fails, or doesn't match, fails the call.
+  """
+  moduleProxy(goSum: File!): Directory! {
+    gobuild(toolImage: gomod.goImage(gomod.scannerVersion)).moduleProxy(
+      goSum: goSum,
+      image: if (base == null) { gomod.goImage(version ?? gomod.scannerVersion) } else { "" },
+      from: if (base == null) { null } else { base!.withoutEntrypoint },
+      downloads: downloads,
+    )
+  }
+
   let goModule(ws: Workspace!, modPath: String!): GoModule! {
     goModuleAt(modPath, workspaceMountPath)
   }

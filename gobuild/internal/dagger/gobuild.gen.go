@@ -478,6 +478,55 @@ func (r *Gobuild) LinkObjects(ctx context.Context, dirs []*Directory, files []st
 	return convert(response), nil
 }
 
+// GobuildModuleProxyOpts contains options for Gobuild.ModuleProxy
+type GobuildModuleProxyOpts struct {
+	// The image a public module downloads in, as for Binary.
+	Image string
+	// The custom container a public module downloads in, as for Binary.
+	From *Container
+	// The container module downloads run with, as for Binary.
+	Downloads *Container
+}
+
+// ModuleProxy downloads every module version a go.sum names, as a build
+// downloads it, and returns them in one directory laid out as a Go module
+// proxy, for GOPROXY=file://<dir>: a version with a zip checksum as its
+// .zip, .mod and .info, one with only a go.mod checksum as its .mod and
+// .info. A go command reads them with no module cache of anyone's, and asks
+// the next proxy in GOPROXY for what isn't there. It answers only for exact
+// versions: the go command's version lists, which a download leaves, list
+// only the versions the go.sum names, so a query such as @latest would find
+// one of those instead of asking the next proxy, and are left out.
+//
+// Each version is a download of its own (downloadModule), keyed by its
+// path, version and checksums, which every call for that version in the
+// same container shares. Unlike a build's, it reads no module cache the
+// image comes with, so it doesn't share a build's download. The directory
+// is keyed by the go.sum and those downloads. Any download that fails, and any .zip or .mod that doesn't
+// match the go.sum, fails the call, so a directory that exists holds every
+// version the go.sum names, checked.
+func (r *Gobuild) ModuleProxy(goSum *File, opts ...GobuildModuleProxyOpts) *Directory {
+	assertNotNil("goSum", goSum)
+	q := r.query.Select("moduleProxy")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `image` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Image) {
+			q = q.Arg("image", opts[i].Image)
+		}
+		// `from` optional argument
+		if !querybuilder.IsZeroValue(opts[i].From) {
+			q = q.Arg("from", opts[i].From)
+		}
+		// `downloads` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Downloads) {
+			q = q.Arg("downloads", opts[i].Downloads)
+		}
+	}
+	q = q.Arg("goSum", goSum)
+
+	return new(Directory).WithGraphQLQuery(q)
+}
+
 // GobuildScopeOpts contains options for Gobuild.Scope
 type GobuildScopeOpts struct {
 	// The image base was made from, as for Binary.

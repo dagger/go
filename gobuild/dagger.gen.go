@@ -723,6 +723,41 @@ func DaggerDispatch(ctx context.Context, parentJSON []byte, parentName string, f
 				}
 			}
 			return (*Gobuild).LinkObjects(&parent, ctx, dirs, files)
+		case "ModuleProxy":
+			var parent Gobuild
+			err = json.Unmarshal(parentJSON, &parent)
+			if err != nil {
+				panic(fmt.Errorf("%s: %w", "failed to unmarshal parent object", err))
+			}
+			var goSum *core.File
+			if inputArgs["goSum"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["goSum"]), &goSum)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg goSum", err))
+				}
+			}
+			var image string
+			if inputArgs["image"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["image"]), &image)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg image", err))
+				}
+			}
+			var from *core.Container
+			if inputArgs["from"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["from"]), &from)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg from", err))
+				}
+			}
+			var downloads *core.Container
+			if inputArgs["downloads"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["downloads"]), &downloads)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg downloads", err))
+				}
+			}
+			return (*Gobuild).ModuleProxy(&parent, ctx, goSum, image, from, downloads)
 		case "Scope":
 			var parent Gobuild
 			err = json.Unmarshal(parentJSON, &parent)

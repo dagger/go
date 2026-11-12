@@ -1328,6 +1328,55 @@ type GoDev {
   }
 
   """
+  A go.sum's module proxy serves every module version the go.sum names, to
+  a go command with no module cache and no other source: the module builds,
+  and go mod tidy, which also reads the imports of its dependencies' tests
+  (gopkg.in/yaml.v3's import gopkg.in/check.v1), finds nothing to change. It
+  holds no version list, which would answer a query such as @latest with a
+  version the go.sum names. An empty go.sum's proxy is empty. A zip or a
+  go.mod that doesn't match the go.sum fails the call.
+  """
+  moduleProxyCheck: Void @check {
+    let image = container.from("golang:1.27.3-alpine")
+    let tidied = image
+      .withNewFile("/src/go.mod", "module example.com/proxied\n\ngo 1.22\n")
+      .withNewFile("/src/main.go", "package main\n\nimport \"gopkg.in/yaml.v3\"\n\nfunc main() { _, _ = yaml.Marshal(1) }\n")
+      .withWorkdir("/src")
+      .withExec(["go", "get", "gopkg.in/yaml.v3@v3.0.1"])
+      .withExec(["go", "mod", "tidy"])
+      .directory("/src")
+    let tool = go(version: "1.27.3")
+    let proxy = tool.moduleProxy(goSum: tidied.file("go.sum"))
+    let lists = proxy.glob(pattern: "**/list")
+    assert(lists.length == 0, "the proxy has version lists: " + lists.join(", "))
+    image
+      .withDirectory("/src", tidied)
+      .withDirectory("/proxy", proxy)
+      .withWorkdir("/src")
+      .withEnvVariable("GOPROXY", "file:///proxy,off")
+      .withEnvVariable("GOSUMDB", "off")
+      .withExec(["go", "build", "./..."])
+      .withExec(["go", "mod", "tidy", "-diff"])
+      .sync
+    let empty = tool.moduleProxy(goSum: directory.withNewFile("go.sum", "").file("go.sum")).entries
+    assert(empty.length == 0, "an empty go.sum's proxy holds " + empty.join(", "))
+    let badZip = {
+      tool.moduleProxy(goSum: directory.withNewFile("go.sum", "gopkg.in/yaml.v3 v3.0.1 h1:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=\n").file("go.sum")).entries
+      "no failure"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(badZip.contains("gopkg.in/yaml.v3@v3.0.1: checksum mismatch"), "a zip that doesn't match the go.sum: " + badZip)
+    let badMod = {
+      tool.moduleProxy(goSum: directory.withNewFile("go.sum", "gopkg.in/yaml.v3 v3.0.1/go.mod h1:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=\n").file("go.sum")).entries
+      "no failure"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(badMod.contains("gopkg.in/yaml.v3@v3.0.1: go.mod checksum mismatch"), "a go.mod that doesn't match the go.sum: " + badMod)
+  }
+
+  """
   A module's archive builds are what its archives read from the cache: a
   build per package the archives hold, each its own, a download per module
   version the build read, and the build's four tools: gohdr, write-manifest
