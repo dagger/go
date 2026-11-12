@@ -539,7 +539,8 @@ type GobuildScopeOpts struct {
 	Workdir string
 	// The build's package arguments: Binary's or TestBinary's package,
 	// TestBinary's set, TestBinaries' packages, or Archives' packages.
-	// Unset, or with a "..." pattern, every package of the module.
+	// Unset, or with a "..." pattern, every package of the module, for which
+	// the whole source and pack are kept.
 	Packages []string
 	// Whether the build reads the packages' test files.
 	Tests bool
@@ -558,12 +559,16 @@ type GobuildScopeOpts struct {
 // content.
 //
 // A directory keeps its Go files, its .syso files and its default.pgo, or
-// with a //go:embed line, everything below it. The whole source and pack
-// are kept when the build may read a file of the source this can't tell it
-// reads: when one of those directories holds C, C++ or assembly, uses cgo
-// or holds a symlink; when flags or the base's GOFLAGS or GOWORK name a file
-// (fileFlags); in vendor mode; and when the go command switches to another
-// toolchain.
+// with a //go:embed line, everything below it; without tests, but where an
+// embed may name them, not its test files, which the build doesn't compile.
+// The whole source and pack are kept for a build of every package, which
+// reads them whole, and when the build may read a file of the source this
+// can't tell it reads: when one of those directories holds C, C++ or assembly,
+// uses cgo or holds a symlink; when flags or the base's GOFLAGS or
+// GOWORK name a file (fileFlags); when a package is named other than by a
+// path below the build's directory; when the source holds a version control
+// system's metadata, which the go command stamps a binary from; in vendor
+// mode; and when the go command switches to another toolchain.
 func (r *Gobuild) Scope(base *Container, source *Directory, headers *File, mountPath string, opts ...GobuildScopeOpts) *GobuildScoped {
 	assertNotNil("base", base)
 	assertNotNil("source", source)

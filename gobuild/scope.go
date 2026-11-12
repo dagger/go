@@ -29,12 +29,16 @@ type Scoped struct {
 // content.
 //
 // A directory keeps its Go files, its .syso files and its default.pgo, or
-// with a //go:embed line, everything below it. The whole source and pack
-// are kept when the build may read a file of the source this can't tell it
-// reads: when one of those directories holds C, C++ or assembly, uses cgo
-// or holds a symlink; when flags or the base's GOFLAGS or GOWORK name a file
-// (fileFlags); in vendor mode; and when the go command switches to another
-// toolchain.
+// with a //go:embed line, everything below it; without tests, but where an
+// embed may name them, not its test files, which the build doesn't compile.
+// The whole source and pack are kept for a build of every package, which
+// reads them whole, and when the build may read a file of the source this
+// can't tell it reads: when one of those directories holds C, C++ or assembly,
+// uses cgo or holds a symlink; when flags or the base's GOFLAGS or
+// GOWORK name a file (fileFlags); when a package is named other than by a
+// path below the build's directory; when the source holds a version control
+// system's metadata, which the go command stamps a binary from; in vendor
+// mode; and when the go command switches to another toolchain.
 func (m *Gobuild) Scope(
 	ctx context.Context,
 	// The Go container the build runs in, as for Binary.
@@ -56,7 +60,8 @@ func (m *Gobuild) Scope(
 	workdir string,
 	// The build's package arguments: Binary's or TestBinary's package,
 	// TestBinary's set, TestBinaries' packages, or Archives' packages.
-	// Unset, or with a "..." pattern, every package of the module.
+	// Unset, or with a "..." pattern, every package of the module, for which
+	// the whole source and pack are kept.
 	// +optional
 	packages []string,
 	// Whether the build reads the packages' test files.
@@ -70,6 +75,12 @@ func (m *Gobuild) Scope(
 	downloads *dagger.Container,
 ) (*Scoped, error) {
 	whole := &Scoped{Source: source, Headers: headers}
+	// A build of every package reads the module's whole source: the scope
+	// would cost its own work and save nothing.
+	pkgDirs, ok := packageDirs(workdir, packages)
+	if !ok || pkgDirs == nil {
+		return whole, nil
+	}
 	goflags, err := base.EnvVariable(ctx, "GOFLAGS")
 	if err != nil {
 		return nil, err
@@ -83,10 +94,6 @@ func (m *Gobuild) Scope(
 		return nil, err
 	}
 	if fileFlags(append(envFlags, flags...)) || (gowork != "" && gowork != "off" && gowork != "auto") {
-		return whole, nil
-	}
-	pkgDirs, ok := packageDirs(workdir, packages)
-	if !ok {
 		return whole, nil
 	}
 	cwd := path.Join(mountPath, workdir)
