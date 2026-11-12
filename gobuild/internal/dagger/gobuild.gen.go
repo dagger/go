@@ -478,6 +478,89 @@ func (r *Gobuild) LinkObjects(ctx context.Context, dirs []*Directory, files []st
 	return convert(response), nil
 }
 
+// GobuildScopeOpts contains options for Gobuild.Scope
+type GobuildScopeOpts struct {
+	// The image base was made from, as for Binary.
+	Image string
+	// The custom container base was made from, as for Binary.
+	From *Container
+	// The directory the build runs in, relative to mountPath.
+	//
+	// Default: "."
+	Workdir string
+	// The build's package arguments: Binary's or TestBinary's package,
+	// TestBinary's set, TestBinaries' packages, or Archives' packages.
+	// Unset, or with a "..." pattern, every package of the module.
+	Packages []string
+	// Whether the build reads the packages' test files.
+	Tests bool
+	// The build's flags.
+	Flags []string
+	// The container module downloads run with, as for Binary.
+	Downloads *Container
+}
+
+// Scope is what a build of packages reads of source and headers: the files
+// of the source directories its plan reads (planDirs), with every module's
+// go.mod and go.sum, and the header pack the plan reads (planHeaders). Given
+// them instead of the whole source and pack, a Binary, TestBinary,
+// TestBinaries or Archives call is the same call after an edit of any other
+// file, which Dagger answers from its cache: both are keyed by their
+// content.
+//
+// A directory keeps its Go files, its .syso files and its default.pgo, or
+// with a //go:embed line, everything below it. The whole source and pack
+// are kept when the build may read a file of the source this can't tell it
+// reads: when one of those directories holds C, C++ or assembly, uses cgo
+// or holds a symlink; when flags or the base's GOFLAGS or GOWORK name a file
+// (fileFlags); in vendor mode; and when the go command switches to another
+// toolchain.
+func (r *Gobuild) Scope(base *Container, source *Directory, headers *File, mountPath string, opts ...GobuildScopeOpts) *GobuildScoped {
+	assertNotNil("base", base)
+	assertNotNil("source", source)
+	assertNotNil("headers", headers)
+	q := r.query.Select("scope")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `image` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Image) {
+			q = q.Arg("image", opts[i].Image)
+		}
+		// `from` optional argument
+		if !querybuilder.IsZeroValue(opts[i].From) {
+			q = q.Arg("from", opts[i].From)
+		}
+		// `workdir` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Workdir) {
+			q = q.Arg("workdir", opts[i].Workdir)
+		}
+		// `packages` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Packages) {
+			q = q.Arg("packages", opts[i].Packages)
+		}
+		// `tests` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Tests) {
+			q = q.Arg("tests", opts[i].Tests)
+		}
+		// `flags` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Flags) {
+			q = q.Arg("flags", opts[i].Flags)
+		}
+		// `downloads` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Downloads) {
+			q = q.Arg("downloads", opts[i].Downloads)
+		}
+	}
+	q = q.Arg("base", base)
+	q = q.Arg("source", source)
+	q = q.Arg("headers", headers)
+	q = q.Arg("mountPath", mountPath)
+
+	return &GobuildScoped{
+		query:     q,
+		refetchID: r.refetchID,
+	}
+}
+
 // GobuildTestBinariesOpts contains options for Gobuild.TestBinaries
 type GobuildTestBinariesOpts struct {
 	// The image base was made from, as for Binary.
@@ -1107,6 +1190,95 @@ func (r *GobuildDiscovery) PlanMods(ctx context.Context) ([]string, error) {
 
 	q = q.Bind(&response)
 	return response, q.Execute(ctx)
+}
+
+// Scoped is what a build reads of a source and of its header pack (Scope).
+type GobuildScoped struct { // gobuild (../../:0:0)
+	query *querybuilder.Selection
+	// refetchID is set when this object is built through a field marked
+	// @reevaluate: it fetches its ID on every use, so each use evaluates that
+	// field again.
+	refetchID bool
+
+	id *ID
+}
+
+func (r *GobuildScoped) WithGraphQLQuery(q *querybuilder.Selection) *GobuildScoped {
+	return &GobuildScoped{
+		query: q,
+		// The query's origin is unknown: it may go through a field that
+		// must be reevaluated.
+		refetchID: true,
+	}
+}
+
+// The header pack of those files.
+func (r *GobuildScoped) Headers() *File {
+	q := r.query.Select("headers")
+
+	return new(File).WithGraphQLQuery(q)
+}
+
+// A unique identifier for this GobuildScoped.
+func (r *GobuildScoped) ID(ctx context.Context) (ID, error) {
+	if r.id != nil {
+		return *r.id, nil
+	}
+	q := r.query.Select("id")
+
+	var response ID
+
+	q = q.Bind(&response)
+	if r.refetchID {
+		return response, q.Execute(ctx)
+	}
+	return memoizedID(ctx, r.query, func() (ID, error) {
+		err := q.Execute(ctx)
+		return response, err
+	})
+}
+
+// XXX_GraphQLType is an internal function. It returns the native GraphQL type name
+func (r *GobuildScoped) XXX_GraphQLType() string {
+	return "GobuildScoped"
+}
+
+// XXX_GraphQLIDType is an internal function. It returns the native GraphQL type name for the ID of this object
+func (r *GobuildScoped) XXX_GraphQLIDType() string {
+	return "ID"
+}
+
+// XXX_GraphQLID is an internal function. It returns the underlying type ID
+func (r *GobuildScoped) XXX_GraphQLID(ctx context.Context) (string, error) {
+	id, err := r.ID(ctx)
+	if err != nil {
+		return "", err
+	}
+	return string(id), nil
+}
+
+func (r *GobuildScoped) MarshalJSON() ([]byte, error) {
+	id, err := r.ID(marshalCtx)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(id)
+}
+func (r *GobuildScoped) UnmarshalJSON(bs []byte) error {
+	var id string
+	err := json.Unmarshal(bs, &id)
+	if err != nil {
+		return err
+	}
+	*r = GobuildScoped{query: selectNode(Connect().QueryBuilder(), id, "GobuildScoped")}
+	return nil
+}
+
+// The source's files the build reads.
+func (r *GobuildScoped) Source() *Directory {
+	q := r.query.Select("source")
+
+	return new(Directory).WithGraphQLQuery(q)
 }
 
 func (r *Query) Gobuild(toolImage string) *Gobuild { // gobuild (../../:0:0)

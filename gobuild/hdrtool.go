@@ -97,7 +97,7 @@ func unpack(src, dst, list string, dirs ...string) error {
 	if err != nil {
 		return err
 	}
-	if files, err = planFiles(files, dirs); err != nil {
+	if files, err = planFiles(files, dirs, true); err != nil {
 		return err
 	}
 	if err := writeFiles(files); err != nil {
@@ -121,7 +121,7 @@ func unpackAll(dir, dst string, dirs ...string) error {
 		}
 		files = append(files, f...)
 	}
-	if files, err = planFiles(files, dirs); err != nil {
+	if files, err = planFiles(files, dirs, true); err != nil {
 		return err
 	}
 	return writeFiles(files)
@@ -131,12 +131,21 @@ func unpackAll(dir, dst string, dirs ...string) error {
 // src with dirs (planFiles), and to list the whole pack's Go files in a
 // directory named like a Go file, as unpack lists them: what a plan reads of
 // the pack, in a file of its own, which changes only when one of them does.
-func subset(src, out, list string, dirs ...string) error {
+// With dirs followed by "notests", the pack leaves out the test files a
+// build without tests doesn't read (planFiles).
+func subset(src, out, list string, opts ...string) error {
+	dirs, tests := opts, true
+	if len(opts) == 2 {
+		if opts[1] != "notests" {
+			return fmt.Errorf("subset: %q is not notests", opts[1])
+		}
+		dirs, tests = opts[:1], false
+	}
 	files, listed, err := readPack(src, "")
 	if err != nil {
 		return err
 	}
-	if files, err = planFiles(files, dirs); err != nil {
+	if files, err = planFiles(files, dirs, tests); err != nil {
 		return err
 	}
 	f, err := os.Create(out)
@@ -164,9 +173,10 @@ func subset(src, out, list string, dirs ...string) error {
 // one file, the list of the directories it reads Go files in: those of the
 // packages it may load. Under a directory there with a //go:embed line,
 // which may embed any file below it, every file stays, the Go files emptied,
-// as does any file that isn't Go, which a C include may name. Without dirs,
-// every file stays.
-func planFiles(files []packFile, dirs []string) ([]packFile, error) {
+// as does any file that isn't Go, which a C include may name. Without
+// tests, a test file stays only there: a build without tests compiles none.
+// Without dirs, every file stays.
+func planFiles(files []packFile, dirs []string, tests bool) ([]packFile, error) {
 	if len(dirs) == 0 {
 		return files, nil
 	}
@@ -180,9 +190,11 @@ func planFiles(files []packFile, dirs []string) ([]packFile, error) {
 			read[d] = true
 		}
 	}
+	// Without tests, a test file's //go:embed is no build's.
 	embeds := map[string]bool{}
 	for _, f := range files {
 		if dir := filepath.Dir(f.rel); read[dir] && strings.HasSuffix(f.rel, ".go") &&
+			(tests || !strings.HasSuffix(f.rel, "_test.go")) &&
 			bytes.Contains(f.data, []byte("//go:embed")) {
 			embeds[dir] = true
 		}
@@ -190,7 +202,7 @@ func planFiles(files []packFile, dirs []string) ([]packFile, error) {
 	linked, absolute := linkTargets(files)
 	kept := files[:0]
 	for _, f := range files {
-		if !keepFile(f.rel, read, embeds) {
+		if !keepFile(f.rel, read, embeds, tests) {
 			continue
 		}
 		// A Go file in no directory the plan reads is kept only because a
@@ -240,15 +252,21 @@ func linkTargets(files []packFile) (map[string]bool, bool) {
 
 // keepFile reports whether planFiles keeps the file at rel: one that isn't
 // Go, a Go file in a directory the plan reads, or one below a directory that
+// embeds; without tests, a test file only in or below a directory that
 // embeds.
-func keepFile(rel string, read, embeds map[string]bool) bool {
+func keepFile(rel string, read, embeds map[string]bool, tests bool) bool {
 	if !strings.HasSuffix(rel, ".go") {
 		return true
 	}
 	dir := filepath.Dir(rel)
-	if read[dir] {
-		return true
+	if !tests && strings.HasSuffix(rel, "_test.go") {
+		return embeds[dir] || embeddedBelow(dir, embeds)
 	}
+	return read[dir] || embeddedBelow(dir, embeds)
+}
+
+// embeddedBelow reports whether dir is below a directory that embeds.
+func embeddedBelow(dir string, embeds map[string]bool) bool {
 	for d := dir; d != "." && d != "/"; {
 		d = filepath.Dir(d)
 		if embeds[d] {
@@ -1046,7 +1064,10 @@ func importLine(rel string, src []byte) string {
 // <module path>" per directory replacing a module in a go.mod or go.work.
 // Testdata directories are
 // listed too: a build may name a package there, though no pattern matches
-// one.
+// one. A directory is also listed, once each, as "embed <dir>" when one of
+// those Go files has a //go:embed line, "cgo <dir>" when one imports "C",
+// and "link <dir>" when it holds a symlink: what a build of its package may
+// read beyond its directory's Go files.
 func importsOfPack(pack string, tests bool) error {
 	in, err := os.Open(pack)
 	if err != nil {
@@ -1063,6 +1084,7 @@ func importsOfPack(pack string, tests bool) error {
 	}
 	var files []string
 	var mods []string
+	marks := map[string]bool{}
 	for {
 		rel, err := line()
 		if err == io.EOF && rel == "" {
@@ -1071,7 +1093,12 @@ func importsOfPack(pack string, tests bool) error {
 		if err != nil {
 			return err
 		}
-		if _, err := line(); err != nil {
+		modeStr, err := line()
+		if err != nil {
+			return err
+		}
+		mode, err := strconv.ParseUint(modeStr, 8, 32)
+		if err != nil {
 			return err
 		}
 		sizeStr, err := line()
@@ -1087,6 +1114,9 @@ func importsOfPack(pack string, tests bool) error {
 			return err
 		}
 		dir := filepath.ToSlash(filepath.Dir(rel))
+		if fs.FileMode(mode)&fs.ModeSymlink != 0 {
+			marks["link "+dir] = true
+		}
 		if base := filepath.Base(rel); base == "go.mod" || base == "go.work" {
 			for _, l := range strings.Split(string(data[:size]), "\n") {
 				if f := strings.Fields(l); len(f) >= 2 && f[0] == "module" {
@@ -1103,6 +1133,15 @@ func importsOfPack(pack string, tests bool) error {
 			continue
 		}
 		files = append(files, importLine(rel, data[:size]))
+		if bytes.Contains(data[:size], []byte("//go:embed")) {
+			marks["embed "+dir] = true
+		}
+		if importsC(rel, data[:size]) {
+			marks["cgo "+dir] = true
+		}
+	}
+	for m := range marks {
+		mods = append(mods, m)
 	}
 	sort.Strings(mods)
 	var b strings.Builder
@@ -1170,6 +1209,20 @@ func fileImports(name string, src []byte) []string {
 	return out
 }
 
+// importsC reports whether a Go file imports "C": whether it uses cgo.
+func importsC(name string, src []byte) bool {
+	f, err := parser.ParseFile(token.NewFileSet(), name, src, parser.ImportsOnly|parser.SkipObjectResolution)
+	if err != nil || f == nil {
+		return false
+	}
+	for _, im := range f.Imports {
+		if im.Path.Value == "\"C\"" {
+			return true
+		}
+	}
+	return false
+}
+
 // headerEnd follows a header's go:embed lines, as the go module's scan writes
 // them: go/build up to Go 1.25 looks for go:embed lines only when its scan of
 // the imports stops at a token before the end of the file.
@@ -1223,7 +1276,7 @@ func main() {
 		err = unpackAll(args[1], args[2], args[3:]...)
 	case (len(args) == 4 || len(args) == 5) && args[0] == "unpack":
 		err = unpack(args[1], args[2], args[3], args[4:]...)
-	case (len(args) == 4 || len(args) == 5) && args[0] == "subset":
+	case len(args) >= 4 && len(args) <= 6 && args[0] == "subset":
 		err = subset(args[1], args[2], args[3], args[4:]...)
 	case len(args) == 2 && args[0] == "weigh":
 		err = weigh(args[1])

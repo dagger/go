@@ -1054,6 +1054,9 @@ type build struct {
 	// and of the module cache whose Go files a plan unpacks (planDirs); nil
 	// for every one.
 	planSrc, planMods *string
+	// imports is what the source's packages import, which the build followed
+	// to the modules it downloads; unset when it didn't.
+	imports sourceImports
 	// modules is the walk's modules, for a step after it that reads them.
 	modules *modules
 	// fetch downloads, on its own, the zip of a module the build reads that
@@ -1085,6 +1088,23 @@ func newBuild(ctx context.Context, toolImage string, ctr *dagger.Container, imag
 	// source as the rest of this setup, which it doesn't depend on: it's
 	// made alongside it. An error shows again where the plan mounts it.
 	go planSource(source).Sync(ctx)
+	b, err := setup(ctx, toolImage, ctr, image, from, downloads, source, headers, pkgDirs, tests, mountPath, cwd, flags)
+	if err != nil {
+		return nil, err
+	}
+	// Go 1.25 and later run "go tool pack" for each package with assembly,
+	// the runtime among them, so a build on them needs pack and its runtime
+	// waits for it there: it's built alongside the plan instead. Earlier Go
+	// runs the toolchain's own pack. An error shows again where it's used.
+	if b.target.goMinor >= 25 {
+		go b.tools.Sync(ctx)
+	}
+	return b, nil
+}
+
+// setup is newBuild without what only a build reads, which Scope doesn't:
+// the plan's view of the source, and the pack tool.
+func setup(ctx context.Context, toolImage string, ctr *dagger.Container, image string, from, downloads *dagger.Container, source *dagger.Directory, headers *dagger.File, pkgDirs []string, tests bool, mountPath, cwd string, flags []string) (*build, error) {
 	var err error
 	if image != "" {
 		from = core.NewContainer().From(image)
@@ -1328,6 +1348,7 @@ go env GOOS GOARCH CGO_ENABLED GOVERSION > /gobuild/goenv
 		}
 		src := parseSourceImports(d.target, listed.out)
 		src.root = strings.TrimPrefix(strings.TrimPrefix(cwd, mountPath), "/")
+		b.imports = src
 		found, err := d.discoverOnce(ctx, toolImage, goenv, tags, src, pkgDirs)
 		if err != nil {
 			return nil, fmt.Errorf("go mod download: %w", err)
@@ -1368,13 +1389,6 @@ go env GOOS GOARCH CGO_ENABLED GOVERSION > /gobuild/goenv
 			WithExec([]string{"go", "build", "-o", "/gobuild/pack", "cmd/pack"}, bare).
 			File("/gobuild/pack")
 	})
-	// Go 1.25 and later run "go tool pack" for each package with assembly,
-	// the runtime among them, so a build on them needs pack and its runtime
-	// waits for it there: it's built alongside the plan instead. Earlier Go
-	// runs the toolchain's own pack. An error shows again where it's used.
-	if newTarget(goenv, nil).goMinor >= 25 {
-		go b.tools.Sync(ctx)
-	}
 	return b, nil
 }
 
@@ -1521,7 +1535,10 @@ func (b *build) unpackHeaders() string {
 // reads. With the whole pack, the plan was keyed by every Go file's imports
 // in the workspace: a change to any of them, another module's included, ran
 // the plan again, and its go command, for the same plan.
-func (b *build) planHeaders(ctx context.Context, headers *dagger.File) (*dagger.File, *dagger.File, error) {
+//
+// Without tests, the pack leaves out the test files a build without tests
+// doesn't compile, where it knows the directories (Scope).
+func (b *build) planHeaders(ctx context.Context, headers *dagger.File, tests bool) (*dagger.File, *dagger.File, error) {
 	ctr := core.NewContainer().From(b.toolImage).
 		WithMountedDirectory(hdrDir, b.hdr, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true}).
 		WithMountedFile("/gobuild/src.hdr", headers, dagger.ContainerWithMountedFileOpts{ReadOnly: true})
@@ -1529,6 +1546,9 @@ func (b *build) planHeaders(ctx context.Context, headers *dagger.File) (*dagger.
 	if b.planSrc != nil {
 		ctr = ctr.WithNewFile("/gobuild/plandirs/src", *b.planSrc)
 		cmd = append(cmd, "/gobuild/plandirs/src")
+		if !tests {
+			cmd = append(cmd, "notests")
+		}
 	}
 	out, err := ctr.WithExec([]string{"sh", "-c", "mkdir -p /gobuild/hdr && " + shJoin(cmd)}, bare).Directory("/gobuild/hdr").Sync(ctx)
 	if err != nil {
@@ -1546,7 +1566,7 @@ func (b *build) planHeaders(ctx context.Context, headers *dagger.File) (*dagger.
 // command's settings as the plan left them, for an archives manifest, in
 // /gobuild/env.json: an exec of their own would cost another exec start.
 func (b *build) planWith(ctx context.Context, headers *dagger.File, goCmd string, manifestTool *dagger.Directory) (*planned, error) {
-	planHdr, goDirs, err := b.planHeaders(ctx, headers)
+	planHdr, goDirs, err := b.planHeaders(ctx, headers, true)
 	if err != nil {
 		return nil, err
 	}
@@ -1618,7 +1638,7 @@ func (b *build) testmains(ctx context.Context, headers *dagger.File, flags, pkgs
 		cmd = append(cmd, flags...)
 		cmd = append(cmd, "-o", "/dev/null")
 		cmd = append(cmd, pkgs...)
-		planHdr, _, err := b.planHeaders(ctx, headers)
+		planHdr, _, err := b.planHeaders(ctx, headers, true)
 		if err != nil {
 			return nil, err
 		}

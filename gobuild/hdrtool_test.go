@@ -245,6 +245,36 @@ func TestHdrToolSubset(t *testing.T) {
 		t.Errorf("subset listed %q, unpack %q, want %q", got, want, "gen.go/inner.go\n")
 	}
 
+	// Without tests, a test file of a directory the plan reads is left out,
+	// but where an embed may name it, and a change to it leaves the subset
+	// as it was.
+	tested := maps.Clone(base)
+	tested["lib/lib_test.go"] = entry{"644", "package lib\n\nimport \"testing\"\n"}
+	tested["tmpl/tmpl_test.go"] = entry{"644", "package tmpl\n"}
+	run("subset", writePack("tested.hdr", tested), filepath.Join(dir, "notests.hdr"), os.DevNull, dirs, "notests")
+	run("unpack", filepath.Join(dir, "notests.hdr"), filepath.Join(dir, "notests"), os.DevNull)
+	got := tree(filepath.Join(dir, "notests"))
+	if _, ok := got["lib/lib_test.go"]; ok {
+		t.Errorf("without tests, the subset kept lib/lib_test.go")
+	}
+	if _, ok := got["tmpl/tmpl_test.go"]; !ok {
+		t.Errorf("without tests, the subset left out tmpl/tmpl_test.go, which tmpl's embed may name")
+	}
+	withoutTests := read(filepath.Join(dir, "notests.hdr"))
+	// A test file's own //go:embed is no build's: it doesn't keep the test
+	// files of its directory.
+	tested["lib/embed_test.go"] = entry{"644", "package lib\n\nimport _ \"embed\"\n\n//go:embed lib.s\nvar _ string\n"}
+	run("subset", writePack("tested.hdr", tested), filepath.Join(dir, "notests-embed.hdr"), os.DevNull, dirs, "notests")
+	if read(filepath.Join(dir, "notests-embed.hdr")) != withoutTests {
+		t.Errorf("without tests, a test file's //go:embed kept its directory's test files")
+	}
+	delete(tested, "lib/embed_test.go")
+	tested["lib/lib_test.go"] = entry{"644", "package lib\n\nimport \"os\"\n"}
+	run("subset", writePack("tested.hdr", tested), filepath.Join(dir, "notests.hdr"), os.DevNull, dirs, "notests")
+	if read(filepath.Join(dir, "notests.hdr")) != withoutTests {
+		t.Errorf("without tests, a change to a test file changed the subset")
+	}
+
 	// Without directories, the subset is the whole pack.
 	run("subset", pack, filepath.Join(dir, "all.hdr"), os.DevNull)
 	if got, want := read(filepath.Join(dir, "all.hdr")), read(pack); got != want {
@@ -515,5 +545,50 @@ func TestHdrToolSizes(t *testing.T) {
 	}
 	if want := "10 a.go\n2000 p/b.go\n"; string(out) != want {
 		t.Errorf("sizes = %q, want %q", out, want)
+	}
+}
+
+// gohdr imports marks the directories whose build may read more than their
+// Go files: a //go:embed line, an import of "C", a symlink. A test file's
+// mark is listed only with tests.
+func TestHdrToolImportsMarks(t *testing.T) {
+	dir := buildHdrTool(t)
+	type file struct{ rel, mode, data string }
+	files := []file{
+		{"go.mod", "644", "module example.com/m\n\ngo 1.22\n"},
+		{"embeds/e.go", "644", "package embeds\n\nimport \"embed\"\n\n//go:embed static\nvar _ embed.FS\n"},
+		{"cgo/c.go", "644", "package cgo\n\n// #include \"../x.h\"\nimport \"C\"\n"},
+		{"links/l.go", strconv.FormatUint(uint64(os.ModeSymlink|0o777), 8), "../plain/p.go"},
+		{"plain/p.go", "644", "package plain\n\nimport \"fmt\"\n"},
+		{"tested/t_test.go", "644", "package tested\n\nimport \"embed\"\n\n//go:embed testdata\nvar _ embed.FS\n"},
+	}
+	var pack bytes.Buffer
+	pack.WriteString("gohdr 1\n")
+	for _, f := range files {
+		fmt.Fprintf(&pack, "%s\n%s\n%d\n%s\n", f.rel, f.mode, len(f.data), f.data)
+	}
+	packPath := filepath.Join(dir, "src.hdr")
+	if err := os.WriteFile(packPath, pack.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for mode, want := range map[string]map[string][]string{
+		"build": {"embeds": {"embed"}, "cgo": {"cgo"}, "links": {"link"}},
+		"tests": {"embeds": {"embed"}, "cgo": {"cgo"}, "links": {"link"}, "tested": {"embed"}},
+	} {
+		out, err := exec.Command(filepath.Join(dir, "gohdr"), "imports", packPath, mode).Output()
+		if err != nil {
+			t.Fatalf("imports %s: %v", mode, err)
+		}
+		src := parseSourceImports(newTarget("linux\namd64\n1\ngo1.27.3\n", nil), string(out))
+		if !reflect.DeepEqual(src.marks, want) {
+			t.Errorf("imports %s: marks %v, want %v\n%s", mode, src.marks, want, out)
+		}
+		// The marks are neither Go files' lines nor modules.
+		if _, ok := src.all["embed embeds"]; ok {
+			t.Errorf("imports %s: a mark read as a package", mode)
+		}
+		if len(src.mods) != 1 || src.mods[0] != (sourceModule{dir: ".", path: "example.com/m"}) {
+			t.Errorf("imports %s: modules %+v", mode, src.mods)
+		}
 	}
 }
