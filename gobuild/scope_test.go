@@ -98,3 +98,26 @@ func TestPackageDirs(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildVCS(t *testing.T) {
+	for _, c := range []struct {
+		flags []string
+		want  bool
+	}{
+		{nil, false},
+		{[]string{"-race"}, false},
+		{[]string{"-buildvcs"}, true},
+		{[]string{"-buildvcs=true"}, true},
+		{[]string{"-buildvcs=auto"}, false},
+		{[]string{"-buildvcs=true", "-buildvcs=false"}, false},
+		{[]string{"-buildvcs=1"}, true},
+		{[]string{"-buildvcs=t"}, true},
+		{[]string{"-buildvcs=TRUE"}, true},
+		{[]string{"-buildvcs=0"}, false},
+		{[]string{"-buildvcs="}, false},
+	} {
+		if got := buildVCS(c.flags); got != c.want {
+			t.Errorf("buildVCS(%q) = %v, want %v", c.flags, got, c.want)
+		}
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"maps"
 	"path"
 	"slices"
+	"strconv"
 	"strings"
 
 	"dagger.io/dagger/core"
@@ -37,8 +38,9 @@ type Scoped struct {
 // uses cgo or holds a symlink; when flags or the base's GOFLAGS or
 // GOWORK name a file (fileFlags); when a package is named other than by a
 // path below the build's directory; when the source holds a version control
-// system's metadata, which the go command stamps a binary from; in vendor
-// mode; and when the go command switches to another toolchain.
+// system's metadata, which the go command stamps a binary from, for a
+// build without tests or with -buildvcs=true; in vendor mode; and when the
+// go command switches to another toolchain.
 func (m *Gobuild) Scope(
 	ctx context.Context,
 	// The Go container the build runs in, as for Binary.
@@ -142,7 +144,11 @@ func (m *Gobuild) Scope(
 			nativeFiles = append(nativeFiles, g.paths...)
 		}
 	}
-	if b.planSrc == nil || versioned {
+	// The go command stamps a binary from version control metadata in go
+	// build, not in go test unless -buildvcs=true asks it to, and a build
+	// that links nothing, such as archives', has nothing to stamp.
+	stamps := !tests || buildVCS(append(envFlags, flags...))
+	if b.planSrc == nil || versioned && stamps {
 		return whole, nil
 	}
 	dirs := strings.Split(*b.planSrc, "\n")
@@ -287,6 +293,21 @@ func fileFlags(flags []string) bool {
 		}
 	}
 	return false
+}
+
+// buildVCS reports whether go build flags set -buildvcs to true, as the go
+// command parses it (strconv.ParseBool, "auto" aside): the last -buildvcs
+// wins, and one without a value is true.
+func buildVCS(flags []string) bool {
+	on := false
+	for _, f := range flags {
+		name, value, hasValue := strings.Cut(strings.TrimLeft(f, "-"), "=")
+		if strings.HasPrefix(f, "-") && name == "buildvcs" {
+			b, err := strconv.ParseBool(value)
+			on = !hasValue || err == nil && b
+		}
+	}
+	return on
 }
 
 // pathLike reports whether a tool flag argument holds a path: a part of it,

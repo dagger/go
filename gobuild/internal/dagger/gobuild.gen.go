@@ -567,8 +567,9 @@ type GobuildScopeOpts struct {
 // uses cgo or holds a symlink; when flags or the base's GOFLAGS or
 // GOWORK name a file (fileFlags); when a package is named other than by a
 // path below the build's directory; when the source holds a version control
-// system's metadata, which the go command stamps a binary from; in vendor
-// mode; and when the go command switches to another toolchain.
+// system's metadata, which the go command stamps a binary from, for a
+// build without tests or with -buildvcs=true; in vendor mode; and when the
+// go command switches to another toolchain.
 func (r *Gobuild) Scope(base *Container, source *Directory, headers *File, mountPath string, opts ...GobuildScopeOpts) *GobuildScoped {
 	assertNotNil("base", base)
 	assertNotNil("source", source)
