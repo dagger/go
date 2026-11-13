@@ -544,6 +544,10 @@ type GobuildScopeOpts struct {
 	Packages []string
 	// Whether the build reads the packages' test files.
 	Tests bool
+	// Whether the build compiles only the packages outside the module, as
+	// Archives with dependencies does: without tests, for one package, they
+	// are keyed by what it imports outside the module (dependencyScope).
+	Dependencies bool
 	// The build's flags.
 	Flags []string
 	// The container module downloads run with, as for Binary.
@@ -595,6 +599,10 @@ func (r *Gobuild) Scope(base *Container, source *Directory, headers *File, mount
 		// `tests` optional argument
 		if !querybuilder.IsZeroValue(opts[i].Tests) {
 			q = q.Arg("tests", opts[i].Tests)
+		}
+		// `dependencies` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Dependencies) {
+			q = q.Arg("dependencies", opts[i].Dependencies)
 		}
 		// `flags` optional argument
 		if !querybuilder.IsZeroValue(opts[i].Flags) {
@@ -1255,7 +1263,8 @@ type GobuildScoped struct { // gobuild (../../:0:0)
 	// field again.
 	refetchID bool
 
-	id *ID
+	id      *ID
+	standIn *bool
 }
 
 func (r *GobuildScoped) WithGraphQLQuery(q *querybuilder.Selection) *GobuildScoped {
@@ -1334,6 +1343,22 @@ func (r *GobuildScoped) Source() *Directory {
 	q := r.query.Select("source")
 
 	return new(Directory).WithGraphQLQuery(q)
+}
+
+// Whether Source stands in for the module's own packages
+// (dependencyScope): its build may fail where theirs wouldn't, such as
+// when a dependency imports the module back, and the caller then builds
+// from the module's own source.
+func (r *GobuildScoped) StandIn(ctx context.Context) (bool, error) {
+	if r.standIn != nil {
+		return *r.standIn, nil
+	}
+	q := r.query.Select("standIn")
+
+	var response bool
+
+	q = q.Bind(&response)
+	return response, q.Execute(ctx)
 }
 
 func (r *Query) Gobuild(toolImage string) *Gobuild { // gobuild (../../:0:0)

@@ -176,9 +176,11 @@ func (r Scoped) MarshalJSON() ([]byte, error) {
 	var concrete struct {
 		Source  *dagger.Directory
 		Headers *dagger.File
+		StandIn bool
 	}
 	concrete.Source = r.Source
 	concrete.Headers = r.Headers
+	concrete.StandIn = r.StandIn
 	return json.Marshal(&concrete)
 }
 
@@ -186,6 +188,7 @@ func (r *Scoped) UnmarshalJSON(bs []byte) error {
 	var concrete struct {
 		Source  *dagger.Directory
 		Headers *dagger.File
+		StandIn bool
 	}
 	err := json.Unmarshal(bs, &concrete)
 	if err != nil {
@@ -193,6 +196,7 @@ func (r *Scoped) UnmarshalJSON(bs []byte) error {
 	}
 	r.Source = concrete.Source
 	r.Headers = concrete.Headers
+	r.StandIn = concrete.StandIn
 	return nil
 }
 
@@ -827,6 +831,13 @@ func DaggerDispatch(ctx context.Context, parentJSON []byte, parentName string, f
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg tests", err))
 				}
 			}
+			var dependencies bool
+			if inputArgs["dependencies"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["dependencies"]), &dependencies)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg dependencies", err))
+				}
+			}
 			var flags []string
 			if inputArgs["flags"] != nil {
 				err = json.Unmarshal([]byte(inputArgs["flags"]), &flags)
@@ -841,7 +852,7 @@ func DaggerDispatch(ctx context.Context, parentJSON []byte, parentName string, f
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg downloads", err))
 				}
 			}
-			return (*Gobuild).Scope(&parent, ctx, base, image, from, source, headers, mountPath, workdir, packages, tests, flags, downloads)
+			return (*Gobuild).Scope(&parent, ctx, base, image, from, source, headers, mountPath, workdir, packages, tests, dependencies, flags, downloads)
 		case "TestBinaries":
 			var parent Gobuild
 			err = json.Unmarshal(parentJSON, &parent)

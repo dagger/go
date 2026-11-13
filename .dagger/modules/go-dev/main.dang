@@ -1320,6 +1320,79 @@ type GoDev {
     assert(edited == listed, "an edit of the module's own package changed the listing")
   }
 
+  """
+  Two modules with different code and the same imports outside them, as a
+  later module's generated code has, get the same dependencies' archives,
+  listing and manifest, which their own packages' imports reach (encoding/json
+  through a package of the module), and the same as a build of every package
+  of the module makes, which reads the whole source.
+  """
+  dependencyArchivesCheck: Void @check {
+    let one = dependencyModule("one", "ToUpper")
+    let two = dependencyModule("two", "ToLower")
+    let a = dependencyArchives(one, ["."])
+    let b = dependencyArchives(two, ["."])
+    let whole = dependencyArchives(one, ["./..."])
+    assert(a.contains("encoding/json"), "an import reached through the module's own package is not archived: " + a)
+    assert(a.contains("example.com/") == false, "the module's own packages are archived: " + a)
+    assert(a == b, "two modules with the same imports got different dependencies' archives:\n" + a + "\n" + b)
+    assert(a == whole, "the dependencies' archives differ from those of every package:\n" + a + "\n" + whole)
+  }
+
+  """
+  A dependency that requires the module and imports one of its packages
+  back, which the module's own source provides, gets the same dependencies'
+  archives as a build of every package: the stand-in for the module's own
+  packages fails there, as its go.sum has no entry for the module, and the
+  archives come from the module's own source. The dependency comes from a
+  file proxy in the base.
+  """
+  backImportArchivesCheck: Void @check {
+    let dep = directory
+      .withNewFile("go.mod", "module example.com/b\n\ngo 1.22\n\nrequire example.com/a v0.1.0\n")
+      .withNewFile("b.go", "package b\n\nimport \"example.com/a/lib\"\n\nvar Name = lib.Name\n")
+    let main = directory
+      .withNewFile("go.mod", "module example.com/a\n\ngo 1.22\n\nrequire example.com/b v1.0.0\n")
+      .withNewFile("lib/lib.go", "package lib\n\nvar Name = \"a\"\n")
+      .withNewFile("main.go", "package main\n\nimport (\n\t\"strings\"\n\n\t\"example.com/b\"\n)\n\nfunc main() { println(strings.ToUpper(b.Name)) }\n")
+    let image = container.from("golang:1.27.3-alpine")
+    let made = image
+      .withExec(["apk", "add", "--no-cache", "zip"])
+      .withDirectory("/z/example.com/b@v1.0.0", dep)
+      .withDirectory("/ws", main)
+      .withExec(["sh", "-c", "set -e; p=/proxy/example.com/b/@v; mkdir -p $p; cd /z; zip -qr $p/v1.0.0.zip example.com/b@v1.0.0; cp example.com/b@v1.0.0/go.mod $p/v1.0.0.mod; printf 'v1.0.0\\n' > $p/list; printf '{\"Version\":\"v1.0.0\"}' > $p/v1.0.0.info; cd /ws; GOFLAGS=-mod=mod GOPROXY=file:///proxy GOSUMDB=off go mod tidy; ! grep -q '^example.com/a ' go.sum"])
+    let base = image
+      .withDirectory("/proxy", made.directory("/proxy"))
+      .withEnvVariable("GOPROXY", "file:///proxy")
+      .withEnvVariable("GOSUMDB", "off")
+    let ws = made.directory("/ws").asWorkspace
+    let tool = go(base: base)
+    let one = tool.module(ws, ".").archives(ws, dependencies: true, packages: ["."], noTests: true)
+    let every = tool.module(ws, ".").archives(ws, dependencies: true, packages: ["./..."], noTests: true)
+    let a = one.file("manifest.json").contents + one.file("listing.json").contents + one.directory("archives").digest
+    let b = every.file("manifest.json").contents + every.file("listing.json").contents + every.directory("archives").digest
+    let manifest = one.file("manifest.json").contents
+    assert(manifest.contains("example.com/b") == false, "a dependency that imports the module back is archived: " + manifest)
+    assert(a == b, "the dependencies' archives differ from those of every package:\n" + a + "\n" + b)
+  }
+
+  # A module example.com/<name> whose root package calls strings.<call> and
+  # imports net/url, and a package of its own that imports encoding/json.
+  let dependencyModule(name: String!, call: String!): Directory! {
+    directory
+      .withNewFile("go.mod", "module example.com/" + name + "\n\ngo 1.22\n")
+      .withNewFile("main.go", "package main\n\nimport (\n\t\"net/url\"\n\t\"strings\"\n\n\t\"example.com/" + name + "/lib\"\n)\n\nfunc main() { _, _ = url.Parse(lib.Name); println(strings." + call + "(\"" + name + "\")) }\n")
+      .withNewFile("lib/lib.go", "package lib\n\nimport \"encoding/json\"\n\nvar Name = \"" + name + "\"\n\nvar _, _ = json.Marshal(Name)\n")
+  }
+
+  # The dependencies' archives of the module at dir's root, for packages,
+  # without tests: their manifest and listing, and the archives' digest.
+  let dependencyArchives(dir: Directory!, packages: [String!]!): String! {
+    let ws = dir.asWorkspace
+    let out = go(version: "1.27.3").module(ws, ".").archives(ws, dependencies: true, packages: packages, noTests: true)
+    out.file("manifest.json").contents + out.file("listing.json").contents + out.directory("archives").digest
+  }
+
   # The listing of the dependencies' archives of the module at dir's root
   # package, as codegen asks for them.
   let dependenciesListing(dir: Directory!): String! {

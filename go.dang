@@ -1941,7 +1941,7 @@ type GoModule {
   # and header pack, with the packages' test files when test is set
   # (Gobuild.scope): given it, the build is cached across an edit of any
   # other file.
-  let scoped(ws: Workspace!, ctr: Container!, pkgs: [String!]!, test: Boolean!): GobuildScoped! {
+  let scoped(ws: Workspace!, ctr: Container!, pkgs: [String!]!, test: Boolean!, dependencies: Boolean! = false): GobuildScoped! {
     builder.scope(
       base: ctr,
       image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
@@ -1952,6 +1952,7 @@ type GoModule {
       workdir: path,
       packages: pkgs,
       tests: test,
+      dependencies: dependencies,
       flags: buildFlags,
       downloads: tool.downloads,
     )
@@ -2175,13 +2176,35 @@ type GoModule {
     if (gccgo(flags)) {
       raise "Go module " + path + ": a gccgo build has no archives for the export driver, which reads gc's"
     }
-    let read = scoped(ws, ctr, packages, noTests == false)
-    let out = builder.archives(
+    let read = scoped(ws, ctr, packages, noTests == false, dependencies: dependencies)
+    let out = if (read.standIn) {
+      # A stand-in for the module's own packages (Gobuild.scope) whose
+      # build fails may fail where the module's own wouldn't, such as when
+      # a dependency imports the module back: the module's own source
+      # builds them then.
+      {
+        archivesOf(ws, ctr, read.source, read.headers, dependencies, packages, noTests).sync
+      } rescue {
+        err: Error => archivesOf(ws, ctr, source(ws, test: noTests == false), lib.scan(ws).sync.file("_headers_.gohdr"), dependencies, packages, noTests)
+      }
+    } else {
+      archivesOf(ws, ctr, read.source, read.headers, dependencies, packages, noTests)
+    }
+    out.sync rescue {
+      err: Error => raise "Go archives of module " + path + ": " + err.message
+    }
+    out
+  }
+
+  # The per-package build's archives of packages in ctr from source and its
+  # header pack, as archives makes them.
+  let archivesOf(ws: Workspace!, ctr: Container!, source: Directory!, headers: File!, dependencies: Boolean!, packages: [String!]!, noTests: Boolean!): Directory! {
+    builder.archives(
       base: ctr,
       image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
       from: if (baseImage == null) { null } else { baseImage.withoutEntrypoint },
-      source: read.source,
-      headers: read.headers,
+      source: source,
+      headers: headers,
       mountPath: mountPath,
       workdir: path,
       flags: buildFlags,
@@ -2191,10 +2214,6 @@ type GoModule {
       packages: packages,
       tests: noTests == false,
     )
-    out.sync rescue {
-      err: Error => raise "Go archives of module " + path + ": " + err.message
-    }
-    out
   }
 
   """

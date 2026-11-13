@@ -70,6 +70,7 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/build/constraint"
 	"go/parser"
 	"go/token"
 	"io"
@@ -1040,18 +1041,26 @@ func leadingComments(src []byte) []byte {
 }
 
 // importLine is a Go file's line in an imports list: its directory, its
-// name, its //go:build expression or "-", and its imports, separated by
-// tabs, the imports by spaces.
+// name, its //go:build expression, "+build" for a legacy // +build line
+// alone, or "-", and its imports, separated by tabs, the imports by spaces.
 func importLine(rel string, src []byte) string {
-	expr := "-"
+	expr, plus := "-", false
 	for _, l := range strings.Split(string(src), "\n") {
 		t := strings.TrimSpace(l)
 		if strings.HasPrefix(t, "package ") {
 			break
 		}
-		if strings.HasPrefix(t, "//go:build ") {
-			expr = strings.TrimSpace(strings.TrimPrefix(t, "//go:build "))
+		if constraint.IsGoBuild(t) {
+			expr = strings.TrimSpace(strings.TrimPrefix(t, "//go:build"))
+		} else if constraint.IsPlusBuild(t) {
+			plus = true
 		}
+	}
+	if expr == "-" && plus {
+		// A legacy // +build line, which the go command reads when no
+		// //go:build line is there, and this doesn't: it constrains the
+		// file all the same.
+		expr = "+build"
 	}
 	return filepath.ToSlash(filepath.Dir(rel)) + "\t" + filepath.Base(rel) + "\t" + expr + "\t" +
 		strings.Join(fileImports(rel, src), " ") + "\n"
@@ -1067,7 +1076,9 @@ func importLine(rel string, src []byte) string {
 // one. A directory is also listed, once each, as "embed <dir>" when one of
 // those Go files has a //go:embed line, "cgo <dir>" when one imports "C",
 // and "link <dir>" when it holds a symlink: what a build of its package may
-// read beyond its directory's Go files.
+// read beyond its directory's Go files; and as "name<tab><dir><tab><package
+// name>" for each package name its Go files declare, or "unparsed <dir>"
+// when one's header doesn't parse.
 func importsOfPack(pack string, tests bool) error {
 	in, err := os.Open(pack)
 	if err != nil {
@@ -1136,8 +1147,13 @@ func importsOfPack(pack string, tests bool) error {
 		if bytes.Contains(data[:size], []byte("//go:embed")) {
 			marks["embed "+dir] = true
 		}
-		if importsC(rel, data[:size]) {
-			marks["cgo "+dir] = true
+		if pkg, cgo, ok := packageInfo(rel, data[:size]); !ok {
+			marks["unparsed "+dir] = true
+		} else {
+			marks["name\t"+dir+"\t"+pkg] = true
+			if cgo {
+				marks["cgo "+dir] = true
+			}
 		}
 	}
 	for m := range marks {
@@ -1209,18 +1225,19 @@ func fileImports(name string, src []byte) []string {
 	return out
 }
 
-// importsC reports whether a Go file imports "C": whether it uses cgo.
-func importsC(name string, src []byte) bool {
+// packageInfo is a Go file's package name and whether it imports "C",
+// using cgo; not ok when its header doesn't parse.
+func packageInfo(name string, src []byte) (pkg string, cgo, ok bool) {
 	f, err := parser.ParseFile(token.NewFileSet(), name, src, parser.ImportsOnly|parser.SkipObjectResolution)
 	if err != nil || f == nil {
-		return false
+		return "", false, false
 	}
 	for _, im := range f.Imports {
 		if im.Path.Value == "\"C\"" {
-			return true
+			cgo = true
 		}
 	}
-	return false
+	return f.Name.Name, cgo, true
 }
 
 // headerEnd follows a header's go:embed lines, as the go module's scan writes

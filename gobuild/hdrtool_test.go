@@ -572,8 +572,8 @@ func TestHdrToolImportsMarks(t *testing.T) {
 		t.Fatal(err)
 	}
 	for mode, want := range map[string]map[string][]string{
-		"build": {"embeds": {"embed"}, "cgo": {"cgo"}, "links": {"link"}},
-		"tests": {"embeds": {"embed"}, "cgo": {"cgo"}, "links": {"link"}, "tested": {"embed"}},
+		"build": {"embeds": {"embed"}, "cgo": {"cgo"}, "links": {"link", "unparsed"}},
+		"tests": {"embeds": {"embed"}, "cgo": {"cgo"}, "links": {"link", "unparsed"}, "tested": {"embed"}},
 	} {
 		out, err := exec.Command(filepath.Join(dir, "gohdr"), "imports", packPath, mode).Output()
 		if err != nil {
@@ -583,12 +583,46 @@ func TestHdrToolImportsMarks(t *testing.T) {
 		if !reflect.DeepEqual(src.marks, want) {
 			t.Errorf("imports %s: marks %v, want %v\n%s", mode, src.marks, want, out)
 		}
+		if want := map[string][]string{"embeds": {"embeds"}, "cgo": {"cgo"}, "plain": {"plain"}}; mode == "build" && !reflect.DeepEqual(src.names, want) {
+			t.Errorf("imports %s: package names %v, want %v", mode, src.names, want)
+		}
 		// The marks are neither Go files' lines nor modules.
 		if _, ok := src.all["embed embeds"]; ok {
 			t.Errorf("imports %s: a mark read as a package", mode)
 		}
 		if len(src.mods) != 1 || src.mods[0] != (sourceModule{dir: ".", path: "example.com/m"}) {
 			t.Errorf("imports %s: modules %+v", mode, src.mods)
+		}
+	}
+}
+
+// gohdr imports lists a file constrained by a legacy // +build line alone
+// with the expression "+build", and one with a //go:build line by that.
+func TestHdrToolImportsLegacyBuild(t *testing.T) {
+	dir := buildHdrTool(t)
+	files := map[string]string{
+		"legacy.go":  "// +build linux\n\npackage m\n\nimport \"os\"\n",
+		"both.go":    "//go:build linux\n// +build linux\n\npackage m\n",
+		"plain.go":   "package m\n",
+		"nospace.go": "//+build windows\n\npackage m\n\nimport \"syscall\"\n",
+		"tab.go":     "//go:build\tlinux\n\npackage m\n",
+	}
+	var pack bytes.Buffer
+	pack.WriteString("gohdr 1\n")
+	for _, f := range []string{"both.go", "legacy.go", "nospace.go", "plain.go", "tab.go"} {
+		fmt.Fprintf(&pack, "%s\n644\n%d\n%s\n", f, len(files[f]), files[f])
+	}
+	packPath := filepath.Join(dir, "src.hdr")
+	if err := os.WriteFile(packPath, pack.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(filepath.Join(dir, "gohdr"), "imports", packPath, "build").Output()
+	if err != nil {
+		t.Fatalf("imports: %v", err)
+	}
+	for _, want := range []string{".\tlegacy.go\t+build\tos\n", ".\tboth.go\tlinux\t\n", ".\tplain.go\t-\t\n", ".\tnospace.go\t+build\tsyscall\n", ".\ttab.go\tlinux\t\n"} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("imports output lacks %q:\n%s", want, out)
 		}
 	}
 }

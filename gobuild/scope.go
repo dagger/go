@@ -19,6 +19,11 @@ type Scoped struct {
 	Source *dagger.Directory
 	// The header pack of those files.
 	Headers *dagger.File
+	// Whether Source stands in for the module's own packages
+	// (dependencyScope): its build may fail where theirs wouldn't, such as
+	// when a dependency imports the module back, and the caller then builds
+	// from the module's own source.
+	StandIn bool
 }
 
 // Scope is what a build of packages reads of source and headers: the files
@@ -69,6 +74,11 @@ func (m *Gobuild) Scope(
 	// Whether the build reads the packages' test files.
 	// +optional
 	tests bool,
+	// Whether the build compiles only the packages outside the module, as
+	// Archives with dependencies does: without tests, for one package, they
+	// are keyed by what it imports outside the module (dependencyScope).
+	// +optional
+	dependencies bool,
 	// The build's flags.
 	// +optional
 	flags []string,
@@ -97,6 +107,11 @@ func (m *Gobuild) Scope(
 	}
 	if fileFlags(append(envFlags, flags...)) || (gowork != "" && gowork != "off" && gowork != "auto") {
 		return whole, nil
+	}
+	if dependencies && !tests && len(pkgDirs) == 1 {
+		if deps, ok, err := m.dependencyScope(ctx, base, source, headers, workdir, pkgDirs[0], flags); err != nil || ok {
+			return deps, err
+		}
 	}
 	cwd := path.Join(mountPath, workdir)
 	// C and assembly files, as the go module's source holds them

@@ -413,8 +413,10 @@ type sourceImports struct {
 	root string
 	// marks is each directory's marks: "embed" when one of its Go files has
 	// a //go:embed line, "cgo" when one imports "C", "link" when it holds a
-	// symlink.
+	// symlink, "unparsed" when one's header doesn't parse.
 	marks map[string][]string
+	// names is the package names each directory's Go files declare.
+	names map[string][]string
 }
 
 type sourceModule struct{ dir, path string }
@@ -422,15 +424,17 @@ type sourceModule struct{ dir, path string }
 // parseSourceImports parses "gohdr imports": its module lines, and its Go
 // files' lines (importLine), of the files that build for t, and of all.
 func parseSourceImports(t target, out string) sourceImports {
-	src := sourceImports{pkgs: fileImportsFor(t, out), all: fileImportsFor(target{}, out), marks: map[string][]string{}}
+	src := sourceImports{pkgs: fileImportsFor(t, out), all: fileImportsFor(target{}, out), marks: map[string][]string{}, names: map[string][]string{}}
 	for _, line := range strings.Split(out, "\n") {
 		if f := strings.Fields(line); len(f) == 3 && f[0] == "mod" {
 			src.mods = append(src.mods, sourceModule{dir: f[1], path: f[2]})
 		} else if len(f) == 3 && f[0] == "repl" {
 			src.repls = append(src.repls, sourceModule{dir: f[1], path: f[2]})
 		} else if mark, dir, ok := strings.Cut(line, " "); ok && !strings.Contains(line, "\t") &&
-			(mark == "embed" || mark == "cgo" || mark == "link") {
+			(mark == "embed" || mark == "cgo" || mark == "link" || mark == "unparsed") {
 			src.marks[dir] = append(src.marks[dir], mark)
+		} else if f := strings.Split(line, "\t"); len(f) == 3 && f[0] == "name" {
+			src.names[f[1]] = append(src.names[f[1]], f[2])
 		}
 	}
 	// The longest module path first, so a nested module wins.
