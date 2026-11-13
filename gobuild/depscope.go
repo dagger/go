@@ -30,7 +30,7 @@ const depsModule = "gobuild.invalid/deps"
 // vendor directory; when a dependency requires the module, which its go.sum
 // then names, so one may import the module's packages back; or when the
 // build may run another toolchain than the base's.
-func (m *Gobuild) dependencyScope(ctx context.Context, base *dagger.Container, source *dagger.Directory, headers *dagger.File, workdir, pkgDir string, flags []string) (*Scoped, bool, error) {
+func (m *Gobuild) dependencyScope(ctx context.Context, base *dagger.Container, env map[string]string, source *dagger.Directory, headers *dagger.File, workdir, pkgDir string, flags []string) (*Scoped, bool, error) {
 	// What the source's packages import, listed alongside the rest: on a
 	// fresh engine its exec waits on gohdr's build.
 	platform, err := targetPlatform(ctx, base)
@@ -84,29 +84,10 @@ func (m *Gobuild) dependencyScope(ctx context.Context, base *dagger.Container, s
 		// dependency that imports it back a version of it to build against.
 		return nil, false, nil
 	}
-	ctr, err := withoutGoCaches(ctx, base)
-	if err != nil {
-		return nil, false, err
-	}
-	if v, err := ctr.EnvVariable(ctx, "GOTOOLCHAIN"); err != nil {
-		return nil, false, err
-	} else if v != "" && v != "auto" && v != "local" && !strings.HasSuffix(v, "+auto") {
+	if v := env["GOTOOLCHAIN"]; v != "" && v != "auto" && v != "local" && !strings.HasSuffix(v, "+auto") {
 		return nil, false, nil
 	}
-	// The target, from the base alone, which every module built in it
-	// shares: run where no go.mod is, so the go command switches to no
-	// other toolchain.
-	goenv, err := ctr.WithWorkdir("/").
-		WithExec([]string{"go", "env", "GOOS", "GOARCH", "CGO_ENABLED", "GOVERSION"}, bare).
-		Stdout(ctx)
-	if err != nil {
-		return nil, false, withStderr(err)
-	}
-	goflags, err := ctr.EnvVariable(ctx, "GOFLAGS")
-	if err != nil {
-		return nil, false, err
-	}
-	envFlags, err := splitGOFLAGS(goflags)
+	envFlags, err := splitGOFLAGS(env["GOFLAGS"])
 	if err != nil {
 		return nil, false, fmt.Errorf("GOFLAGS: %w", err)
 	}
@@ -117,7 +98,7 @@ func (m *Gobuild) dependencyScope(ctx context.Context, base *dagger.Container, s
 		// package pattern may name the module's own packages.
 		return nil, false, nil
 	}
-	t := newTarget(goenv, nil)
+	t := newTarget(strings.Join([]string{env["GOOS"], env["GOARCH"], env["CGO_ENABLED"], env["GOVERSION"]}, "\n"), nil)
 	if goMinor > t.goMinor {
 		// The go.mod asks for a newer Go, which the go command switches to.
 		return nil, false, nil

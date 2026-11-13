@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"path"
@@ -93,23 +94,22 @@ func (m *Gobuild) Scope(
 	if !ok || pkgDirs == nil {
 		return whole, nil
 	}
-	goflags, err := base.EnvVariable(ctx, "GOFLAGS")
+	env, err := goEnv(ctx, base)
 	if err != nil {
-		return nil, err
+		// Where no go.mod is, the go command may refuse a setting the
+		// toolchain the module asks for accepts: the build's own setup,
+		// which reads the go.mod, says whether it builds.
+		return whole, nil
 	}
-	envFlags, err := splitGOFLAGS(goflags)
+	envFlags, err := splitGOFLAGS(env["GOFLAGS"])
 	if err != nil {
 		return nil, fmt.Errorf("GOFLAGS: %w", err)
 	}
-	gowork, err := base.EnvVariable(ctx, "GOWORK")
-	if err != nil {
-		return nil, err
-	}
-	if fileFlags(append(envFlags, flags...)) || (gowork != "" && gowork != "off" && gowork != "auto") {
+	if gowork := env["GOWORK"]; fileFlags(append(envFlags, flags...)) || (gowork != "" && gowork != "off") {
 		return whole, nil
 	}
 	if dependencies && !tests && len(pkgDirs) == 1 {
-		if deps, ok, err := m.dependencyScope(ctx, base, source, headers, workdir, pkgDirs[0], flags); err != nil || ok {
+		if deps, ok, err := m.dependencyScope(ctx, base, env, source, headers, workdir, pkgDirs[0], flags); err != nil || ok {
 			return deps, err
 		}
 	}
@@ -308,6 +308,32 @@ func fileFlags(flags []string) bool {
 		}
 	}
 	return false
+}
+
+// goEnvVars are the go command's settings Scope reads.
+var goEnvVars = []string{"GOOS", "GOARCH", "CGO_ENABLED", "GOVERSION", "GOFLAGS", "GOWORK", "GOTOOLCHAIN"}
+
+// goEnv is the go command's settings in ctr, as it reads them: from its
+// environment and from the go env file, which go env -w writes and a
+// container's environment doesn't show. It runs where no go.mod is, so the
+// go command switches to no other toolchain; ctr's Go caches aren't
+// mounted. Every build in ctr shares it.
+func goEnv(ctx context.Context, ctr *dagger.Container) (map[string]string, error) {
+	ctr, err := withoutGoCaches(ctx, ctr)
+	if err != nil {
+		return nil, err
+	}
+	out, err := ctr.WithWorkdir("/").
+		WithExec(append([]string{"go", "env", "-json"}, goEnvVars...), bare).
+		Stdout(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("go env: %w", withStderr(err))
+	}
+	env := map[string]string{}
+	if err := json.Unmarshal([]byte(out), &env); err != nil {
+		return nil, fmt.Errorf("go env: %w", err)
+	}
+	return env, nil
 }
 
 // buildVCS reports whether go build flags set -buildvcs to true, as the go
