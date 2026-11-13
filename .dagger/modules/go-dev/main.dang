@@ -1407,6 +1407,54 @@ type GoDev {
     assert(failure.contains("broken/broken.go") and failure.contains("example.com/nowhere/missing"), "the broken package's error: " + failure)
   }
 
+  """
+  A package's test binary taken from the module's whole collection is planned
+  alone, as go test -c of the package plans it; one taken from a subset is
+  planned with the subset's other packages, and no others. The base's go
+  command writes the packages of each test plan it makes (go test -c -n) to a
+  cache volume of the run's own.
+  """
+  testBinaryPlanSetCheck: Void @check {
+    let run = Random.string
+    let ws = ["a", "b", "c"].reduce(directory.withNewFile("go.mod", "module example.com/plans\n\ngo 1.22\n")) { dir, name =>
+      dir
+        .withNewFile(name + "/" + name + ".go", "package " + name + "\n\n// Name is the package's name.\nconst Name = \"" + name + "\"\n")
+        .withNewFile(name + "/" + name + "_test.go", "package " + name + "\n\nimport \"testing\"\n\nfunc TestName(t *testing.T) {\n\tif Name != \"" + name + "\" {\n\t\tt.Fatal(Name)\n\t}\n}\n")
+    }.asWorkspace
+    let whole = testPlans(ws, run + "-whole", [])
+    assert(whole == "a", "a's test binary from the whole collection was planned with: " + whole)
+    let subset = testPlans(ws, run + "-subset", ["a", "b"])
+    assert(subset == "a b", "a's test binary from the subset of a and b was planned with: " + subset)
+  }
+
+  # The packages of the test plans (go test -c -n) the go command made for
+  # package a's test binary of ws, taken from the module's whole collection,
+  # or with keys, from that subset of it: one line per plan, the packages
+  # sorted, with a go command that writes them to a cache volume of run's own.
+  let testPlans(ws: Workspace!, run: String!, keys: [String!]!): String! {
+    let witness = cacheVolume("go-dev-test-plans-" + run)
+    let counting = container
+      .from("golang:1.27.3-alpine")
+      .withNewFile(
+        "/count/go",
+        "#!/bin/sh\nif [ \"$1\" = test ]; then\n\tfor a in \"$@\"; do\n\t\tif [ \"$a\" = -n ]; then\n\t\t\tfor p in \"$@\"; do\n\t\t\t\tcase \"$p\" in test|-*|/*) ;; *) echo \"${p#./}\" | sed 's#^example.com/plans/##' ;; esac\n\t\t\tdone | sort | tr '\\n' ' ' | sed 's/ $//' >> /witness/plans\n\t\t\techo >> /witness/plans\n\t\tfi\n\tdone\nfi\nexec /usr/local/go/bin/go \"$@\"\n",
+        permissions: 493,
+      )
+      .withEnvVariable("PATH", "/count:/go/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+      .withEnvVariable("GO_DEV_TEST_PLANS_RUN", run)
+      .withMountedCache("/witness", witness)
+    let packages = go(base: counting).modules(ws).get(key: ".").packages(ws)
+    let from = if (keys.length == 0) { packages } else { packages.subset(keys: keys) }
+    assert(from.get(key: "a").testBinary(ws).size > 0, "a's test binary is empty")
+    container
+      .from("alpine:3.23")
+      .withEnvVariable("GO_DEV_TEST_PLANS_RUN", run)
+      .withMountedCache("/witness", witness)
+      .withExec(["sh", "-c", "cat /witness/plans 2>/dev/null || true"])
+      .stdout
+      .trimSpace
+  }
+
   # A module example.com/<name> whose root package calls strings.<call> and
   # imports net/url, and a package of its own that imports encoding/json.
   let dependencyModule(name: String!, call: String!): Directory! {
