@@ -680,10 +680,6 @@ type ArchiveCache struct {
 	// Go's own tools the build's execs run, built by its toolchain for every
 	// machine an engine runs on: pack, which packages with assembly run.
 	Tools *dagger.Directory
-	// The shared dependency calls the build made (sharedImports), each
-	// call's result by its ID in this session: a cache that is to have the
-	// calls whole, not only each package's build, takes these.
-	SharedDependencies []string
 }
 
 // ArchiveBuilds compiles what Archives compiles, with its arguments, and
@@ -738,15 +734,7 @@ func (m *Gobuild) ArchiveBuilds(
 	for _, bl := range w.order {
 		dirs = append(dirs, w.results[bl.id].dir)
 	}
-	shared := make([]string, 0, len(w.build.sharedCalls))
-	for _, call := range w.build.sharedCalls {
-		id, err := call.ID(ctx)
-		if err != nil {
-			return nil, err
-		}
-		shared = append(shared, string(id))
-	}
-	return &ArchiveCache{Builds: dirs, Downloads: w.build.downloads, Tool: w.build.hdr, ManifestTool: manifestTools(w.build.toolImage, w.build.target.platform()), ManifestSource: manifestSource(), Tools: w.build.tools, SharedDependencies: shared}, nil
+	return &ArchiveCache{Builds: dirs, Downloads: w.build.downloads, Tool: w.build.hdr, ManifestTool: manifestTools(w.build.toolImage, w.build.target.platform()), ManifestSource: manifestSource(), Tools: w.build.tools}, nil
 }
 
 // listFields are the fields of go list's output Archives reads: the
@@ -1073,10 +1061,8 @@ type build struct {
 	// target is what the build compiles for.
 	target target
 	// shared is the import paths whose packages the dependency call compiles
-	// in calls of their own (sharedImports), and sharedCalls those calls,
-	// once made.
-	shared      []string
-	sharedCalls []*dagger.GobuildDependencyBuilds
+	// in calls of their own (sharedImports).
+	shared []string
 }
 
 // newBuild prepares a build of the source; pkgDirs are the directories of

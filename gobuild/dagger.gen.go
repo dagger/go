@@ -66,13 +66,12 @@ func (r *Gobuild) UnmarshalJSON(bs []byte) error {
 
 func (r ArchiveCache) MarshalJSON() ([]byte, error) {
 	var concrete struct {
-		Builds             []*dagger.Directory
-		Downloads          []*dagger.Directory
-		Tool               *dagger.Directory
-		ManifestTool       *dagger.Directory
-		ManifestSource     *dagger.Directory
-		Tools              *dagger.Directory
-		SharedDependencies []string
+		Builds         []*dagger.Directory
+		Downloads      []*dagger.Directory
+		Tool           *dagger.Directory
+		ManifestTool   *dagger.Directory
+		ManifestSource *dagger.Directory
+		Tools          *dagger.Directory
 	}
 	concrete.Builds = r.Builds
 	concrete.Downloads = r.Downloads
@@ -80,19 +79,17 @@ func (r ArchiveCache) MarshalJSON() ([]byte, error) {
 	concrete.ManifestTool = r.ManifestTool
 	concrete.ManifestSource = r.ManifestSource
 	concrete.Tools = r.Tools
-	concrete.SharedDependencies = r.SharedDependencies
 	return json.Marshal(&concrete)
 }
 
 func (r *ArchiveCache) UnmarshalJSON(bs []byte) error {
 	var concrete struct {
-		Builds             []*dagger.Directory
-		Downloads          []*dagger.Directory
-		Tool               *dagger.Directory
-		ManifestTool       *dagger.Directory
-		ManifestSource     *dagger.Directory
-		Tools              *dagger.Directory
-		SharedDependencies []string
+		Builds         []*dagger.Directory
+		Downloads      []*dagger.Directory
+		Tool           *dagger.Directory
+		ManifestTool   *dagger.Directory
+		ManifestSource *dagger.Directory
+		Tools          *dagger.Directory
 	}
 	err := json.Unmarshal(bs, &concrete)
 	if err != nil {
@@ -104,7 +101,6 @@ func (r *ArchiveCache) UnmarshalJSON(bs []byte) error {
 	r.ManifestTool = concrete.ManifestTool
 	r.ManifestSource = concrete.ManifestSource
 	r.Tools = concrete.Tools
-	r.SharedDependencies = concrete.SharedDependencies
 	return nil
 }
 

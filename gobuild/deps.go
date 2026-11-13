@@ -227,8 +227,8 @@ func (b *build) dependencies(ctx context.Context, w *walker, nodes map[string]*n
 	for i, n := range pkgs {
 		at[n.Name] = i
 	}
-	layers, shared := dependencyLayers(pkgs, b.shared)
-	for li, layer := range layers {
+	layers, _ := dependencyLayers(pkgs, b.shared)
+	for _, layer := range layers {
 		call, err := b.dependencyCall(ctx, w, pkgs, layer, archives, at)
 		if err != nil {
 			return nil, err
@@ -246,9 +246,6 @@ func (b *build) dependencies(ctx context.Context, w *walker, nodes map[string]*n
 		}
 		for k, i := range layer {
 			archives[i], outs[i] = la[k], lo[k]
-		}
-		if li < shared {
-			b.sharedCalls = append(b.sharedCalls, call)
 		}
 	}
 	// The call returns no object code, so it is the same call whether the

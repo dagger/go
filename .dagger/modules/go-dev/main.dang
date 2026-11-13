@@ -1567,26 +1567,24 @@ type GoDev {
 
   """
   With shared imports, a build compiles the packages they reach in
-  dependency calls of their own, the standard library's and then the rest's,
-  and archive builds name those calls; what the build compiles, and the
-  binary it links, stay as they are without them.
+  dependency calls of their own, the standard library's and then the rest's;
+  what the build compiles, and the binary it links, stay as they are
+  without them.
   """
-  sharedDependenciesCheck(ws: Workspace!): Void @check {
+  sharedImportsCheck(ws: Workspace!): Void @check {
     let plain = go(version: "1.27.3").module(ws, downloadsFixturePath)
     let both = go(version: "1.27.3", sharedImports: ["golang.org/x/sync/errgroup"]).module(ws, downloadsFixturePath)
     let std = go(version: "1.27.3", sharedImports: ["context"]).module(ws, downloadsFixturePath)
     let plainBuilds = plain.archiveBuilds(ws, dependencies: true, packages: ["."], noTests: true)
     let bothBuilds = both.archiveBuilds(ws, dependencies: true, packages: ["."], noTests: true)
     let stdBuilds = std.archiveBuilds(ws, dependencies: true, packages: ["."], noTests: true)
-    assert(plainBuilds.sharedDependencies.length == 0, "without shared imports: " + toString(plainBuilds.sharedDependencies.length) + " shared dependency calls")
-    # errgroup reaches the standard library and its own module.
-    assert(bothBuilds.sharedDependencies.length == 2, "errgroup shared: " + toString(bothBuilds.sharedDependencies.length) + " shared dependency calls, for the standard library's and x/sync's")
-    assert(stdBuilds.sharedDependencies.length == 1, "context shared: " + toString(stdBuilds.sharedDependencies.length) + " shared dependency calls, for the standard library's alone")
     # The same packages, built the same: each build's own content.
     let plainDigests = plainBuilds.builds.{{digest}}.map { d => d.digest }
     let bothDigests = bothBuilds.builds.{{digest}}.map { d => d.digest }
     assert(plainDigests.length == bothDigests.length, "shared imports changed the builds: " + toString(bothDigests.length) + " against " + toString(plainDigests.length))
     assert(bothDigests.filter { d => plainDigests.contains(d) == false }.length == 0, "shared imports changed what a package build compiles")
+    let stdDigests = stdBuilds.builds.{{digest}}.map { d => d.digest }
+    assert(stdDigests.length == plainDigests.length and stdDigests.filter { d => plainDigests.contains(d) == false }.length == 0, "the standard library's shared imports changed what a package build compiles")
     let plainBinary = plain.packages(ws).get(key: downloadsFixturePath).binary(ws).digest
     let bothBinary = both.packages(ws).get(key: downloadsFixturePath).binary(ws).digest
     assert(plainBinary == bothBinary, "shared imports changed the binary")

@@ -805,13 +805,6 @@ type GoArchiveBuilds {
   an engine of that platform runs.
   """
   helperBinary: File!
-
-  """
-  The shared dependency calls the archives made (sharedImports), each
-  call's result by its ID in this session: a cache that is to have those
-  calls whole, not only each package's build, takes these.
-  """
-  sharedDependencies: [String!]!
 }
 
 """
@@ -2298,7 +2291,6 @@ type GoModule {
         tools: cache.tools,
         helper: gomod.includesHelper,
         helperBinary: gomod.includesHelperBinary(platform ?? gomod.hostPlatform),
-        sharedDependencies: cache.sharedDependencies,
       )
     } rescue {
       err: Error => raise "Go archive builds of module " + path + ": " + err.message

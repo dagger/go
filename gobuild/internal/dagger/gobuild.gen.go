@@ -936,18 +936,6 @@ func (r *GobuildArchiveCache) ManifestTool() *Directory {
 	return new(Directory).WithGraphQLQuery(q)
 }
 
-// The shared dependency calls the build made (sharedImports), each
-// call's result by its ID in this session: a cache that is to have the
-// calls whole, not only each package's build, takes these.
-func (r *GobuildArchiveCache) SharedDependencies(ctx context.Context) ([]string, error) {
-	q := r.query.Select("sharedDependencies")
-
-	var response []string
-
-	q = q.Bind(&response)
-	return response, q.Execute(ctx)
-}
-
 // gohdr, the tool the build's execs run, for every machine an engine
 // runs on (machineTools).
 func (r *GobuildArchiveCache) Tool() *Directory {
