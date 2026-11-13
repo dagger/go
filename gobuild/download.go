@@ -182,8 +182,7 @@ func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDirs []
 		seenPkgs = map[string]bool{}
 		seenDirs = map[string]bool{}
 		wg       sync.WaitGroup
-		// Downloads wait on the network more than the CPU.
-		gate = make(chan struct{}, 32)
+		gate     = make(chan struct{}, downloadConcurrency)
 	)
 	start := func(e sumEntry) *module {
 		name := moduleDirName(e)
@@ -420,6 +419,11 @@ type sourceImports struct {
 }
 
 type sourceModule struct{ dir, path string }
+
+// downloadConcurrency is how many module downloads a call runs at once.
+// They wait on the network more than the CPU, but each is an exec with its
+// own lookups and connections.
+const downloadConcurrency = 32
 
 // parseSourceImports parses "gohdr imports": its module lines, and its Go
 // files' lines (importLine), of the files that build for t, and of all.

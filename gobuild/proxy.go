@@ -93,23 +93,20 @@ func (m *Gobuild) ModuleProxy(
 	}
 	dirs := make([]*dagger.Directory, len(entries))
 	errs := make([]error, len(entries))
-	var wg sync.WaitGroup
-	for i, e := range entries {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			var dir *dagger.Directory
-			if e.zip != "" {
-				dir = d.download(e)
-			} else {
-				dir = d.downloadMeta(e)
-			}
-			if dirs[i], errs[i] = dir.Sync(ctx); errs[i] != nil {
-				errs[i] = fmt.Errorf("%s@%s: %w", e.path, e.version, withStderr(errs[i]))
-			}
-		}()
-	}
-	wg.Wait()
+	// As many downloads at once as a build's discovery runs: each is an
+	// exec of its own, with its own lookups and connections.
+	eachBounded(len(entries), downloadConcurrency, func(i int) {
+		e := entries[i]
+		var dir *dagger.Directory
+		if e.zip != "" {
+			dir = d.download(e)
+		} else {
+			dir = d.downloadMeta(e)
+		}
+		if dirs[i], errs[i] = dir.Sync(ctx); errs[i] != nil {
+			errs[i] = fmt.Errorf("%s@%s: %w", e.path, e.version, withStderr(errs[i]))
+		}
+	})
 	if err := errors.Join(errs...); err != nil {
 		return nil, fmt.Errorf("module proxy: %w", err)
 	}
@@ -214,4 +211,20 @@ func (d *downloader) downloadMeta(e sumEntry) *dagger.Directory {
 	return ctr.
 		WithExec([]string{"sh", "-c", script}, bare).
 		Directory(modCacheDir)
+}
+
+// eachBounded calls f for 0 to n-1, at most limit at once, and returns when
+// every call has.
+func eachBounded(n, limit int, f func(i int)) {
+	gate := make(chan struct{}, limit)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		gate <- struct{}{}
+		go func() {
+			defer func() { <-gate; wg.Done() }()
+			f(i)
+		}()
+	}
+	wg.Wait()
 }
