@@ -71,11 +71,11 @@ var (
 	reCompile = regexp.MustCompile(`(/pkg/tool/[^/\s]+/compile) `)
 	// The Go linker, run directly or through a -toolexec program. Only a
 	// command runs it: parsePlan keeps heredoc data, which may name it, out.
-	reLink       = regexp.MustCompile(`/pkg/tool/[^/\s]+/link `)
+	reLink = regexp.MustCompile(`/pkg/tool/[^/\s]+/link `)
 	// reToolDir is the host part of the toolchain's tool directory as the
 	// plan names it, by the machine's GOHOSTOS_GOHOSTARCH, e.g. the
 	// "/pkg/tool/linux_amd64/" of /usr/local/go/pkg/tool/linux_amd64/compile.
-	reToolDir = regexp.MustCompile(`/pkg/tool/[^/\s]+/`)
+	reToolDir    = regexp.MustCompile(`/pkg/tool/[^/\s]+/`)
 	reDepArchive = regexp.MustCompile(`\$WORK/(b\d+)/_pkg_\.a`)
 	// cat >TARGET << 'EOF' [# internal]
 	reHeredoc = regexp.MustCompile(`^cat >(\S+) << 'EOF'( # internal)?$`)
@@ -124,15 +124,31 @@ func stableName(importPath string) string {
 // parsePlan splits a go build -n plan into per-package blocks and records
 // each block's input files and dependencies.
 func parsePlan(plan string, r roots) (map[string]*block, error) {
-	return parseBlocks(plan, r, false)
+	return parseBlocks(plan, r, planBinary)
+}
+
+// parseTestsPlan is parsePlan for a go test -c plan of several packages'
+// test binaries, written to -o /dev/null: each test main's block links.
+func parseTestsPlan(plan string, r roots) (map[string]*block, error) {
+	return parseBlocks(plan, r, planTests)
 }
 
 // parseArchivePlan is parsePlan for a plan of many packages whose archives
 // are what's wanted: a main package's block is its compile, without the
 // link that follows it, and no block links.
 func parseArchivePlan(plan string, r roots) (map[string]*block, error) {
-	return parseBlocks(plan, r, true)
+	return parseBlocks(plan, r, planArchives)
 }
+
+// planKind is what a plan builds: one binary or test binary, which links
+// once, several test binaries, each linked, or archives, linked by none.
+type planKind int
+
+const (
+	planBinary planKind = iota
+	planTests
+	planArchives
+)
 
 // identifyVariants names each block of a "go list -export -deps -test -n"
 // plan by its package's ID in the listing, ids: "p" for a plain package,
@@ -146,11 +162,12 @@ func parseArchivePlan(plan string, r roots) (map[string]*block, error) {
 // it as main, or with -buildmode=plugin, which compiles both alike, the
 // first by step, is the plain package. The test
 // mains, which compile a _testmain.go no plan holds, are left out: nothing
-// imports them. Each block's name follows its ID, so variants of a package
-// don't share one.
-func identifyVariants(blocks map[string]*block, ids, mains map[string]bool) error {
+// imports them. With testMains, as in a go test -c plan of several test
+// binaries, they stay, each named by its own ID, "p.test". Each block's name
+// follows its ID, so variants of a package don't share one.
+func identifyVariants(blocks map[string]*block, ids, mains map[string]bool, testMains bool) error {
 	for id, b := range blocks {
-		if strings.HasSuffix(b.importPath, ".test") {
+		if strings.HasSuffix(b.importPath, ".test") && !testMains {
 			delete(blocks, id)
 		}
 	}
@@ -184,6 +201,14 @@ func identifyVariants(blocks map[string]*block, ids, mains map[string]bool) erro
 		}
 		b := blocks[id]
 		if b.isProfile {
+			return b.importPath, nil
+		}
+		if strings.HasSuffix(b.importPath, ".test") {
+			// A test main, which only testMains keeps.
+			if !ids[b.importPath] {
+				return "", fmt.Errorf("plan step %s, %s, is no package the listing has", id, b.importPath)
+			}
+			resolved[id] = b.importPath
 			return b.importPath, nil
 		}
 		forTest := ""
@@ -267,7 +292,7 @@ func (b *block) compilesTests() bool {
 	return false
 }
 
-func parseBlocks(plan string, r roots, archives bool) (map[string]*block, error) {
+func parseBlocks(plan string, r roots, kind planKind) (map[string]*block, error) {
 	blocks := map[string]*block{}
 	var cur *block
 	cwd := r.Cwd
@@ -281,6 +306,21 @@ func parseBlocks(plan string, r roots, archives bool) (map[string]*block, error)
 	// The block whose link is being left out, from its import config to the
 	// next block.
 	linking := ""
+	// enter makes b the block the next lines are, from where the plan is:
+	// the go command prints "cd" only when the directory changes, so the
+	// current directory is carried into the block explicitly, whenever its
+	// lines start or, as with -cover, resume after another block's. A block
+	// never works in another's work directory, which its exec doesn't have:
+	// the plan left the previous block there, as -cover's runs of the cover
+	// tool do, and the block's own commands change directory before they
+	// need one. Carried in, it would make the block depend on the other.
+	enter := func(b *block) {
+		cur = b
+		if ref := firstWorkRef(cwd); ref != "" && ref != b.id {
+			cwd = r.Cwd
+		}
+		cur.lines = append(cur.lines, "mkdir -p "+shQuote(cwd)+" && cd "+shQuote(cwd))
+	}
 	lines := strings.Split(plan, "\n")
 	for i := 0; i < len(lines); i++ {
 		// go -n prints its work directory as "$WORK", which is not an
@@ -289,7 +329,12 @@ func parseBlocks(plan string, r roots, archives bool) (map[string]*block, error)
 		// "./$WORK/...". It runs it as the absolute path it is.
 		line := strings.ReplaceAll(lines[i], "./$WORK/", "$WORK/")
 		if line == "#" && i+2 < len(lines) && strings.HasPrefix(lines[i+1], "# ") && lines[i+2] == "#" {
-			if h := strings.TrimPrefix(lines[i+1], "# "); cur != nil && cur.importPath == "" {
+			// Go 1.26 prints a package's header after its work directory's
+			// mkdir, and Go 1.25 before it. A header followed by a new
+			// block's mkdir is that block's: before a test binary's first
+			// package, the block still without a header is the test main's,
+			// whose work directory is made first.
+			if h := strings.TrimPrefix(lines[i+1], "# "); cur != nil && cur.importPath == "" && !mkdirsNewBlock(lines[i+3:], blocks) {
 				cur.importPath = h
 			} else {
 				pending = h
@@ -313,7 +358,7 @@ func parseBlocks(plan string, r roots, archives bool) (map[string]*block, error)
 			}
 			linking = ""
 		}
-		if archives && !content && strings.HasPrefix(line, "cat >$WORK/") {
+		if kind == planArchives && !content && strings.HasPrefix(line, "cat >$WORK/") {
 			if m := reLinkCfg.FindStringSubmatch(line); m != nil {
 				linking = m[1]
 				continue
@@ -325,7 +370,7 @@ func parseBlocks(plan string, r roots, archives bool) (map[string]*block, error)
 		// header yet is that block's, and a header waiting names it.
 		if !content {
 			if b, ok := blocks[firstWorkRef(line)]; ok && b.importPath == "" && b != cur {
-				cur = b
+				enter(b)
 				if pending != "" {
 					b.importPath, pending = pending, ""
 				}
@@ -338,10 +383,7 @@ func parseBlocks(plan string, r roots, archives bool) (map[string]*block, error)
 				blocks[m[1]] = b
 				pending = ""
 			}
-			cur = b
-			// The go command prints "cd" only when the directory changes, so
-			// carry the current directory into each block explicitly.
-			cur.lines = append(cur.lines, "mkdir -p "+shQuote(cwd)+" && cd "+shQuote(cwd))
+			enter(b)
 		}
 		if cur == nil {
 			continue
@@ -435,8 +477,13 @@ func parseBlocks(plan string, r roots, archives bool) (map[string]*block, error)
 			return nil, fmt.Errorf("plan step %s has no package header", id)
 		}
 	}
-	if !archives {
+	switch kind {
+	case planBinary:
 		if err := markLink(blocks); err != nil {
+			return nil, err
+		}
+	case planTests:
+		if err := markTestLinks(blocks); err != nil {
 			return nil, err
 		}
 	}
@@ -588,6 +635,30 @@ func markLink(blocks map[string]*block) error {
 	}
 	if main.out == "" {
 		return fmt.Errorf("%w: no link output for %s", errUnsupported, main.importPath)
+	}
+	return nil
+}
+
+// markTestLinks marks the blocks of a plan of several test binaries that
+// link: each test main's, which links its binary where it stays, as with
+// -o /dev/null nothing copies it out.
+func markTestLinks(blocks map[string]*block) error {
+	n := 0
+	for id, b := range blocks {
+		if b.linkAt == 0 {
+			continue
+		}
+		b.isLink = true
+		if m := reTestLinkOut.FindStringSubmatch(b.linkLine()); m != nil && m[1] == id {
+			b.out = m[2]
+		}
+		if b.out == "" {
+			return fmt.Errorf("%w: no link output for %s", errUnsupported, b.importPath)
+		}
+		n++
+	}
+	if n == 0 {
+		return fmt.Errorf("%w: no test binary in the plan", errUnsupported)
 	}
 	return nil
 }
@@ -1138,6 +1209,23 @@ func quoteArg(s string) string {
 		return shQuote(s)
 	}
 	return s
+}
+
+// mkdirsNewBlock reports whether the first of lines that isn't blank makes
+// the work directory of a block not in blocks yet.
+func mkdirsNewBlock(lines []string, blocks map[string]*block) bool {
+	for _, l := range lines {
+		if l == "" {
+			continue
+		}
+		m := mkdirStep(l)
+		if m == nil {
+			return false
+		}
+		_, ok := blocks[m[1]]
+		return !ok
+	}
+	return false
 }
 
 // linkLine is the plan's link command, or "" for a block that doesn't link.

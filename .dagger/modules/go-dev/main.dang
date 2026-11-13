@@ -688,13 +688,18 @@ type GoDev {
   """
   A package's test binary is the one go test -c builds without vet, byte for
   byte but for its build IDs, with and without -race and an -ldflags stamp,
-  -cover and -coverpkg, and for packages whose test files hold only an
-  aliased testing import, a benchmark or a TestMain:
+  -cover, -coverpkg and -gcflags without a package pattern, and for packages
+  whose test files hold only an aliased testing import, a benchmark or a
+  TestMain. Each is taken from its module's collection, so it is planned with
+  the collection's other test binaries, except with -coverpkg or that
+  -gcflags, which plan it alone. Each covers:
   the package with its test files, its external test package, a dependency
   only its tests import, an embed in a test file, and a package that imports
   it, recompiled against its test variant. The binaries list the same tests
-  and pass and fail the same ones; -race finds the race in TestRace. All of
-  it under Go 1.26 and Go 1.27.
+  and pass and fail the same ones; -race finds the race in TestRace. So is
+  each of a package set's test binaries, built from one plan of them all, with
+  and without -race and the stamp, and with -cover. All of it under Go 1.26
+  and Go 1.27.
   """
   testBinaryCheck: Void @check {
     let failures = testBinaryFailures("1.26.1") + testBinaryFailures("1.27.3")
@@ -712,6 +717,7 @@ type GoDev {
       .withNewFile("lib/ext_test.go", "package lib_test\n\nimport (\n\t\"testing\"\n\n\t\"example.com/tb/lib\"\n\t\"example.com/tb/user\"\n)\n\nfunc TestUser(t *testing.T) {\n\tif user.Twice() != 2*lib.Answer() {\n\t\tt.Fatal(\"wrong\")\n\t}\n}\n")
       .withNewFile("testonly/testonly.go", "package testonly\n\n// Want is what the test wants.\nfunc Want() int { return 42 }\n")
       .withNewFile("user/user.go", "package user\n\nimport \"example.com/tb/lib\"\n\n// Twice is twice the answer.\nfunc Twice() int { return 2 * lib.Answer() }\n")
+      .withNewFile("user/user_test.go", "package user\n\nimport \"testing\"\n\nfunc TestTwice(t *testing.T) {\n\tif Twice() != 84 {\n\t\tt.Fatal(\"wrong\")\n\t}\n}\n")
       # Test files go test -c builds whatever they hold, in command packages,
       # which are package keys whatever their tests.
       .withNewFile("alias/main.go", goMain("alias"))
@@ -720,6 +726,10 @@ type GoDev {
       .withNewFile("bench/bench_test.go", "package main\n\nimport \"testing\"\n\nfunc BenchmarkNothing(b *testing.B) {}\n")
       .withNewFile("tmain/main.go", goMain("tmain"))
       .withNewFile("tmain/main_test.go", "package main\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestMain(m *testing.M) { os.Exit(m.Run()) }\n")
+      # Test files only for another GOOS: go test builds the package no test
+      # binary on Linux.
+      .withNewFile("winonly/main.go", goMain("winonly"))
+      .withNewFile("winonly/main_windows_test.go", "package main\n\nimport \"testing\"\n\nfunc TestWindows(t *testing.T) {}\n")
     let ws = source.asWorkspace
     let stamp = "-ldflags=-X example.com/tb/lib.stamp=STAMPED"
     let cgo = container
@@ -727,7 +737,7 @@ type GoDev {
       .withExec(["apk", "add", "--no-cache", "build-base", "binutils"])
       .withEnvVariable("CGO_ENABLED", "1")
     # Each variant is "<package>;<flag>;...": -race is built with cgo.
-    let variants = ["lib", "lib;-race;" + stamp, "lib;-cover", "lib;-coverpkg=./...", "alias", "bench", "tmain"]
+    let variants = ["lib", "lib;-race;" + stamp, "lib;-cover", "lib;-coverpkg=./...", "lib;-gcflags=-N -l", "alias", "bench", "tmain"]
     let failures = variants.map { variant =>
       let pkg = variant.split(";").takeFirst(1).join("")
       let flags = variant.split(";").dropFirst(1)
@@ -800,7 +810,44 @@ type GoDev {
       if (crossed.trimSpace == "same") { "" } else { "Go " + version + ": " + crossed },
       if (windows == "lib.test.exe") { "" } else { "Go " + version + ": the Windows test binary is named " + windows },
     ]
-    (failures + platformFailures).filter { failure => failure != "" }
+    # Every package's test binary from one plan of them all is go test -c's
+    # of that package alone: lib's binary has user recompiled against lib's
+    # test variant, and user's own has user and lib as they are. winonly,
+    # whose only test file is Windows', has none.
+    let setFailures = ["", "-race;" + stamp, "-cover"].map { variant =>
+      let flags = variant.split(";").filter { f => f != "" }
+      let race = flags.contains("-race")
+      let tool = if (race) { go(base: cgo, buildFlags: flags) } else {
+        go(
+          version: version,
+          buildFlags: flags,
+        )
+      }
+      let built = tool.modules(ws).get(key: ".").packages(ws).testBinary(ws)
+      let compared = cgo
+        .withEnvVariable("CGO_ENABLED", if (race) { "1" } else { "0" })
+        .withDirectory("/src", source)
+        .withWorkdir("/src")
+        .withDirectory("/module", built)
+        .withExec(["sh", "-c", """
+          set -e
+          find /module -type f | sort > /found
+          printf '%s\n' /module/alias/alias.test /module/bench/bench.test /module/lib/lib.test /module/tmain/tmain.test /module/user/user.test > /want
+          cmp -s /found /want || { echo "the set holds:"; cat /found; }
+          for p in alias bench lib tmain user; do
+            go test -c -vet=off "$@" -o /plain/$p/$p.test ./$p
+            for b in plain module; do
+              objcopy --remove-section=.note.go.buildid --remove-section=.note.gnu.build-id /$b/$p/$p.test /$b/$p/stripped
+              /$b/$p/$p.test -test.list . > /$b/$p/list
+            done
+            cmp -s /plain/$p/stripped /module/$p/stripped || echo "$p: the bytes differ"
+            cmp -s /plain/$p/list /module/$p/list || echo "$p: the test lists differ"
+          done
+        """, "compare"] + flags)
+        .stdout
+      if (compared.trimSpace == "") { "" } else { "the set's test binaries, " + variant + " (Go " + version + "): " + compared }
+    }
+    (failures + platformFailures + setFailures).filter { failure => failure != "" }
   }
 
   """
@@ -899,6 +946,34 @@ type GoDev {
     assert(first.contains(" 42") and first != " 42\n", "the stamped binary said: " + first)
     assert(outside == first, "an import outside the build made a new plan: " + first + " then " + outside)
     assert(inside != first, "an import in the build left the plan as it was: " + first + " then " + inside)
+    null
+  }
+
+  """
+  A build reads only the source of the packages it may load: an edit of a
+  file another package embeds leaves its plan as it was, where the plan
+  used to read every file of the workspace that isn't Go. The base's go
+  command stamps the binary as in planReuseCheck.
+  """
+  scopeCheck: Void @check {
+    let stamping = container
+      .from("golang:1.27.3-alpine")
+      .withNewFile(
+        "/stamp/go",
+        "#!/bin/sh\nif [ \"$1\" = build ]; then\n\tfor a in \"$@\"; do\n\t\tif [ \"$a\" = -n ]; then\n\t\t\tshift\n\t\t\texec /usr/local/go/bin/go build \"-ldflags=-X main.stamp=$(od -An -N8 -tx8 /dev/urandom | tr -d ' ')\" \"$@\"\n\t\tfi\n\tdone\nfi\nexec /usr/local/go/bin/go \"$@\"\n",
+        permissions: 493,
+      )
+      .withEnvVariable("PATH", "/stamp:/go/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+    let ws = directory
+      .withNewFile("go.mod", "module example.com/scope\n\ngo 1.27\n")
+      .withNewFile("main.go", "package main\n\nimport (\n\t\"fmt\"\n\n\t\"example.com/scope/lib\"\n)\n\nvar stamp string\n\nfunc main() { fmt.Println(stamp, lib.Answer) }\n")
+      .withNewFile("lib/lib.go", "package lib\n\nconst Answer = 42\n")
+      .withNewFile("other/other.go", "package other\n\nimport _ \"embed\"\n\n//go:embed data.txt\nvar Data string\n")
+      .withNewFile("other/data.txt", "one\n")
+    let first = stampedSaid(stamping, ws)
+    let edited = stampedSaid(stamping, ws.withNewFile("other/data.txt", "two\n"))
+    assert(first.contains(" 42") and first != " 42\n", "the stamped binary said: " + first)
+    assert(edited == first, "an edit outside the build made a new plan: " + first + " then " + edited)
     null
   }
 
@@ -1012,6 +1087,40 @@ type GoDev {
     let built = go(base: base).modules(ws).get(key: ".").packages(ws).get(key: ".").binary(ws)
     let out = base.withFile("/usr/local/bin/depinc", built).withExec(["depinc"]).stdout
     assert(out == "42 7\n", "the dependency's included values: " + out)
+    null
+  }
+
+  """
+  A package under a dependency's testdata directory, which no pattern
+  matches but an import path names like any other, builds into a binary
+  and into a test binary that imports it only from its tests:
+  google.golang.org/grpc/testdata, which grpc's own programs import. The
+  binary prints what the go command's build of it prints, and the test
+  passes.
+  """
+  depTestdataCheck: Void @check {
+    let src = directory
+      .withNewFile("go.mod", "module example.com/deptestdata\n\ngo 1.24\n\nrequire google.golang.org/grpc v1.67.1\n")
+      .withNewFile("main.go", "package main\n\nimport (\n\t\"fmt\"\n\t\"path/filepath\"\n\n\t\"google.golang.org/grpc/testdata\"\n)\n\nfunc main() { fmt.Println(filepath.Base(filepath.Dir(testdata.Path(\"x509/server_cert.pem\")))) }\n")
+      .withNewFile("lib/lib.go", "package lib\n\n// Answer is the answer.\nfunc Answer() int { return 42 }\n")
+      .withNewFile("lib/lib_test.go", "package lib\n\nimport (\n\t\"path/filepath\"\n\t\"testing\"\n\n\t\"google.golang.org/grpc/testdata\"\n)\n\nfunc TestPath(t *testing.T) {\n\tif got := filepath.Base(filepath.Dir(testdata.Path(\"x509/server_cert.pem\"))); got != \"x509\" || Answer() != 42 {\n\t\tt.Fatalf(\"testdata.Path gave %q\", got)\n\t}\n}\n")
+    # go.sum from go mod tidy, and what the go command's own build prints.
+    let made = container
+      .from("golang:1.27.3-alpine")
+      .withDirectory("/ws", src)
+      .withWorkdir("/ws")
+      .withExec(["sh", "-c", "set -e; go mod tidy; go run . > /plain.txt; go test ./lib"])
+    let want = made.file("/plain.txt").contents
+    assert(want == "x509\n", "the go command's binary printed: " + want)
+    let ws = made.directory("/ws").asWorkspace
+    let packages = go(version: "1.27.3").modules(ws).get(key: ".").packages(ws)
+    let out = container
+      .from("alpine:3.23")
+      .withFile("/usr/local/bin/deptestdata", packages.get(key: ".").binary(ws))
+      .withExec(["deptestdata"])
+      .stdout
+    assert(out == want, "the binary printed: " + out)
+    packages.get(key: "lib").tests.test(ws)
     null
   }
 
@@ -1195,6 +1304,236 @@ type GoDev {
   }
 
   """
+  The dependencies' archives come with the listing golangci-lint's export
+  driver answers code generation from, with no go command: each package
+  outside the module, with its imports. It holds nothing of the module's own
+  packages, so it stays the same across an edit of them.
+  """
+  archivesListingCheck: Void @check {
+    let src = directory
+      .withNewFile("go.mod", "module example.com/app\n\ngo 1.22\n")
+      .withNewFile("main.go", "package main\n\nimport \"strings\"\n\nfunc main() { println(strings.ToUpper(\"x\")) }\n")
+    let listed = dependenciesListing(src)
+    assert(listed.contains("{\"ImportPath\":\"strings\",\"Name\":\"strings\",\"Imports\":["), "the root package's import is not listed with its imports: " + listed)
+    assert(listed.contains("example.com/app") == false, "the listing holds the module's own package: " + listed)
+    let edited = dependenciesListing(src.withNewFile("main.go", "package main\n\nimport \"strings\"\n\nfunc main() { println(strings.ToLower(\"X\")) }\n"))
+    assert(edited == listed, "an edit of the module's own package changed the listing")
+  }
+
+  """
+  Two modules with different code and the same imports outside them, as a
+  later module's generated code has, get the same dependencies' archives,
+  listing and manifest, which their own packages' imports reach (encoding/json
+  through a package of the module), and the same as a build of every package
+  of the module makes, which reads the whole source.
+  """
+  dependencyArchivesCheck: Void @check {
+    let one = dependencyModule("one", "ToUpper")
+    let two = dependencyModule("two", "ToLower")
+    let a = dependencyArchives(one, ["."])
+    let b = dependencyArchives(two, ["."])
+    let whole = dependencyArchives(one, ["./..."])
+    assert(a.contains("encoding/json"), "an import reached through the module's own package is not archived: " + a)
+    assert(a.contains("example.com/") == false, "the module's own packages are archived: " + a)
+    assert(a == b, "two modules with the same imports got different dependencies' archives:\n" + a + "\n" + b)
+    assert(a == whole, "the dependencies' archives differ from those of every package:\n" + a + "\n" + whole)
+  }
+
+  """
+  A dependency that requires the module and imports one of its packages
+  back, which the module's own source provides, gets the same dependencies'
+  archives as a build of every package: the stand-in for the module's own
+  packages fails there, as its go.sum has no entry for the module, and the
+  archives come from the module's own source. The dependency comes from a
+  file proxy in the base.
+  """
+  backImportArchivesCheck: Void @check {
+    let dep = directory
+      .withNewFile("go.mod", "module example.com/b\n\ngo 1.22\n\nrequire example.com/a v0.1.0\n")
+      .withNewFile("b.go", "package b\n\nimport \"example.com/a/lib\"\n\nvar Name = lib.Name\n")
+    let main = directory
+      .withNewFile("go.mod", "module example.com/a\n\ngo 1.22\n\nrequire example.com/b v1.0.0\n")
+      .withNewFile("lib/lib.go", "package lib\n\nvar Name = \"a\"\n")
+      .withNewFile("main.go", "package main\n\nimport (\n\t\"strings\"\n\n\t\"example.com/b\"\n)\n\nfunc main() { println(strings.ToUpper(b.Name)) }\n")
+    let image = container.from("golang:1.27.3-alpine")
+    let made = image
+      .withExec(["apk", "add", "--no-cache", "zip"])
+      .withDirectory("/z/example.com/b@v1.0.0", dep)
+      .withDirectory("/ws", main)
+      .withExec(["sh", "-c", "set -e; p=/proxy/example.com/b/@v; mkdir -p $p; cd /z; zip -qr $p/v1.0.0.zip example.com/b@v1.0.0; cp example.com/b@v1.0.0/go.mod $p/v1.0.0.mod; printf 'v1.0.0\\n' > $p/list; printf '{\"Version\":\"v1.0.0\"}' > $p/v1.0.0.info; cd /ws; GOFLAGS=-mod=mod GOPROXY=file:///proxy GOSUMDB=off go mod tidy; ! grep -q '^example.com/a ' go.sum"])
+    let base = image
+      .withDirectory("/proxy", made.directory("/proxy"))
+      .withEnvVariable("GOPROXY", "file:///proxy")
+      .withEnvVariable("GOSUMDB", "off")
+    let ws = made.directory("/ws").asWorkspace
+    let tool = go(base: base)
+    let one = tool.module(ws, ".").archives(ws, dependencies: true, packages: ["."], noTests: true)
+    let every = tool.module(ws, ".").archives(ws, dependencies: true, packages: ["./..."], noTests: true)
+    let a = one.file("manifest.json").contents + one.file("listing.json").contents + one.directory("archives").digest
+    let b = every.file("manifest.json").contents + every.file("listing.json").contents + every.directory("archives").digest
+    let manifest = one.file("manifest.json").contents
+    assert(manifest.contains("example.com/b") == false, "a dependency that imports the module back is archived: " + manifest)
+    assert(a == b, "the dependencies' archives differ from those of every package:\n" + a + "\n" + b)
+  }
+
+  """
+  A package's test binary, taken from a subset of its module's collection,
+  builds when a sibling in the subset with tests that it doesn't import can't
+  load, as go test -c of the package alone does: the subset's shared plan
+  fails, and the package is planned alone. (From the whole collection it is
+  planned alone anyway.) The sibling's own test binary fails with its own
+  error.
+  """
+  brokenSiblingTestBinaryCheck: Void @check {
+    let ws = directory
+      .withNewFile("go.mod", "module example.com/siblings\n\ngo 1.22\n")
+      .withNewFile("good/good.go", "package good\n\n// Answer is the answer.\nfunc Answer() int { return 42 }\n")
+      .withNewFile("good/good_test.go", "package good\n\nimport \"testing\"\n\nfunc TestAnswer(t *testing.T) {\n\tif Answer() != 42 {\n\t\tt.Fatal(Answer())\n\t}\n}\n")
+      .withNewFile("broken/broken.go", "package broken\n\nimport \"example.com/nowhere/missing\"\n\nvar _ = missing.Value\n")
+      .withNewFile("broken/broken_test.go", "package broken\n\nimport \"testing\"\n\nfunc TestNothing(t *testing.T) {}\n")
+      .withNewFile("other/other.go", "package other\n\n// Name is the package's name.\nconst Name = \"other\"\n")
+      .withNewFile("other/other_test.go", "package other\n\nimport \"testing\"\n\nfunc TestName(t *testing.T) {}\n")
+      .asWorkspace
+    let pair = go(version: "1.27.3").modules(ws).get(key: ".").packages(ws).subset(keys: ["good", "broken"])
+    let built = pair.get(key: "good").testBinary(ws)
+    let out = container
+      .from("alpine:3.23")
+      .withFile("/good.test", built)
+      .withExec(["/good.test", "-test.v"])
+      .stdout
+    assert(out.contains("--- PASS: TestAnswer"), "the test binary ran: " + out)
+    # The package that can't load reports its own error.
+    let failure = {
+      pair.get(key: "broken").testBinary(ws).size
+      "no failure"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(failure.contains("broken/broken.go") and failure.contains("example.com/nowhere/missing"), "the broken package's error: " + failure)
+  }
+
+  """
+  A package's test binary taken from the module's whole collection is planned
+  alone, as go test -c of the package plans it; one taken from a subset is
+  planned with the subset's other packages, and no others. The base's go
+  command writes the packages of each test plan it makes (go test -c -n) to a
+  cache volume of the run's own.
+  """
+  testBinaryPlanSetCheck: Void @check {
+    let run = Random.string
+    let ws = ["a", "b", "c"].reduce(directory.withNewFile("go.mod", "module example.com/plans\n\ngo 1.22\n")) { dir, name =>
+      dir
+        .withNewFile(name + "/" + name + ".go", "package " + name + "\n\n// Name is the package's name.\nconst Name = \"" + name + "\"\n")
+        .withNewFile(name + "/" + name + "_test.go", "package " + name + "\n\nimport \"testing\"\n\nfunc TestName(t *testing.T) {\n\tif Name != \"" + name + "\" {\n\t\tt.Fatal(Name)\n\t}\n}\n")
+    }.asWorkspace
+    let whole = testPlans(ws, run + "-whole", [])
+    assert(whole == "a", "a's test binary from the whole collection was planned with: " + whole)
+    let subset = testPlans(ws, run + "-subset", ["a", "b"])
+    assert(subset == "a b", "a's test binary from the subset of a and b was planned with: " + subset)
+  }
+
+  # The packages of the test plans (go test -c -n) the go command made for
+  # package a's test binary of ws, taken from the module's whole collection,
+  # or with keys, from that subset of it: one line per plan, the packages
+  # sorted, with a go command that writes them to a cache volume of run's own.
+  let testPlans(ws: Workspace!, run: String!, keys: [String!]!): String! {
+    let witness = cacheVolume("go-dev-test-plans-" + run)
+    let counting = container
+      .from("golang:1.27.3-alpine")
+      .withNewFile(
+        "/count/go",
+        "#!/bin/sh\nif [ \"$1\" = test ]; then\n\tfor a in \"$@\"; do\n\t\tif [ \"$a\" = -n ]; then\n\t\t\tfor p in \"$@\"; do\n\t\t\t\tcase \"$p\" in test|-*|/*) ;; *) echo \"${p#./}\" | sed 's#^example.com/plans/##' ;; esac\n\t\t\tdone | sort | tr '\\n' ' ' | sed 's/ $//' >> /witness/plans\n\t\t\techo >> /witness/plans\n\t\tfi\n\tdone\nfi\nexec /usr/local/go/bin/go \"$@\"\n",
+        permissions: 493,
+      )
+      .withEnvVariable("PATH", "/count:/go/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+      .withEnvVariable("GO_DEV_TEST_PLANS_RUN", run)
+      .withMountedCache("/witness", witness)
+    let packages = go(base: counting).modules(ws).get(key: ".").packages(ws)
+    let from = if (keys.length == 0) { packages } else { packages.subset(keys: keys) }
+    assert(from.get(key: "a").testBinary(ws).size > 0, "a's test binary is empty")
+    container
+      .from("alpine:3.23")
+      .withEnvVariable("GO_DEV_TEST_PLANS_RUN", run)
+      .withMountedCache("/witness", witness)
+      .withExec(["sh", "-c", "cat /witness/plans 2>/dev/null || true"])
+      .stdout
+      .trimSpace
+  }
+
+  # A module example.com/<name> whose root package calls strings.<call> and
+  # imports net/url, and a package of its own that imports encoding/json.
+  let dependencyModule(name: String!, call: String!): Directory! {
+    directory
+      .withNewFile("go.mod", "module example.com/" + name + "\n\ngo 1.22\n")
+      .withNewFile("main.go", "package main\n\nimport (\n\t\"net/url\"\n\t\"strings\"\n\n\t\"example.com/" + name + "/lib\"\n)\n\nfunc main() { _, _ = url.Parse(lib.Name); println(strings." + call + "(\"" + name + "\")) }\n")
+      .withNewFile("lib/lib.go", "package lib\n\nimport \"encoding/json\"\n\nvar Name = \"" + name + "\"\n\nvar _, _ = json.Marshal(Name)\n")
+  }
+
+  # The dependencies' archives of the module at dir's root, for packages,
+  # without tests: their manifest and listing, and the archives' digest.
+  let dependencyArchives(dir: Directory!, packages: [String!]!): String! {
+    let ws = dir.asWorkspace
+    let out = go(version: "1.27.3").module(ws, ".").archives(ws, dependencies: true, packages: packages, noTests: true)
+    out.file("manifest.json").contents + out.file("listing.json").contents + out.directory("archives").digest
+  }
+
+  # The listing of the dependencies' archives of the module at dir's root
+  # package, as codegen asks for them.
+  let dependenciesListing(dir: Directory!): String! {
+    let ws = dir.asWorkspace
+    go(version: "1.27.3").module(ws, ".").archives(ws, dependencies: true, packages: ["."], noTests: true).file("listing.json").contents
+  }
+
+  """
+  A go.sum's module proxy serves every module version the go.sum names, to
+  a go command with no module cache and no other source: the module builds,
+  and go mod tidy, which also reads the imports of its dependencies' tests
+  (gopkg.in/yaml.v3's import gopkg.in/check.v1), finds nothing to change. It
+  holds no version list, which would answer a query such as @latest with a
+  version the go.sum names. An empty go.sum's proxy is empty. A zip or a
+  go.mod that doesn't match the go.sum fails the call.
+  """
+  moduleProxyCheck: Void @check {
+    let image = container.from("golang:1.27.3-alpine")
+    let tidied = image
+      .withNewFile("/src/go.mod", "module example.com/proxied\n\ngo 1.22\n")
+      .withNewFile("/src/main.go", "package main\n\nimport \"gopkg.in/yaml.v3\"\n\nfunc main() { _, _ = yaml.Marshal(1) }\n")
+      .withWorkdir("/src")
+      .withExec(["go", "get", "gopkg.in/yaml.v3@v3.0.1"])
+      .withExec(["go", "mod", "tidy"])
+      .directory("/src")
+    let tool = go(version: "1.27.3")
+    let proxy = tool.moduleProxy(goSum: tidied.file("go.sum"))
+    let lists = proxy.glob(pattern: "**/list")
+    assert(lists.length == 0, "the proxy has version lists: " + lists.join(", "))
+    image
+      .withDirectory("/src", tidied)
+      .withDirectory("/proxy", proxy)
+      .withWorkdir("/src")
+      .withEnvVariable("GOPROXY", "file:///proxy,off")
+      .withEnvVariable("GOSUMDB", "off")
+      .withExec(["go", "build", "./..."])
+      .withExec(["go", "mod", "tidy", "-diff"])
+      .sync
+    let empty = tool.moduleProxy(goSum: directory.withNewFile("go.sum", "").file("go.sum")).entries
+    assert(empty.length == 0, "an empty go.sum's proxy holds " + empty.join(", "))
+    let badZip = {
+      tool.moduleProxy(goSum: directory.withNewFile("go.sum", "gopkg.in/yaml.v3 v3.0.1 h1:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=\n").file("go.sum")).entries
+      "no failure"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(badZip.contains("gopkg.in/yaml.v3@v3.0.1: checksum mismatch"), "a zip that doesn't match the go.sum: " + badZip)
+    let badMod = {
+      tool.moduleProxy(goSum: directory.withNewFile("go.sum", "gopkg.in/yaml.v3 v3.0.1/go.mod h1:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=\n").file("go.sum")).entries
+      "no failure"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(badMod.contains("gopkg.in/yaml.v3@v3.0.1: go.mod checksum mismatch"), "a go.mod that doesn't match the go.sum: " + badMod)
+  }
+
+  """
   A module's archive builds are what its archives read from the cache: a
   build per package the archives hold, each its own, a download per module
   version the build read, and the build's four tools: gohdr, write-manifest
@@ -1217,6 +1556,38 @@ type GoDev {
     assert(built.manifestTool.entries.contains("write-manifest"), "archive builds: the manifest tool is " + built.manifestTool.entries.join(", ") + ", without write-manifest")
     assert(built.manifestSource.entries.contains("go.mod"), "archive builds: the manifest tool's source is " + built.manifestSource.entries.join(", ") + ", without go.mod")
     assert(built.tools.entries.contains("pack"), "archive builds: the tools are " + built.tools.entries.join(", ") + ", without pack")
+    # The fixture is under testdata/, yet a build of every package of it has
+    # its packages, as the go command's "./..." in it has them: so its module
+    # version is downloaded in its own step, not fetched by the plan.
+    let every = mod.archiveBuilds(ws, dependencies: true, packages: ["./..."], noTests: true).downloads.{{digest}}
+    assert(every.length == 1, "archive builds of every package of a module under testdata/: " + toString(every.length) + " downloads, for 1 module download")
+    let everyArchived = mod.archives(ws).directory("archives").entries
+    assert(everyArchived.length > 0, "the archives of every package of a module under testdata/ hold no archive")
+  }
+
+  """
+  With shared imports, a build compiles the packages they reach in
+  dependency calls of their own, the standard library's and then the rest's;
+  what the build compiles, and the binary it links, stay as they are
+  without them.
+  """
+  sharedImportsCheck(ws: Workspace!): Void @check {
+    let plain = go(version: "1.27.3").module(ws, downloadsFixturePath)
+    let both = go(version: "1.27.3", sharedImports: ["golang.org/x/sync/errgroup"]).module(ws, downloadsFixturePath)
+    let std = go(version: "1.27.3", sharedImports: ["context"]).module(ws, downloadsFixturePath)
+    let plainBuilds = plain.archiveBuilds(ws, dependencies: true, packages: ["."], noTests: true)
+    let bothBuilds = both.archiveBuilds(ws, dependencies: true, packages: ["."], noTests: true)
+    let stdBuilds = std.archiveBuilds(ws, dependencies: true, packages: ["."], noTests: true)
+    # The same packages, built the same: each build's own content.
+    let plainDigests = plainBuilds.builds.{{digest}}.map { d => d.digest }
+    let bothDigests = bothBuilds.builds.{{digest}}.map { d => d.digest }
+    assert(plainDigests.length == bothDigests.length, "shared imports changed the builds: " + toString(bothDigests.length) + " against " + toString(plainDigests.length))
+    assert(bothDigests.filter { d => plainDigests.contains(d) == false }.length == 0, "shared imports changed what a package build compiles")
+    let stdDigests = stdBuilds.builds.{{digest}}.map { d => d.digest }
+    assert(stdDigests.length == plainDigests.length and stdDigests.filter { d => plainDigests.contains(d) == false }.length == 0, "the standard library's shared imports changed what a package build compiles")
+    let plainBinary = plain.packages(ws).get(key: downloadsFixturePath).binary(ws).digest
+    let bothBinary = both.packages(ws).get(key: downloadsFixturePath).binary(ws).digest
+    assert(plainBinary == bothBinary, "shared imports changed the binary")
   }
 
   """
@@ -1283,7 +1654,7 @@ type GoDev {
     let empty = go(base: cgoCxxBase).module(none, ".").archives(none)
     let emptyManifest = empty.file("manifest.json").contents
     assert(emptyManifest.contains("\"packages\": {}"), "the manifest of no packages: " + emptyManifest)
-    assert(empty.entries == ["manifest.json"], "the archives of no packages: " + empty.entries.join(", "))
+    assert(empty.entries == ["listing.json", "manifest.json"], "the archives of no packages: " + empty.entries.join(", "))
     null
   }
 
@@ -1389,6 +1760,9 @@ type GoDev {
   Module downloads run with the downloads container's settings, which key
   them: with GOPROXY=off there, a build that must download its dependency
   can't, and without a downloads container the same build downloads it.
+  A failed download reports every source it tried: the go command's error
+  names a direct fetch's failure over a proxy's, so the proxy's is in its
+  log of each request, which the error carries.
   """
   downloadsCheck(ws: Workspace!): Void @check {
     let off = container.from("golang:1.27.3-alpine").withEnvVariable("GOPROXY", "off")
@@ -1399,6 +1773,16 @@ type GoDev {
       err: Error => err.message
     }
     assert(offline.contains("GOPROXY=off"), "a build downloaded with GOPROXY=off in its downloads container: " + offline)
+    # Nothing listens on port 9: the proxy fails, "|" goes on to a direct
+    # fetch, and that fails too, for the image has no git.
+    let unreachable = container.from("golang:1.27.3-alpine").withEnvVariable("GOPROXY", "http://127.0.0.1:9|direct")
+    let tried = {
+      go(version: "1.27.3", downloads: unreachable).module(ws, downloadsFixturePath).packages(ws).get(key: downloadsFixturePath).binary(ws).size
+      "built"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(tried.contains("127.0.0.1:9") and tried.contains("git"), "a failed download did not report each source it tried: " + tried)
     let built = go(version: "1.27.3").module(ws, downloadsFixturePath).packages(ws).get(key: downloadsFixturePath).binary(ws).size
     assert(built > 0, "the build without a downloads container made an empty binary")
   }
@@ -1439,7 +1823,8 @@ type GoDev {
 
   """
   A failed compile says why: its error carries the compiler's message, not
-  only the exec's exit code.
+  only the exec's exit code. So does a build that fails before it
+  downloads anything, where the go command first reads the go.mod.
   """
   execErrorCheck: Void @check {
     let ws = directory
@@ -1453,6 +1838,18 @@ type GoDev {
       err: Error => err.message
     }
     assert(failed.contains("undefined: intentionallyUndefinedSymbol"), "a failed compile did not say why: " + failed)
+    # A go.mod that asks for a Go no toolchain has.
+    let unreadable = directory
+      .withNewFile("go.mod", "module example.com/unreadable\n\ngo 1.99\n")
+      .withNewFile("main.go", "package main\n\nfunc main() {}\n")
+      .asWorkspace
+    let setup = {
+      go(version: "1.27.3").module(unreadable, ".").packages(unreadable).get(key: ".").binary(unreadable).size
+      "built"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(setup.contains("1.99"), "a build that failed reading its go.mod did not say why: " + setup)
   }
 
   """
@@ -1479,12 +1876,72 @@ type GoDev {
   }
 
   """
-  The workspace mounts at a configurable path that defaults to
-  "/src/<workspace name>".
+  A module's tests run as go test ./... runs them, from each package's
+  prebuilt test binary: a testing flag in GOFLAGS reaches the binary, a
+  package whose test files are all for another platform passes, a
+  directory with no file for this one is left out, and a package with tests
+  that does not compile fails the module, named.
+  """
+  moduleTestCheck: Void @check {
+    let fixture = directory
+      .withNewFile("go.mod", "module example.com/moduletest\n\ngo 1.27.3\n")
+      .withNewFile("short/short_test.go", "package short\nimport \"testing\"\nfunc TestShort(t *testing.T) { if !testing.Short() { t.Fatal(\"-short from GOFLAGS did not reach the test binary\") } }\n")
+      .withNewFile("winonly/winonly.go", "package winonly\n")
+      .withNewFile("winonly/winonly_windows_test.go", "package winonly\nimport \"testing\"\nfunc TestWindows(t *testing.T) { t.Fatal(\"a Windows test ran\") }\n")
+      # No file of this one builds here, so ./... leaves it out.
+      .withNewFile("wintests/wintests_windows_test.go", "package wintests\nimport \"testing\"\nfunc TestWindows(t *testing.T) { t.Fatal(\"a Windows test ran\") }\n")
+      .withNewFile("lib/lib.go", "package lib\nfunc Answer() int { return 42 }\n")
+    let ws = fixture.asWorkspace
+    # Without -short the fixture fails, and its failing test would show in
+    # this suite's own report; selectedFailfastCheck covers a flag that must
+    # reach the binary for a check to fail.
+    # go splits GOFLAGS at any white space, a tab too.
+    go(version: "1.27.3", goflags: "-count=1\t-short").module(ws, ".", findUp: false).test(ws)
 
-  Only the local checkout is covered here: the cwd and git version selector
-  handling in the name derivation needs a session started at a remote or
-  subdirectory address, which a check cannot set up.
+    let broken = fixture.withNewFile("short/lib.go", "package short\nvar broken = undefinedSymbol\n").asWorkspace
+    let failure = { go(version: "1.27.3", goflags: "-short").module(broken, ".", findUp: false).test(broken); "no failure" } rescue {
+      err: Error => err.message
+    }
+    assert(failure.contains("Go tests in short:"), "a package that does not compile passed, or was not named: " + failure)
+
+    # A library whose only test file is for another platform has no test
+    # binary, and go test ./... passes the module.
+    let libOnly = directory
+      .withNewFile("go.mod", "module example.com/libonly\n\ngo 1.27.3\n")
+      .withNewFile("lib.go", "package lib\n")
+      .withNewFile("lib_windows_test.go", "package lib\nimport \"testing\"\nfunc TestWindows(t *testing.T) { t.Fatal(\"a Windows test ran\") }\n")
+      .asWorkspace
+    go(version: "1.27.3").module(libOnly, ".", findUp: false).test(libOnly)
+
+    # A nested module's packages are not the parent's: with only another
+    # platform's test file of its own, ./... matches no package.
+    let nestedOnly = directory
+      .withNewFile("go.mod", "module example.com/parent\n\ngo 1.27.3\n")
+      .withNewFile("root_windows_test.go", "package parent\nimport \"testing\"\nfunc TestWindows(t *testing.T) {}\n")
+      .withNewFile("child/go.mod", "module example.com/child\n\ngo 1.27.3\n")
+      .withNewFile("child/lib.go", "package child\n")
+      .asWorkspace
+    let none = { go(version: "1.27.3").module(nestedOnly, ".", findUp: false).test(nestedOnly); "no failure" } rescue {
+      err: Error => err.message
+    }
+    assert(none.contains("no packages to test"), "a nested module's package counted as the parent's: " + none)
+
+    # A test file go cannot read is an error, not a file left out.
+    let malformed = fixture
+      .withNewFile("bad/bad_test.go", "//go:build linux &&\n\npackage bad\nimport \"testing\"\nfunc TestBad(t *testing.T) {}\n")
+      .asWorkspace
+    let unread = { go(version: "1.27.3", goflags: "-short").module(malformed, ".", findUp: false).test(malformed); "no failure" } rescue {
+      err: Error => err.message
+    }
+    assert(unread.contains("Go tests in bad:"), "a malformed test file was left out: " + unread)
+    null
+  }
+
+  """
+  The workspace mounts at a configurable path that defaults to "/src",
+  whatever the workspace is called: the path is in every package's compile,
+  so a default made from the workspace's name would build the same source
+  again under another name.
   """
   mountPathCheck(ws: Workspace!): Void @check {
     let mod = go(version: "1.27.3", mountPath: "/src/hugo").module(ws, mountPathFixturePath)
@@ -1496,17 +1953,10 @@ type GoDev {
     # both live under /src/hugo.
     mod.test(ws)
 
-    let derived = go(version: "1.27.3").module(ws, mountPathFixturePath).mountPath
-    assert(
-      derived.hasPrefix("/src/") and derived != "/src/",
-      "default mount path did not derive a workspace name: " + derived,
-    )
-    assert(
-      derived.contains("/fixtures") == false and derived.contains("/testdata") == false,
-      "default mount path leaked a workspace path into the name: " + derived,
-    )
-    # A workspace made from a directory is addressed by its content digest,
-    # which every edit changes, so it is mounted at /src whatever it holds.
+    # A local checkout has a name, its directory's; the default ignores it.
+    let local = go(version: "1.27.3").module(ws, mountPathFixturePath).mountPath
+    assert(local == "/src", "local checkout was mounted at " + local)
+    # As is a workspace made from a directory, addressed by its content digest.
     let one = directory.withNewFile("go.mod", "module example.com/one\n\ngo 1.27.3\n").asWorkspace
     let two = directory.withNewFile("go.mod", "module example.com/two\n\ngo 1.27.3\n").asWorkspace
     assert(one.address != two.address, "two directories made the same workspace address: " + one.address)
@@ -2473,9 +2923,19 @@ type GoDev {
     )
   }
 
+  # A package that does not compile fails its own tests, with the compiler's
+  # error under them: the report shows the failed build step in place of the
+  # check's message. The module's other package still runs.
   selectedBuildFailureCheck(ws: Workspace!): Void @check {
     let fixture = selectionFixture.withNewFile("m2/p1/broken.go", "package p1\nvar broken = undefinedSymbol\n")
-    selectedCheck(ws, fixture, selectionArgs, passed: 6, failed: 2, messages: ["Go tests in m2/p1:"])
+    selectedCheck(
+      ws,
+      fixture,
+      selectionArgs,
+      passed: 6,
+      failed: 2,
+      messages: ["go-package=m2/p1&go-test=TestFoo", "undefined: undefinedSymbol"],
+    )
   }
 
   let reportingFixture: Directory! {

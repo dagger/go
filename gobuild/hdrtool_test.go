@@ -135,7 +135,8 @@ func TestHdrToolUnpackPlanDirs(t *testing.T) {
 // gohdr packmod packs a downloaded module from its zip as a plan reads it,
 // as the go command would extract it: Go files as their headers, C and
 // assembly as their leading comments, the module's metadata whole, any other
-// file empty, and no test file nor anything in a testdata directory.
+// file empty, and no test file; a testdata directory's files as any other,
+// since a build may import a package there by its path.
 // gohdr subset writes, as a pack, exactly what gohdr unpack writes with the
 // plan's directories, and the whole pack's list of Go files in directories
 // named like Go files. A plan mounts it in place of the whole pack, so it
@@ -244,6 +245,36 @@ func TestHdrToolSubset(t *testing.T) {
 		t.Errorf("subset listed %q, unpack %q, want %q", got, want, "gen.go/inner.go\n")
 	}
 
+	// Without tests, a test file of a directory the plan reads is left out,
+	// but where an embed may name it, and a change to it leaves the subset
+	// as it was.
+	tested := maps.Clone(base)
+	tested["lib/lib_test.go"] = entry{"644", "package lib\n\nimport \"testing\"\n"}
+	tested["tmpl/tmpl_test.go"] = entry{"644", "package tmpl\n"}
+	run("subset", writePack("tested.hdr", tested), filepath.Join(dir, "notests.hdr"), os.DevNull, dirs, "notests")
+	run("unpack", filepath.Join(dir, "notests.hdr"), filepath.Join(dir, "notests"), os.DevNull)
+	got := tree(filepath.Join(dir, "notests"))
+	if _, ok := got["lib/lib_test.go"]; ok {
+		t.Errorf("without tests, the subset kept lib/lib_test.go")
+	}
+	if _, ok := got["tmpl/tmpl_test.go"]; !ok {
+		t.Errorf("without tests, the subset left out tmpl/tmpl_test.go, which tmpl's embed may name")
+	}
+	withoutTests := read(filepath.Join(dir, "notests.hdr"))
+	// A test file's own //go:embed is no build's: it doesn't keep the test
+	// files of its directory.
+	tested["lib/embed_test.go"] = entry{"644", "package lib\n\nimport _ \"embed\"\n\n//go:embed lib.s\nvar _ string\n"}
+	run("subset", writePack("tested.hdr", tested), filepath.Join(dir, "notests-embed.hdr"), os.DevNull, dirs, "notests")
+	if read(filepath.Join(dir, "notests-embed.hdr")) != withoutTests {
+		t.Errorf("without tests, a test file's //go:embed kept its directory's test files")
+	}
+	delete(tested, "lib/embed_test.go")
+	tested["lib/lib_test.go"] = entry{"644", "package lib\n\nimport \"os\"\n"}
+	run("subset", writePack("tested.hdr", tested), filepath.Join(dir, "notests.hdr"), os.DevNull, dirs, "notests")
+	if read(filepath.Join(dir, "notests.hdr")) != withoutTests {
+		t.Errorf("without tests, a change to a test file changed the subset")
+	}
+
 	// Without directories, the subset is the whole pack.
 	run("subset", pack, filepath.Join(dir, "all.hdr"), os.DevNull)
 	if got, want := read(filepath.Join(dir, "all.hdr")), read(pack); got != want {
@@ -314,7 +345,8 @@ func TestHdrToolPackmod(t *testing.T) {
 		{"example.com/M@v1.0.0/closed.c", "//go:build ignore\n\n/* Explanation\n*/ int unused;\n"},
 		{"example.com/M@v1.0.0/api.json", "{\"big\": true}\n"},
 		{"example.com/M@v1.0.0/m_test.go", "package m\n"},
-		{"example.com/M@v1.0.0/sub/testdata/fixture.go", "package fixture\n"},
+		{"example.com/M@v1.0.0/sub/testdata/fixture.go", "package fixture\n\nimport \"os\"\n\nvar _ = os.Args\n"},
+		{"example.com/M@v1.0.0/sub/testdata/fixture_test.go", "package fixture\n"},
 	} {
 		w, err := zw.Create(f.name)
 		if err != nil {
@@ -340,13 +372,14 @@ func TestHdrToolPackmod(t *testing.T) {
 		t.Fatalf("unpack: %v\n%s", err, b)
 	}
 	for name, want := range map[string]string{
-		meta:                              "module example.com/M\n",
-		"example.com/!m@v1.0.0/go.mod":    "module example.com/M\n",
-		"example.com/!m@v1.0.0/m.go":      "package m\n\nimport \"fmt\"\n",
-		"example.com/!m@v1.0.0/m_amd64.s": "//go:build !purego\n\n",
-		"example.com/!m@v1.0.0/unused.c":  "/* Copyright notice\n   continued */\n//go:build ignore\n\n",
-		"example.com/!m@v1.0.0/closed.c":  "//go:build ignore\n\n/* Explanation\n*/ ",
-		"example.com/!m@v1.0.0/api.json":  "",
+		meta:                                            "module example.com/M\n",
+		"example.com/!m@v1.0.0/go.mod":                  "module example.com/M\n",
+		"example.com/!m@v1.0.0/m.go":                    "package m\n\nimport \"fmt\"\n",
+		"example.com/!m@v1.0.0/m_amd64.s":               "//go:build !purego\n\n",
+		"example.com/!m@v1.0.0/unused.c":                "/* Copyright notice\n   continued */\n//go:build ignore\n\n",
+		"example.com/!m@v1.0.0/closed.c":                "//go:build ignore\n\n/* Explanation\n*/ ",
+		"example.com/!m@v1.0.0/api.json":                "",
+		"example.com/!m@v1.0.0/sub/testdata/fixture.go": "package fixture\n\nimport \"os\"\n",
 	} {
 		got, err := os.ReadFile(filepath.Join(out, name))
 		if err != nil {
@@ -357,7 +390,7 @@ func TestHdrToolPackmod(t *testing.T) {
 			t.Errorf("%s = %q, want %q", name, got, want)
 		}
 	}
-	for _, name := range []string{"example.com/!m@v1.0.0/m_test.go", "example.com/!m@v1.0.0/sub/testdata/fixture.go"} {
+	for _, name := range []string{"example.com/!m@v1.0.0/m_test.go", "example.com/!m@v1.0.0/sub/testdata/fixture_test.go"} {
 		if _, err := os.Stat(filepath.Join(out, name)); err == nil {
 			t.Errorf("%s was packed", name)
 		}
@@ -512,5 +545,84 @@ func TestHdrToolSizes(t *testing.T) {
 	}
 	if want := "10 a.go\n2000 p/b.go\n"; string(out) != want {
 		t.Errorf("sizes = %q, want %q", out, want)
+	}
+}
+
+// gohdr imports marks the directories whose build may read more than their
+// Go files: a //go:embed line, an import of "C", a symlink. A test file's
+// mark is listed only with tests.
+func TestHdrToolImportsMarks(t *testing.T) {
+	dir := buildHdrTool(t)
+	type file struct{ rel, mode, data string }
+	files := []file{
+		{"go.mod", "644", "module example.com/m\n\ngo 1.22\n"},
+		{"embeds/e.go", "644", "package embeds\n\nimport \"embed\"\n\n//go:embed static\nvar _ embed.FS\n"},
+		{"cgo/c.go", "644", "package cgo\n\n// #include \"../x.h\"\nimport \"C\"\n"},
+		{"links/l.go", strconv.FormatUint(uint64(os.ModeSymlink|0o777), 8), "../plain/p.go"},
+		{"plain/p.go", "644", "package plain\n\nimport \"fmt\"\n"},
+		{"tested/t_test.go", "644", "package tested\n\nimport \"embed\"\n\n//go:embed testdata\nvar _ embed.FS\n"},
+	}
+	var pack bytes.Buffer
+	pack.WriteString("gohdr 1\n")
+	for _, f := range files {
+		fmt.Fprintf(&pack, "%s\n%s\n%d\n%s\n", f.rel, f.mode, len(f.data), f.data)
+	}
+	packPath := filepath.Join(dir, "src.hdr")
+	if err := os.WriteFile(packPath, pack.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for mode, want := range map[string]map[string][]string{
+		"build": {"embeds": {"embed"}, "cgo": {"cgo"}, "links": {"link", "unparsed"}},
+		"tests": {"embeds": {"embed"}, "cgo": {"cgo"}, "links": {"link", "unparsed"}, "tested": {"embed"}},
+	} {
+		out, err := exec.Command(filepath.Join(dir, "gohdr"), "imports", packPath, mode).Output()
+		if err != nil {
+			t.Fatalf("imports %s: %v", mode, err)
+		}
+		src := parseSourceImports(newTarget("linux\namd64\n1\ngo1.27.3\n", nil), string(out))
+		if !reflect.DeepEqual(src.marks, want) {
+			t.Errorf("imports %s: marks %v, want %v\n%s", mode, src.marks, want, out)
+		}
+		if want := map[string][]string{"embeds": {"embeds"}, "cgo": {"cgo"}, "plain": {"plain"}}; mode == "build" && !reflect.DeepEqual(src.names, want) {
+			t.Errorf("imports %s: package names %v, want %v", mode, src.names, want)
+		}
+		// The marks are neither Go files' lines nor modules.
+		if _, ok := src.all["embed embeds"]; ok {
+			t.Errorf("imports %s: a mark read as a package", mode)
+		}
+		if len(src.mods) != 1 || src.mods[0] != (sourceModule{dir: ".", path: "example.com/m"}) {
+			t.Errorf("imports %s: modules %+v", mode, src.mods)
+		}
+	}
+}
+
+// gohdr imports lists a file constrained by a legacy // +build line alone
+// with the expression "+build", and one with a //go:build line by that.
+func TestHdrToolImportsLegacyBuild(t *testing.T) {
+	dir := buildHdrTool(t)
+	files := map[string]string{
+		"legacy.go":  "// +build linux\n\npackage m\n\nimport \"os\"\n",
+		"both.go":    "//go:build linux\n// +build linux\n\npackage m\n",
+		"plain.go":   "package m\n",
+		"nospace.go": "//+build windows\n\npackage m\n\nimport \"syscall\"\n",
+		"tab.go":     "//go:build\tlinux\n\npackage m\n",
+	}
+	var pack bytes.Buffer
+	pack.WriteString("gohdr 1\n")
+	for _, f := range []string{"both.go", "legacy.go", "nospace.go", "plain.go", "tab.go"} {
+		fmt.Fprintf(&pack, "%s\n644\n%d\n%s\n", f, len(files[f]), files[f])
+	}
+	packPath := filepath.Join(dir, "src.hdr")
+	if err := os.WriteFile(packPath, pack.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(filepath.Join(dir, "gohdr"), "imports", packPath, "build").Output()
+	if err != nil {
+		t.Fatalf("imports: %v", err)
+	}
+	for _, want := range []string{".\tlegacy.go\t+build\tos\n", ".\tboth.go\tlinux\t\n", ".\tplain.go\t-\t\n", ".\tnospace.go\t+build\tsyscall\n", ".\ttab.go\tlinux\t\n"} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("imports output lacks %q:\n%s", want, out)
+		}
 	}
 }

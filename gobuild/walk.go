@@ -109,12 +109,8 @@ type walker struct {
 	// output is declared for.
 	platform string
 	// hdr is gohdr, for every machine an engine runs on (hdrTools).
-	hdr *dagger.Directory
+	hdr   *dagger.Directory
 	tools *dagger.Directory
-	src   *dagger.Directory
-	// nonGo is the source's files that aren't Go, which a package with C or
-	// assembly there reads (srcNonGo); nil when no package does.
-	nonGo *dagger.Directory
 	// mods is the module cache's modules, each on its own.
 	mods  *modules
 	roots roots
@@ -123,12 +119,13 @@ type walker struct {
 	// profile is the preprocessed PGO profile, mounted for packages whose
 	// compile reads it; nil without one.
 	profile *profileOutput
-	// testmain is a test binary's _testmain.go, which its main package
-	// compiles; nil for a binary.
-	testmain *dagger.File
-	// links is set when a link outside the walk reads the object code of
-	// the packages it builds, as the dependency call's caller's does.
-	links bool
+	// sources are the packages' directories in src, by block id, which
+	// syncSources started before the walk.
+	sources map[string]*packageSource
+	// testmain is the _testmain.go of the test binary that the block with
+	// this id links, which its main package compiles; nil for a binary. It
+	// waits for the step that writes it, which runs alongside the walk.
+	testmain func(id string) (*dagger.File, error)
 }
 
 // profileOutput is the PGO profile step's output and where scripts read it.
@@ -161,9 +158,12 @@ type result struct {
 	linkErr  error
 	linkDone chan struct{}
 	// dir is the package's work directory, which holds file.
-	dir  *dagger.Directory
-	err  error // set before done closes; dependents read it
-	done chan struct{}
+	dir *dagger.Directory
+	// importPath names the package in its dependents' errors: a package
+	// the dependency call built is no node of the walk that reads it.
+	importPath string
+	err        error // set before done closes; dependents read it
+	done       chan struct{}
 }
 
 // walk runs nodes and returns their results, with done's: the results of
@@ -173,9 +173,9 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node, done map[stri
 	for id, r := range done {
 		results[id] = r
 	}
-	links := w.links
+	links := false
 	for id, n := range nodes {
-		results[id] = &result{done: make(chan struct{}), linkDone: make(chan struct{})}
+		results[id] = &result{done: make(chan struct{}), linkDone: make(chan struct{}), importPath: n.ImportPath}
 		links = links || n.Link
 	}
 	limit := packageConcurrency()
@@ -188,22 +188,11 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node, done map[stri
 			defer wg.Done()
 			r := results[id]
 			defer close(r.done)
-			// The source a package reads doesn't depend on its imports, so it
-			// is synced while they build rather than in the package's slot.
-			// The synced directory carries its ID, so the package's exec
-			// doesn't ask for it either. An error shows again where it's
-			// mounted.
 			var srcDir *dagger.Directory
 			var at string
-			if len(n.SrcFiles) > 0 {
-				srcDir, at = selected(w.src, n.SrcFiles)
-				if n.SrcNonGo {
-					srcDir = w.nonGo.WithDirectory(path.Join(".", at), srcDir)
-					at = ""
-				}
-				if d, err := srcDir.Sync(ctx); err == nil {
-					srcDir = d
-				}
+			if s := w.sources[id]; s != nil {
+				<-s.done
+				srcDir, at = s.dir, s.at
 			}
 			asyncLink := false
 			defer func() {
@@ -220,7 +209,7 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node, done map[stri
 				}
 				<-dr.done
 				if dr.err != nil {
-					r.err = fmt.Errorf("%s: %w", nodes[d].ImportPath, dr.err)
+					r.err = fmt.Errorf("%s: %w", dr.importPath, dr.err)
 					return
 				}
 				if !n.Link {
@@ -229,7 +218,7 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node, done map[stri
 				}
 				<-dr.linkDone
 				if dr.linkErr != nil {
-					r.err = fmt.Errorf("%s: %w", nodes[d].ImportPath, dr.linkErr)
+					r.err = fmt.Errorf("%s: %w", dr.importPath, dr.linkErr)
 					return
 				}
 				linkFiles = append(linkFiles, dr.link)
@@ -259,7 +248,12 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node, done map[stri
 				ctr = ctr.WithMountedDirectory(w.profile.path, w.profile.dir, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
 			}
 			if n.Link && w.testmain != nil {
-				ctr = ctr.WithFile("/work/"+n.Name+"/_testmain.go", w.testmain)
+				tm, err := w.testmain(id)
+				if err != nil {
+					r.err = fmt.Errorf("test main: %w", err)
+					return
+				}
+				ctr = ctr.WithFile("/work/"+n.Name+"/_testmain.go", tm)
 			}
 			if srcDir != nil {
 				ctr = ctr.WithMountedDirectory(path.Join(w.roots.Src, at), srcDir, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
@@ -339,6 +333,44 @@ func shortest(errs []string) string {
 		}
 	}
 	return s
+}
+
+// packageSource is the directory a package reads from the workspace's
+// source, and where under the source root it's mounted, once done closes.
+type packageSource struct {
+	dir  *dagger.Directory
+	at   string
+	done chan struct{}
+}
+
+// syncSources selects and syncs the source each block reads, all at once,
+// and returns them by block id as they finish. A package's source depends
+// only on the plan, so it is synced from the moment the plan is read, while
+// the module cache is prepared, the dependency call runs and the package's
+// imports build, rather than in its slot. The synced directory carries its
+// ID, so the package's exec doesn't ask for it either. A failed sync leaves
+// the unsynced directory, whose error shows again where it's mounted.
+func syncSources(ctx context.Context, src, nonGo *dagger.Directory, blocks map[string]*block) map[string]*packageSource {
+	sources := map[string]*packageSource{}
+	for id, bl := range blocks {
+		if bl.isProfile || len(bl.srcFiles) == 0 {
+			continue
+		}
+		s := &packageSource{done: make(chan struct{})}
+		sources[id] = s
+		go func() {
+			defer close(s.done)
+			s.dir, s.at = selected(src, bl.srcFiles)
+			if bl.srcNonGo {
+				s.dir = nonGo.WithDirectory(path.Join(".", s.at), s.dir)
+				s.at = ""
+			}
+			if d, err := s.dir.Sync(ctx); err == nil {
+				s.dir = d
+			}
+		}()
+	}
+	return sources
 }
 
 // selected is the part of dir that files name, and where under the root to

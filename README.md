@@ -99,11 +99,10 @@ toolchain, so `version` is ignored alongside it and recorded in `warnings`.
 `goflags` is passed as-is, e.g. `-tags=extended,withdeploy`. Flags that take a
 value must use the `-flag=value` form, as Go requires inside `GOFLAGS`.
 
-`mountPath` defaults to `/src/<workspace name>`, where the name is the last
-segment of the workspace address — usually the repository name — so tests that
-expect it in their working directory keep passing. It must be absolute.
-A workspace made from a directory or git ref with `asWorkspace` has no name, so
-it is mounted at `/src`.
+`mountPath` defaults to `/src`, whatever the workspace is called, so the same
+source builds once whichever directory or repository name it comes from. Set it
+when tests expect the repository name in their working directory, e.g.
+`/src/hugo`. It must be absolute.
 
 #### Packages
 

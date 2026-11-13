@@ -50,6 +50,9 @@ type GobuildArchiveBuildsOpts struct {
 	//
 	// Default: true
 	Tests bool
+	// Import paths whose packages are compiled in dependency calls of their
+	// own, as for Binary.
+	SharedImports []string
 }
 
 // ArchiveBuilds compiles what Archives compiles, with its arguments, and
@@ -95,6 +98,10 @@ func (r *Gobuild) ArchiveBuilds(base *Container, source *Directory, headers *Fil
 		if !querybuilder.IsZeroValue(opts[i].Tests) {
 			q = q.Arg("tests", opts[i].Tests)
 		}
+		// `sharedImports` optional argument
+		if !querybuilder.IsZeroValue(opts[i].SharedImports) {
+			q = q.Arg("sharedImports", opts[i].SharedImports)
+		}
 	}
 	q = q.Arg("base", base)
 	q = q.Arg("source", source)
@@ -132,6 +139,9 @@ type GobuildArchivesOpts struct {
 	//
 	// Default: true
 	Tests bool
+	// Import paths whose packages are compiled in dependency calls of their
+	// own, as for Binary.
+	SharedImports []string
 }
 
 // Archives compiles, one exec per package as Binary builds, every package
@@ -186,6 +196,10 @@ func (r *Gobuild) Archives(base *Container, source *Directory, headers *File, mo
 		if !querybuilder.IsZeroValue(opts[i].Tests) {
 			q = q.Arg("tests", opts[i].Tests)
 		}
+		// `sharedImports` optional argument
+		if !querybuilder.IsZeroValue(opts[i].SharedImports) {
+			q = q.Arg("sharedImports", opts[i].SharedImports)
+		}
 	}
 	q = q.Arg("base", base)
 	q = q.Arg("source", source)
@@ -216,6 +230,13 @@ type GobuildBinaryOpts struct {
 	// configuration or an SSH agent. Unset, base's. No package exec reads it,
 	// so it keys downloads alone.
 	Downloads *Container
+	// Import paths that many builds import, such as what generated code
+	// imports. The packages they reach outside the module are compiled in
+	// dependency calls of their own: the standard library's, then the rest.
+	// Each is the same call in every build that keeps those packages' module
+	// versions, whatever else the build imports, so a cache that has one, such
+	// as an engine image's, serves it whole.
+	SharedImports []string
 }
 
 // Binary builds the main package pkg as "go build" would and returns a
@@ -248,6 +269,10 @@ func (r *Gobuild) Binary(base *Container, source *Directory, headers *File, moun
 		if !querybuilder.IsZeroValue(opts[i].Downloads) {
 			q = q.Arg("downloads", opts[i].Downloads)
 		}
+		// `sharedImports` optional argument
+		if !querybuilder.IsZeroValue(opts[i].SharedImports) {
+			q = q.Arg("sharedImports", opts[i].SharedImports)
+		}
 	}
 	q = q.Arg("base", base)
 	q = q.Arg("source", source)
@@ -259,6 +284,16 @@ func (r *Gobuild) Binary(base *Container, source *Directory, headers *File, moun
 	return new(Directory).WithGraphQLQuery(q)
 }
 
+// GobuildDependenciesOpts contains options for Gobuild.Dependencies
+type GobuildDependenciesOpts struct {
+	// The packages they import that an earlier dependency call built
+	// (sharedImports), by stable name, and each one's archive, in the same
+	// order.
+	ImportedNames []string
+
+	Imported []*File
+}
+
 // Dependencies builds packages of a build that read none of its source and
 // import nothing that does, one exec per package as a build does: the
 // standard library and the build's dependencies. A build calls it through
@@ -266,11 +301,27 @@ func (r *Gobuild) Binary(base *Container, source *Directory, headers *File, moun
 // call: every build that compiles the same packages the same way, whatever
 // its own source, finds it in one request, instead of one or two for each
 // package, and an edit of the build's own source leaves it as it is.
-func (r *Gobuild) Dependencies(base *Container, hdr *Directory, tools *Directory, platform string, modRoot string, moduleNames []string, moduleDirs []*Directory, packages string, links bool) *GobuildDependencyBuilds {
+//
+// The packages come as a file, which the engine keys by its content: a list
+// runs to megabytes, and as a string it would be held in the call's
+// arguments, and in those of every exec that runs the call, on every engine
+// that caches it.
+func (r *Gobuild) Dependencies(base *Container, hdr *Directory, tools *Directory, platform string, modRoot string, moduleNames []string, moduleDirs []*Directory, packages *File, opts ...GobuildDependenciesOpts) *GobuildDependencyBuilds {
 	assertNotNil("base", base)
 	assertNotNil("hdr", hdr)
 	assertNotNil("tools", tools)
+	assertNotNil("packages", packages)
 	q := r.query.Select("dependencies")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `importedNames` optional argument
+		if !querybuilder.IsZeroValue(opts[i].ImportedNames) {
+			q = q.Arg("importedNames", opts[i].ImportedNames)
+		}
+		// `imported` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Imported) {
+			q = q.Arg("imported", opts[i].Imported)
+		}
+	}
 	q = q.Arg("base", base)
 	q = q.Arg("hdr", hdr)
 	q = q.Arg("tools", tools)
@@ -279,7 +330,6 @@ func (r *Gobuild) Dependencies(base *Container, hdr *Directory, tools *Directory
 	q = q.Arg("moduleNames", moduleNames)
 	q = q.Arg("moduleDirs", moduleDirs)
 	q = q.Arg("packages", packages)
-	q = q.Arg("links", links)
 
 	return &GobuildDependencyBuilds{
 		query:     q,
@@ -395,6 +445,260 @@ func (r *Gobuild) UnmarshalJSON(bs []byte) error {
 	return nil
 }
 
+// LinkObjects is the object code a link reads of each package in dirs, the
+// package directories the dependency call returns: in each, the file named
+// in files, in the same order, keyed by its content. A build that links
+// calls it through the engine, so a later build of the same dependencies
+// finds all of their object code in one request, instead of one for each
+// package.
+func (r *Gobuild) LinkObjects(ctx context.Context, dirs []*Directory, files []string) ([]File, error) {
+	q := r.query.Select("linkObjects")
+	q = q.Arg("dirs", dirs)
+	q = q.Arg("files", files)
+
+	q = q.Select("id")
+
+	type linkObjects struct {
+		Id ID
+	}
+
+	convert := func(fields []linkObjects) []File {
+		out := []File{}
+
+		for i := range fields {
+			val := *loaded[*File](q, fields[i].Id)
+			out = append(out, val)
+		}
+
+		return out
+	}
+	var response []linkObjects
+
+	q = q.Bind(&response)
+
+	err := q.Execute(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return convert(response), nil
+}
+
+// GobuildModuleProxyOpts contains options for Gobuild.ModuleProxy
+type GobuildModuleProxyOpts struct {
+	// The image a public module downloads in, as for Binary.
+	Image string
+	// The custom container a public module downloads in, as for Binary.
+	From *Container
+	// The container module downloads run with, as for Binary.
+	Downloads *Container
+}
+
+// ModuleProxy downloads every module version a go.sum names, as a build
+// downloads it, and returns them in one directory laid out as a Go module
+// proxy, for GOPROXY=file://<dir>: a version with a zip checksum as its
+// .zip, .mod and .info, one with only a go.mod checksum as its .mod and
+// .info. A go command reads them with no module cache of anyone's, and asks
+// the next proxy in GOPROXY for what isn't there. It answers only for exact
+// versions: the go command's version lists, which a download leaves, list
+// only the versions the go.sum names, so a query such as @latest would find
+// one of those instead of asking the next proxy, and are left out.
+//
+// Each version is a download of its own (downloadModule), keyed by its
+// path, version and checksums, which every call for that version in the
+// same container shares. Unlike a build's, it reads no module cache the
+// image comes with, so it doesn't share a build's download. The directory
+// is keyed by the go.sum and those downloads. Any download that fails, and any .zip or .mod that doesn't
+// match the go.sum, fails the call, so a directory that exists holds every
+// version the go.sum names, checked.
+func (r *Gobuild) ModuleProxy(goSum *File, opts ...GobuildModuleProxyOpts) *Directory {
+	assertNotNil("goSum", goSum)
+	q := r.query.Select("moduleProxy")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `image` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Image) {
+			q = q.Arg("image", opts[i].Image)
+		}
+		// `from` optional argument
+		if !querybuilder.IsZeroValue(opts[i].From) {
+			q = q.Arg("from", opts[i].From)
+		}
+		// `downloads` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Downloads) {
+			q = q.Arg("downloads", opts[i].Downloads)
+		}
+	}
+	q = q.Arg("goSum", goSum)
+
+	return new(Directory).WithGraphQLQuery(q)
+}
+
+// GobuildScopeOpts contains options for Gobuild.Scope
+type GobuildScopeOpts struct {
+	// The image base was made from, as for Binary.
+	Image string
+	// The custom container base was made from, as for Binary.
+	From *Container
+	// The directory the build runs in, relative to mountPath.
+	//
+	// Default: "."
+	Workdir string
+	// The build's package arguments: Binary's or TestBinary's package,
+	// TestBinary's set, TestBinaries' packages, or Archives' packages.
+	// Unset, or with a "..." pattern, every package of the module, for which
+	// the whole source and pack are kept.
+	Packages []string
+	// Whether the build reads the packages' test files.
+	Tests bool
+	// Whether the build compiles only the packages outside the module, as
+	// Archives with dependencies does: without tests, for one package, they
+	// are keyed by what it imports outside the module (dependencyScope).
+	Dependencies bool
+	// The build's flags.
+	Flags []string
+	// The container module downloads run with, as for Binary.
+	Downloads *Container
+}
+
+// Scope is what a build of packages reads of source and headers: the files
+// of the source directories its plan reads (planDirs), with every module's
+// go.mod and go.sum, and the header pack the plan reads (planHeaders). Given
+// them instead of the whole source and pack, a Binary, TestBinary,
+// TestBinaries or Archives call is the same call after an edit of any other
+// file, which Dagger answers from its cache: both are keyed by their
+// content.
+//
+// A directory keeps its Go files, its .syso files and its default.pgo, or
+// with a //go:embed line, everything below it; without tests, but where an
+// embed may name them, not its test files, which the build doesn't compile.
+// The whole source and pack are kept for a build of every package, which
+// reads them whole, and when the build may read a file of the source this
+// can't tell it reads: when one of those directories holds C, C++ or assembly,
+// uses cgo or holds a symlink; when flags or the base's GOFLAGS or
+// GOWORK name a file (fileFlags); when a package is named other than by a
+// path below the build's directory; when the source holds a version control
+// system's metadata, which the go command stamps a binary from, for a
+// build without tests or with -buildvcs=true; in vendor mode; and when the
+// go command switches to another toolchain.
+func (r *Gobuild) Scope(base *Container, source *Directory, headers *File, mountPath string, opts ...GobuildScopeOpts) *GobuildScoped {
+	assertNotNil("base", base)
+	assertNotNil("source", source)
+	assertNotNil("headers", headers)
+	q := r.query.Select("scope")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `image` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Image) {
+			q = q.Arg("image", opts[i].Image)
+		}
+		// `from` optional argument
+		if !querybuilder.IsZeroValue(opts[i].From) {
+			q = q.Arg("from", opts[i].From)
+		}
+		// `workdir` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Workdir) {
+			q = q.Arg("workdir", opts[i].Workdir)
+		}
+		// `packages` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Packages) {
+			q = q.Arg("packages", opts[i].Packages)
+		}
+		// `tests` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Tests) {
+			q = q.Arg("tests", opts[i].Tests)
+		}
+		// `dependencies` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Dependencies) {
+			q = q.Arg("dependencies", opts[i].Dependencies)
+		}
+		// `flags` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Flags) {
+			q = q.Arg("flags", opts[i].Flags)
+		}
+		// `downloads` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Downloads) {
+			q = q.Arg("downloads", opts[i].Downloads)
+		}
+	}
+	q = q.Arg("base", base)
+	q = q.Arg("source", source)
+	q = q.Arg("headers", headers)
+	q = q.Arg("mountPath", mountPath)
+
+	return &GobuildScoped{
+		query:     q,
+		refetchID: r.refetchID,
+	}
+}
+
+// GobuildTestBinariesOpts contains options for Gobuild.TestBinaries
+type GobuildTestBinariesOpts struct {
+	// The image base was made from, as for Binary.
+	Image string
+	// The custom container base was made from, as for Binary.
+	From *Container
+	// The directory to run go test in, relative to mountPath.
+	//
+	// Default: "."
+	Workdir string
+	// Flags for go test -c, before the packages, e.g. -race or -ldflags.
+	Flags []string
+	// The container module downloads run with, as for Binary.
+	Downloads *Container
+	// Import paths whose packages are compiled in dependency calls of their
+	// own, as for Binary.
+	SharedImports []string
+}
+
+// TestBinaries builds the test binaries of packages pkgs as go test -c
+// builds them together, each as TestBinary builds one, from one plan of them
+// all: the set's setup, plan, test mains and dependency call are made once,
+// and a package more than one binary compiles compiles once. As on go test's
+// command line, a build flag without a package pattern, such as
+// -gcflags=-N, applies to every one of pkgs, including where one is
+// another's dependency. It returns a directory with each binary in its
+// package's directory, relative to workdir, named as go test -c names it,
+// e.g. "a/a.test". A package with no test files for the target, whose files
+// build constraints leave out, has none, as go test builds it none.
+func (r *Gobuild) TestBinaries(base *Container, source *Directory, headers *File, mountPath string, pkgs []string, opts ...GobuildTestBinariesOpts) *Directory {
+	assertNotNil("base", base)
+	assertNotNil("source", source)
+	assertNotNil("headers", headers)
+	q := r.query.Select("testBinaries")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `image` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Image) {
+			q = q.Arg("image", opts[i].Image)
+		}
+		// `from` optional argument
+		if !querybuilder.IsZeroValue(opts[i].From) {
+			q = q.Arg("from", opts[i].From)
+		}
+		// `workdir` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Workdir) {
+			q = q.Arg("workdir", opts[i].Workdir)
+		}
+		// `flags` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Flags) {
+			q = q.Arg("flags", opts[i].Flags)
+		}
+		// `downloads` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Downloads) {
+			q = q.Arg("downloads", opts[i].Downloads)
+		}
+		// `sharedImports` optional argument
+		if !querybuilder.IsZeroValue(opts[i].SharedImports) {
+			q = q.Arg("sharedImports", opts[i].SharedImports)
+		}
+	}
+	q = q.Arg("base", base)
+	q = q.Arg("source", source)
+	q = q.Arg("headers", headers)
+	q = q.Arg("mountPath", mountPath)
+	q = q.Arg("pkgs", pkgs)
+
+	return new(Directory).WithGraphQLQuery(q)
+}
+
 // GobuildTestBinaryOpts contains options for Gobuild.TestBinary
 type GobuildTestBinaryOpts struct {
 	// The image base was made from, as for Binary.
@@ -409,6 +713,18 @@ type GobuildTestBinaryOpts struct {
 	Flags []string
 	// The container module downloads run with, as for Binary.
 	Downloads *Container
+	// Import paths whose packages are compiled in dependency calls of their
+	// own, as for Binary.
+	SharedImports []string
+	// The go test package arguments of the test binaries planned with this
+	// one, pkg's among them, such as its collection's. The plan, its setup,
+	// the test mains and the dependency call are those of TestBinaries of the
+	// set, which every TestBinary of the set shares, and this one compiles
+	// only what its binary links, so it is ready when its own link is. With
+	// a flag, in flags or the base's GOFLAGS, whose packages are those on go
+	// test's command line (commandLineFlags), it is planned alone, so that it
+	// is go test -c's of pkg alone.
+	Set []string
 }
 
 // TestBinary builds the test binary of package pkg as "go test -c" would,
@@ -443,6 +759,14 @@ func (r *Gobuild) TestBinary(base *Container, source *Directory, headers *File, 
 		// `downloads` optional argument
 		if !querybuilder.IsZeroValue(opts[i].Downloads) {
 			q = q.Arg("downloads", opts[i].Downloads)
+		}
+		// `sharedImports` optional argument
+		if !querybuilder.IsZeroValue(opts[i].SharedImports) {
+			q = q.Arg("sharedImports", opts[i].SharedImports)
+		}
+		// `set` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Set) {
+			q = q.Arg("set", opts[i].Set)
 		}
 	}
 	q = q.Arg("base", base)
@@ -681,7 +1005,8 @@ func (r *GobuildDependencyBuilds) Archives(ctx context.Context) ([]File, error) 
 	return convert(response), nil
 }
 
-// Each package's work directory, which holds its archive.
+// Each package's work directory, which holds its archive and, when the
+// package splits, the object code a link reads.
 func (r *GobuildDependencyBuilds) Dirs(ctx context.Context) ([]Directory, error) {
 	q := r.query.Select("dirs")
 
@@ -766,39 +1091,6 @@ func (r *GobuildDependencyBuilds) UnmarshalJSON(bs []byte) error {
 	}
 	*r = GobuildDependencyBuilds{query: selectNode(Connect().QueryBuilder(), id, "GobuildDependencyBuilds")}
 	return nil
-}
-
-// Each package's object code, which a link reads: its archive unless
-// the package splits. Empty when the call's caller doesn't link.
-func (r *GobuildDependencyBuilds) LinkObjects(ctx context.Context) ([]File, error) {
-	q := r.query.Select("linkObjects")
-
-	q = q.Select("id")
-
-	type linkObjects struct {
-		Id ID
-	}
-
-	convert := func(fields []linkObjects) []File {
-		out := []File{}
-
-		for i := range fields {
-			val := *loaded[*File](q, fields[i].Id)
-			out = append(out, val)
-		}
-
-		return out
-	}
-	var response []linkObjects
-
-	q = q.Bind(&response)
-
-	err := q.Execute(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	return convert(response), nil
 }
 
 // Discovery is what the discovery call (Discover) found: the modules a
@@ -952,6 +1244,112 @@ func (r *GobuildDiscovery) PlanMods(ctx context.Context) ([]string, error) {
 	q := r.query.Select("planMods")
 
 	var response []string
+
+	q = q.Bind(&response)
+	return response, q.Execute(ctx)
+}
+
+// Scoped is what a build reads of a source and of its header pack (Scope).
+type GobuildScoped struct { // gobuild (../../:0:0)
+	query *querybuilder.Selection
+	// refetchID is set when this object is built through a field marked
+	// @reevaluate: it fetches its ID on every use, so each use evaluates that
+	// field again.
+	refetchID bool
+
+	id      *ID
+	standIn *bool
+}
+
+func (r *GobuildScoped) WithGraphQLQuery(q *querybuilder.Selection) *GobuildScoped {
+	return &GobuildScoped{
+		query: q,
+		// The query's origin is unknown: it may go through a field that
+		// must be reevaluated.
+		refetchID: true,
+	}
+}
+
+// The header pack of those files.
+func (r *GobuildScoped) Headers() *File {
+	q := r.query.Select("headers")
+
+	return new(File).WithGraphQLQuery(q)
+}
+
+// A unique identifier for this GobuildScoped.
+func (r *GobuildScoped) ID(ctx context.Context) (ID, error) {
+	if r.id != nil {
+		return *r.id, nil
+	}
+	q := r.query.Select("id")
+
+	var response ID
+
+	q = q.Bind(&response)
+	if r.refetchID {
+		return response, q.Execute(ctx)
+	}
+	return memoizedID(ctx, r.query, func() (ID, error) {
+		err := q.Execute(ctx)
+		return response, err
+	})
+}
+
+// XXX_GraphQLType is an internal function. It returns the native GraphQL type name
+func (r *GobuildScoped) XXX_GraphQLType() string {
+	return "GobuildScoped"
+}
+
+// XXX_GraphQLIDType is an internal function. It returns the native GraphQL type name for the ID of this object
+func (r *GobuildScoped) XXX_GraphQLIDType() string {
+	return "ID"
+}
+
+// XXX_GraphQLID is an internal function. It returns the underlying type ID
+func (r *GobuildScoped) XXX_GraphQLID(ctx context.Context) (string, error) {
+	id, err := r.ID(ctx)
+	if err != nil {
+		return "", err
+	}
+	return string(id), nil
+}
+
+func (r *GobuildScoped) MarshalJSON() ([]byte, error) {
+	id, err := r.ID(marshalCtx)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(id)
+}
+func (r *GobuildScoped) UnmarshalJSON(bs []byte) error {
+	var id string
+	err := json.Unmarshal(bs, &id)
+	if err != nil {
+		return err
+	}
+	*r = GobuildScoped{query: selectNode(Connect().QueryBuilder(), id, "GobuildScoped")}
+	return nil
+}
+
+// The source's files the build reads.
+func (r *GobuildScoped) Source() *Directory {
+	q := r.query.Select("source")
+
+	return new(Directory).WithGraphQLQuery(q)
+}
+
+// Whether Source stands in for the module's own packages
+// (dependencyScope): its build may fail where theirs wouldn't, such as
+// when a dependency imports the module back, and the caller then builds
+// from the module's own source.
+func (r *GobuildScoped) StandIn(ctx context.Context) (bool, error) {
+	if r.standIn != nil {
+		return *r.standIn, nil
+	}
+	q := r.query.Select("standIn")
+
+	var response bool
 
 	q = q.Bind(&response)
 	return response, q.Execute(ctx)

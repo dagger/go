@@ -178,7 +178,7 @@ func TestPlanDirsOf(t *testing.T) {
 			},
 		},
 	}
-	got, _ := planDirsOf(src, "cmd", byPath, pkgs)
+	got, _ := planDirsOf(src, []string{"cmd"}, byPath, pkgs)
 	want := planDirs{
 		src:  []string{"cmd", "lib", "sub/inner"},
 		mods: []string{"github.com/dep/x@v1.0.0", "github.com/dep/x@v1.0.0/win"},
@@ -204,6 +204,24 @@ func TestPlanDirsOfTestdata(t *testing.T) {
 	}
 }
 
+// A build of every package of a module that is itself under a testdata
+// directory has the module's own packages, and leaves out only a testdata
+// directory below its working directory, as the go command's "./..." in it
+// does.
+func TestPlanDirsOfModuleInTestdata(t *testing.T) {
+	src := parseSourceImports(newTarget("linux\namd64\n0\ngo1.27.3\n", nil), "mod testdata/fixture example.com/fixture\n"+
+		"testdata/fixture\tmain.go\t-\texample.com/fixture/inner\n"+
+		"testdata/fixture/inner\tinner.go\t-\tgithub.com/dep/x\n"+
+		"testdata/fixture/testdata/skipped\tskipped.go\t-\tgithub.com/dep/skipped\n")
+	src.root = "testdata/fixture"
+	if got, want := planSrcDirs(src, ""), []string{"testdata/fixture", "testdata/fixture/inner"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("planDirsOf(every package, root testdata/fixture).src = %q, want %q", got, want)
+	}
+	if imports, _, _ := src.outside(); !reflect.DeepEqual(imports, []string{"github.com/dep/x"}) {
+		t.Errorf("outside(every package) = %q, want [github.com/dep/x]: the module's own packages' import, not its testdata's", imports)
+	}
+}
+
 // A package in a directory a go.mod replaces a module with is followed by the
 // replaced module's import paths, whatever module path its own go.mod
 // declares, as the go command accepts.
@@ -221,7 +239,7 @@ func TestPlanDirsOfReplace(t *testing.T) {
 
 // planSrcDirs is the source directories planDirsOf reaches from pkgDir.
 func planSrcDirs(src sourceImports, pkgDir string) []string {
-	dirs, _ := planDirsOf(src, pkgDir, nil, nil)
+	dirs, _ := planDirsOf(src, []string{pkgDir}, nil, nil)
 	return dirs.src
 }
 
@@ -287,9 +305,9 @@ func TestPlanDirsOfOutside(t *testing.T) {
 			dirs: map[string]string{"github.com/dep/z/zz": "github.com/dep/z@v1.0.0/zz"},
 		},
 	}
-	want, _ := planDirsOf(src, "cmd", byPath, pkgs)
+	want, _ := planDirsOf(src, []string{"cmd"}, byPath, pkgs)
 	imports, plan, _ := src.outside("cmd")
-	called, followed := planDirsOf(sourceImports{pkgs: map[string][]string{".": imports}, all: map[string][]string{".": plan}}, ".", byPath, pkgs)
+	called, followed := planDirsOf(sourceImports{pkgs: map[string][]string{".": imports}, all: map[string][]string{".": plan}}, []string{"."}, byPath, pkgs)
 	if !reflect.DeepEqual(called.mods, want.mods) {
 		t.Errorf("mods through the call = %q, want %q", called.mods, want.mods)
 	}

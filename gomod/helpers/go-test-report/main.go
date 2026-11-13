@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -185,7 +186,7 @@ func run() error {
 	reportPath := flag.String("report", "", "go test JSON report")
 	selectionPath := flag.String("selection", "", "selected package/test names")
 	stderrPath := flag.String("stderr", "", "go test stderr")
-	exitCode := flag.Int("exit-code", 0, "go test exit code")
+	exitCodePath := flag.String("exit-code-file", "", "file holding go test's exit code")
 	output := flag.String("output", "", "result directory")
 	flag.Parse()
 	data, err := os.ReadFile(*selectionPath)
@@ -206,7 +207,15 @@ func run() error {
 		return err
 	}
 	defer stderr.Close()
-	results, err := summarize(report, selections, *exitCode, stderr)
+	code, err := os.ReadFile(*exitCodePath)
+	if err != nil {
+		return err
+	}
+	exitCode, err := strconv.Atoi(strings.TrimSpace(string(code)))
+	if err != nil {
+		return fmt.Errorf("read exit code: %w", err)
+	}
+	results, err := summarize(report, selections, exitCode, stderr)
 	if err != nil {
 		return err
 	}
