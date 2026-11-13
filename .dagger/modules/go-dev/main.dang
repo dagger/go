@@ -1376,6 +1376,37 @@ type GoDev {
     assert(a == b, "the dependencies' archives differ from those of every package:\n" + a + "\n" + b)
   }
 
+  """
+  A package's test binary, taken from its module's collection, builds when a
+  sibling with tests that it doesn't import can't load, as go test -c of the
+  package alone does: the collection's shared plan fails, and the package is
+  planned alone. The sibling's own test binary fails with its own error.
+  """
+  brokenSiblingTestBinaryCheck: Void @check {
+    let ws = directory
+      .withNewFile("go.mod", "module example.com/siblings\n\ngo 1.22\n")
+      .withNewFile("good/good.go", "package good\n\n// Answer is the answer.\nfunc Answer() int { return 42 }\n")
+      .withNewFile("good/good_test.go", "package good\n\nimport \"testing\"\n\nfunc TestAnswer(t *testing.T) {\n\tif Answer() != 42 {\n\t\tt.Fatal(Answer())\n\t}\n}\n")
+      .withNewFile("broken/broken.go", "package broken\n\nimport \"example.com/nowhere/missing\"\n\nvar _ = missing.Value\n")
+      .withNewFile("broken/broken_test.go", "package broken\n\nimport \"testing\"\n\nfunc TestNothing(t *testing.T) {}\n")
+      .asWorkspace
+    let built = go(version: "1.27.3").modules(ws).get(key: ".").packages(ws).get(key: "good").testBinary(ws)
+    let out = container
+      .from("alpine:3.23")
+      .withFile("/good.test", built)
+      .withExec(["/good.test", "-test.v"])
+      .stdout
+    assert(out.contains("--- PASS: TestAnswer"), "the test binary ran: " + out)
+    # The package that can't load reports its own error.
+    let failure = {
+      go(version: "1.27.3").modules(ws).get(key: ".").packages(ws).get(key: "broken").testBinary(ws).size
+      "no failure"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(failure.contains("broken/broken.go") and failure.contains("example.com/nowhere/missing"), "the broken package's error: " + failure)
+  }
+
   # A module example.com/<name> whose root package calls strings.<call> and
   # imports net/url, and a package of its own that imports encoding/json.
   let dependencyModule(name: String!, call: String!): Directory! {

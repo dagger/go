@@ -2069,27 +2069,43 @@ type GoModule {
         .withWorkdir(path)
         .withExec(["go", "test", "-c", "-vet=off"] + buildFlags + ["-o", "/out/" + name, packageArg(rel)])
         .file("/out/" + name)
+    } else if (planned.length > 1) {
+      # The set's plan saves each member its own, but only while every
+      # member loads: one that can't, which go test -c of this package alone
+      # never reads, fails it. This package is then planned alone, and an
+      # error is its own.
+      {
+        planTestBinary(ws, ctr, rel, planned).sync
+      } rescue {
+        err: Error => planTestBinary(ws, ctr, rel, [])
+      }
     } else {
-      let read = scoped(ws, ctr, if (planned.length > 1) { planned } else { [packageArg(rel)] }, true)
-      builder.testBinary(
-        base: ctr,
-        image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
-        from: if (baseImage == null) { null } else { baseImage.withoutEntrypoint },
-        source: read.source,
-        headers: read.headers,
-        mountPath: mountPath,
-        workdir: path,
-        pkg: packageArg(rel),
-        flags: buildFlags,
-        downloads: tool.downloads,
-        sharedImports: tool.sharedImports,
-        set: if (planned.length > 1) { planned } else { null },
-      )
+      planTestBinary(ws, ctr, rel, [])
     }
     out.sync rescue {
       err: Error => raise "Go test binary " + packagePath(rel) + " for " + platform + ": " + err.message
     }
     out
+  }
+
+  # The test binary of the package at rel, from the plan of set's test
+  # binaries with it, or with none, its own.
+  let planTestBinary(ws: Workspace!, ctr: Container!, rel: String!, set: [String!]!): File! {
+    let read = scoped(ws, ctr, if (set.length > 1) { set } else { [packageArg(rel)] }, true)
+    builder.testBinary(
+      base: ctr,
+      image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
+      from: if (baseImage == null) { null } else { baseImage.withoutEntrypoint },
+      source: read.source,
+      headers: read.headers,
+      mountPath: mountPath,
+      workdir: path,
+      pkg: packageArg(rel),
+      flags: buildFlags,
+      downloads: tool.downloads,
+      sharedImports: tool.sharedImports,
+      set: if (set.length > 1) { set } else { null },
+    )
   }
 
   # The test binaries of the packages among pkgPaths that have test files,
