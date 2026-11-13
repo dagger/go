@@ -301,10 +301,16 @@ type GobuildDependenciesOpts struct {
 // call: every build that compiles the same packages the same way, whatever
 // its own source, finds it in one request, instead of one or two for each
 // package, and an edit of the build's own source leaves it as it is.
-func (r *Gobuild) Dependencies(base *Container, hdr *Directory, tools *Directory, platform string, modRoot string, moduleNames []string, moduleDirs []*Directory, packages string, opts ...GobuildDependenciesOpts) *GobuildDependencyBuilds {
+//
+// The packages come as a file, which the engine keys by its content: a list
+// runs to megabytes, and as a string it would be held in the call's
+// arguments, and in those of every exec that runs the call, on every engine
+// that caches it.
+func (r *Gobuild) Dependencies(base *Container, hdr *Directory, tools *Directory, platform string, modRoot string, moduleNames []string, moduleDirs []*Directory, packages *File, opts ...GobuildDependenciesOpts) *GobuildDependencyBuilds {
 	assertNotNil("base", base)
 	assertNotNil("hdr", hdr)
 	assertNotNil("tools", tools)
+	assertNotNil("packages", packages)
 	q := r.query.Select("dependencies")
 	for i := len(opts) - 1; i >= 0; i-- {
 		// `importedNames` optional argument

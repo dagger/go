@@ -600,7 +600,7 @@ func DaggerDispatch(ctx context.Context, parentJSON []byte, parentName string, f
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg moduleDirs", err))
 				}
 			}
-			var packages string
+			var packages *core.File
 			if inputArgs["packages"] != nil {
 				err = json.Unmarshal([]byte(inputArgs["packages"]), &packages)
 				if err != nil {

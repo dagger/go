@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -30,6 +32,11 @@ type DependencyBuilds struct {
 // call: every build that compiles the same packages the same way, whatever
 // its own source, finds it in one request, instead of one or two for each
 // package, and an edit of the build's own source leaves it as it is.
+//
+// The packages come as a file, which the engine keys by its content: a list
+// runs to megabytes, and as a string it would be held in the call's
+// arguments, and in those of every exec that runs the call, on every engine
+// that caches it.
 func (m *Gobuild) Dependencies(
 	ctx context.Context,
 	// The container each package's exec runs in.
@@ -48,8 +55,9 @@ func (m *Gobuild) Dependencies(
 	moduleNames []string,
 	moduleDirs []*dagger.Directory,
 	// The packages, as a JSON list of the walk's nodes, each named and
-	// importing by its stable name (dependencyNodes).
-	packages string,
+	// importing by its stable name (dependencyNodes), in a file
+	// (packagesFile).
+	packages *dagger.File,
 	// The packages they import that an earlier dependency call built
 	// (sharedImports), by stable name, and each one's archive, in the same
 	// order.
@@ -58,8 +66,12 @@ func (m *Gobuild) Dependencies(
 	// +optional
 	imported []*dagger.File,
 ) (*DependencyBuilds, error) {
+	js, err := readPackages(ctx, packages)
+	if err != nil {
+		return nil, err
+	}
 	var pkgs []*node
-	if err := json.Unmarshal([]byte(packages), &pkgs); err != nil {
+	if err := json.Unmarshal(js, &pkgs); err != nil {
 		return nil, fmt.Errorf("dependency packages: %w", err)
 	}
 	if len(moduleNames) != len(moduleDirs) {
@@ -322,7 +334,11 @@ func (b *build) dependencyCall(ctx context.Context, w *walker, pkgs []*node, lay
 	if err != nil {
 		return nil, err
 	}
-	return dagger.Connect().Gobuild(b.toolImage).Dependencies(w.base, w.hdr, w.tools, w.platform, b.roots.Mod, names, dirs, string(js),
+	file, err := packagesFile(ctx, js)
+	if err != nil {
+		return nil, err
+	}
+	return dagger.Connect().Gobuild(b.toolImage).Dependencies(w.base, w.hdr, w.tools, w.platform, b.roots.Mod, names, dirs, file,
 		dagger.GobuildDependenciesOpts{ImportedNames: importedNames, Imported: imported}), nil
 }
 
@@ -390,6 +406,58 @@ func dependencyLayers(pkgs []*node, shared []string) (layers [][]int, n int) {
 func standard(importPath string) bool {
 	first, _, _ := strings.Cut(importPath, "/")
 	return !strings.Contains(first, ".")
+}
+
+// packagesName and packagesMode are the dependency call's package file's
+// name and mode. The engine keys an imported file by its content together
+// with its name and mode, so every build passes the same list as the same
+// file, whatever directory it was written in.
+const (
+	packagesName = "packages.json"
+	packagesMode = 0o644
+)
+
+// packagesFile is js as the dependency call's package file: written in this
+// process's own filesystem and imported from it, so that the engine holds
+// the list as a file's content, not in any call's arguments. The import is
+// synced before the written copy is removed.
+func packagesFile(ctx context.Context, js []byte) (*dagger.File, error) {
+	dir, err := os.MkdirTemp("", "gobuild-dependencies-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(dir)
+	path := filepath.Join(dir, packagesName)
+	if err := os.WriteFile(path, js, packagesMode); err != nil {
+		return nil, err
+	}
+	// The umask can narrow WriteFile's mode, which is part of the key.
+	if err := os.Chmod(path, packagesMode); err != nil {
+		return nil, err
+	}
+	// Through the core library: a module's generated client is not to offer Host.
+	file, err := core.NewHost().File(path).Sync(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("import the dependency packages: %w", err)
+	}
+	return file, nil
+}
+
+// readPackages is the content of the dependency call's package file, read by
+// exporting it into this process's own filesystem: an export streams the
+// file and caches nothing, where reading its contents through the API would
+// cache them as a string.
+func readPackages(ctx context.Context, file *dagger.File) ([]byte, error) {
+	dir, err := os.MkdirTemp("", "gobuild-dependencies-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(dir)
+	path := filepath.Join(dir, packagesName)
+	if _, err := file.Export(ctx, path); err != nil {
+		return nil, fmt.Errorf("export the dependency packages: %w", err)
+	}
+	return os.ReadFile(path)
 }
 
 // nodeHeights is heightsOf for a walk's nodes alone: each one's weight plus
