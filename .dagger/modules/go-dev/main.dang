@@ -1342,15 +1342,19 @@ type GoDev {
   """
   A dependency that requires the module and imports one of its packages
   back, which the module's own source provides, gets the same dependencies'
-  archives as a build of every package: the stand-in for the module's own
-  packages fails there, as its go.sum has no entry for the module, and the
-  archives come from the module's own source. The dependency comes from a
-  file proxy in the base.
+  archives as a build of every package, though the version of the module it
+  requires is published: the stand-in for the module's own packages fails
+  there, as its go.sum, like any module's, has no checksum for the module
+  itself, and the archives come from the module's own source. Both modules
+  come from a file proxy in the base.
   """
   backImportArchivesCheck: Void @check {
     let dep = directory
       .withNewFile("go.mod", "module example.com/b\n\ngo 1.22\n\nrequire example.com/a v0.1.0\n")
       .withNewFile("b.go", "package b\n\nimport \"example.com/a/lib\"\n\nvar Name = lib.Name\n")
+    let published = directory
+      .withNewFile("go.mod", "module example.com/a\n\ngo 1.22\n")
+      .withNewFile("lib/lib.go", "package lib\n\nvar Name = \"published\"\n")
     let main = directory
       .withNewFile("go.mod", "module example.com/a\n\ngo 1.22\n\nrequire example.com/b v1.0.0\n")
       .withNewFile("lib/lib.go", "package lib\n\nvar Name = \"a\"\n")
@@ -1359,8 +1363,9 @@ type GoDev {
     let made = image
       .withExec(["apk", "add", "--no-cache", "zip"])
       .withDirectory("/z/example.com/b@v1.0.0", dep)
+      .withDirectory("/z/example.com/a@v0.1.0", published)
       .withDirectory("/ws", main)
-      .withExec(["sh", "-c", "set -e; p=/proxy/example.com/b/@v; mkdir -p $p; cd /z; zip -qr $p/v1.0.0.zip example.com/b@v1.0.0; cp example.com/b@v1.0.0/go.mod $p/v1.0.0.mod; printf 'v1.0.0\\n' > $p/list; printf '{\"Version\":\"v1.0.0\"}' > $p/v1.0.0.info; cd /ws; GOFLAGS=-mod=mod GOPROXY=file:///proxy GOSUMDB=off go mod tidy; ! grep -q '^example.com/a ' go.sum"])
+      .withExec(["sh", "-c", "set -e; cd /z; for m in b@v1.0.0 a@v0.1.0; do n=${m%@*}; v=${m#*@}; p=/proxy/example.com/$n/@v; mkdir -p $p; zip -qr $p/$v.zip example.com/$m; cp example.com/$m/go.mod $p/$v.mod; printf '%s\\n' $v > $p/list; printf '{\"Version\":\"%s\"}' $v > $p/$v.info; done; cd /ws; GOFLAGS=-mod=mod GOPROXY=file:///proxy GOSUMDB=off go mod tidy; ! grep -q '^example.com/a ' go.sum"])
     let base = image
       .withDirectory("/proxy", made.directory("/proxy"))
       .withEnvVariable("GOPROXY", "file:///proxy")
