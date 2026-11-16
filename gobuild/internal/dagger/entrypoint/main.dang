@@ -12,8 +12,6 @@ type Entrypoint implements ModuleEntrypoint {
     let target = `${platform}`.split("/")
     container
       .from("golang:1.27-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb")
-      .withMountedCache("/go/pkg/mod", cacheVolume("go-sdk-v2-mod"))
-      .withMountedCache("/root/.cache/go-build", cacheVolume("go-sdk-v2-build"))
       .withMountedDirectory("/workspace", currentModule.contextDirectory)
       .withWorkdir("/workspace/" + currentModule.sourceSubpath)
       .withEnvVariable("CGO_ENABLED", "0")
@@ -31,7 +29,11 @@ type Entrypoint implements ModuleEntrypoint {
   }
 
   pub runtimeImage(platform: Platform): Container! {
-    container(platform: platform ?? defaultPlatform).from("alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f")
+    container(platform: platform ?? defaultPlatform).from("alpine:3.22@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f")
+  }
+
+  pub description: String! {
+    "A private helper of the go module: it builds a main package with one exec\nper package, so Dagger caches each package's compile separately and an\nedit re-runs only what it reaches.\n\nIt replays the go command's own plan, \"go build -n\", made from a header\npack of the source, so an edit inside function bodies doesn't re-plan.\nEvery package, the standard library and dependencies included, is built\nin an exec of its own that reads only the archives of what it imports, so\nbuilds that compile the same package the same way share it, and a package\nwhose archive comes out unchanged leaves its dependents cached."
   }
 
   pub types: [TypeDef!]! {
