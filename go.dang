@@ -2038,6 +2038,8 @@ type GoModule {
   # One package's binary for a platform. Only a main package selected by the
   # build setting has one.
   let binaryFile(ws: Workspace!, platform: String!, pkgPath: String!): File! {
+    # Started first: before anything here reads the scan (headers).
+    let started = headers(ws)
     buildFile(ws, platform, selectedMain(ws, pkgPath), binaryFileName(
       ws,
       pkgPath,
@@ -2139,6 +2141,8 @@ type GoModule {
   # for a platform, from one plan of them all, each in its package's
   # directory relative to the workspace, named as go test -c names it.
   let testBinaryFiles(ws: Workspace!, platform: String!, pkgPaths: [String!]!): Directory! {
+    # Started first: before anything here reads the scan (headers).
+    let started = headers(ws)
     let tested = lib.at(path).testDirectories(ws)
     let rels = pkgPaths.filter { p => tested.contains(p) }.map { p => relativeDir(p) }
     let ctr = platformBase(ws, platform)
@@ -2334,6 +2338,8 @@ type GoModule {
   # The binaries of the main packages among pkgPaths, one build each: they
   # share the packages they have in common through the cache.
   let binaryFiles(ws: Workspace!, platform: String!, pkgPaths: [String!]!): Directory! {
+    # Started first: before anything here reads the scan (headers).
+    let started = headers(ws)
     mainPackages(ws, pkgPaths).reduce(directory) { out, p =>
       out.withDirectory(".", binaryOutputs(ws, platform, p))
     }
