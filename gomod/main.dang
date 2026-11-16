@@ -288,6 +288,79 @@ type Gomod {
   }
 
   """
+  gohdr (helpers/gohdr), the per-package build's tool, for every machine an
+  engine runs on (machineTools). "gohdr unpack" writes out a header pack, the
+  scan's copy of each Go file up to the end of its imports, for a build's
+  plan, and lists the pack's Go files in directories named like Go files.
+  "gohdr weigh" weighs the plan's steps by the Go source they compile.
+  "gohdr cc" answers the plan's C compiler probes. "gohdr linkid" makes a
+  link's build ID.
+  """
+  gohdr: Directory! {
+    machineTools("gohdr", currentModule.source.directory("helpers/gohdr"), ".")
+  }
+
+  """
+  golangci-lint's write-manifest, which writes the manifest.json of a
+  directory of per-package archives in the format its export driver reads,
+  for every machine an engine runs on (machineTools).
+  """
+  writeManifest: Directory! {
+    machineTools("write-manifest", writeManifestSource, "./cmd/write-manifest")
+  }
+
+  """
+  The module write-manifest is built from: the manifest module beside
+  golangci-lint's export driver, at golangciLintCommit, which needs only the
+  standard library. A cache that is to hold write-manifest's build, such as
+  an engine image's, holds it too, so a fresh engine need not fetch it to
+  find the build.
+  """
+  writeManifestSource: Directory! {
+    git("https://github.com/dagger/golangci-lint")
+      .commit(golangciLintCommit)
+      .tree
+      .directory("helpers/export-driver/manifest")
+  }
+
+  """
+  The dagger/golangci-lint commit whose manifest module write-manifest is
+  built from, in the format its export driver at that commit reads.
+  """
+  let golangciLintCommit: String! = "7d9cbaf83a85addefb99346297301eeb321d98c6"
+
+  # A tool's directory: the main package pkg of source, built for each
+  # machine an engine runs on under that machine's uname -m, and at name a
+  # script that runs the one for the exec's machine. Each is built in the
+  # pinned image, statically, so it runs in whatever image a build runs it
+  # in. An exec that mounts it is the same on every machine, so what it makes
+  # is the same whichever machine's tool ran.
+  #
+  # Its contents are the same whichever engine builds it and whatever a build
+  # targets: both binaries are cross-compiled from the same source and image.
+  # So it is declared for one platform (Directory.withPlatform) for every
+  # build: an engine of another platform, or an engine image made on one,
+  # then finds the one that was built, without building it again.
+  let machineTools(name: String!, source: Directory!, pkg: String!): Directory! {
+    directory
+      .withNewFile(name, "#!/bin/sh\nexec \"${0%/*}/$(uname -m)/" + name + "\" \"$@\"\n", permissions: 493)
+      .withFile("x86_64/" + name, toolBinary(source, pkg, "amd64"))
+      .withFile("aarch64/" + name, toolBinary(source, pkg, "arm64"))
+      .withPlatform(platform: ("linux/amd64" :: Platform!))
+  }
+
+  let toolBinary(source: Directory!, pkg: String!, goarch: String!): File! {
+    container.from(goImage(scannerVersion))
+      .withEnvVariable("CGO_ENABLED", "0")
+      .withEnvVariable("GOOS", "linux")
+      .withEnvVariable("GOARCH", goarch)
+      .withMountedDirectory("/src", source)
+      .withWorkdir("/src")
+      .withExec(["go", "build", "-o", "/out", pkg], disableDaggerInDagger: true, noInit: true)
+      .file("/out")
+  }
+
+  """
   Scanner container that computes includes for every module in one local pass
   over a content-addressed Go-source snapshot of the workspace. It reads the
   snapshot from the local filesystem, so the exec caches on source content and

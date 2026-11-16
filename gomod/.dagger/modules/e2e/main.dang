@@ -346,11 +346,11 @@ type E2e {
   }
 
   """
-  The unit tests of the library's helpers: the source scanner and the test
-  report indexer.
+  The unit tests of the library's helpers: the source scanner, the test
+  report indexer and the per-package build's gohdr.
   """
   helperCheck(ws: Workspace!): Void @check {
-    [helperPath, "gomod/helpers/go-test-report"].map { helper =>
+    [helperPath, "gomod/helpers/go-test-report", "gomod/helpers/gohdr"].map { helper =>
       gomod
         .withGoCaches(container.from("golang:" + gomod.scannerVersion + "-alpine"))
         .withDirectory("/src", ws.directory("/" + helper))

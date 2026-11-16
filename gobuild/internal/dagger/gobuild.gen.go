@@ -57,13 +57,14 @@ type GobuildArchiveBuildsOpts struct {
 
 // ArchiveBuilds compiles what Archives compiles, with its arguments, and
 // returns what it read from the cache instead of the export driver's
-// directory: each package's build, each module download, gohdr,
-// write-manifest and its source, and Go's pack. A cache that is to have exactly these results, such as the cache an
+// directory: each package's build, each module download, and Go's pack;
+// gohdr and write-manifest are the caller's. A cache that is to have exactly these results, such as the cache an
 // engine image pre-warms, is filled from them.
-func (r *Gobuild) ArchiveBuilds(base *Container, source *Directory, headers *File, mountPath string, opts ...GobuildArchiveBuildsOpts) *GobuildArchiveCache {
+func (r *Gobuild) ArchiveBuilds(base *Container, source *Directory, headers *File, writeManifest *Directory, mountPath string, opts ...GobuildArchiveBuildsOpts) *GobuildArchiveCache {
 	assertNotNil("base", base)
 	assertNotNil("source", source)
 	assertNotNil("headers", headers)
+	assertNotNil("writeManifest", writeManifest)
 	q := r.query.Select("archiveBuilds")
 	for i := len(opts) - 1; i >= 0; i-- {
 		// `image` optional argument
@@ -106,6 +107,7 @@ func (r *Gobuild) ArchiveBuilds(base *Container, source *Directory, headers *Fil
 	q = q.Arg("base", base)
 	q = q.Arg("source", source)
 	q = q.Arg("headers", headers)
+	q = q.Arg("writeManifest", writeManifest)
 	q = q.Arg("mountPath", mountPath)
 
 	return &GobuildArchiveCache{
@@ -158,10 +160,11 @@ type GobuildArchivesOpts struct {
 // runs no cgo. With dependencies, only the packages of other modules and the
 // standard library: a directory keyed by their content alone, which an edit
 // of the module's own packages leaves as it is.
-func (r *Gobuild) Archives(base *Container, source *Directory, headers *File, mountPath string, opts ...GobuildArchivesOpts) *Directory {
+func (r *Gobuild) Archives(base *Container, source *Directory, headers *File, writeManifest *Directory, mountPath string, opts ...GobuildArchivesOpts) *Directory {
 	assertNotNil("base", base)
 	assertNotNil("source", source)
 	assertNotNil("headers", headers)
+	assertNotNil("writeManifest", writeManifest)
 	q := r.query.Select("archives")
 	for i := len(opts) - 1; i >= 0; i-- {
 		// `image` optional argument
@@ -204,6 +207,7 @@ func (r *Gobuild) Archives(base *Container, source *Directory, headers *File, mo
 	q = q.Arg("base", base)
 	q = q.Arg("source", source)
 	q = q.Arg("headers", headers)
+	q = q.Arg("writeManifest", writeManifest)
 	q = q.Arg("mountPath", mountPath)
 
 	return new(Directory).WithGraphQLQuery(q)
@@ -306,9 +310,8 @@ type GobuildDependenciesOpts struct {
 // runs to megabytes, and as a string it would be held in the call's
 // arguments, and in those of every exec that runs the call, on every engine
 // that caches it.
-func (r *Gobuild) Dependencies(base *Container, hdr *Directory, tools *Directory, platform string, modRoot string, moduleNames []string, moduleDirs []*Directory, packages *File, opts ...GobuildDependenciesOpts) *GobuildDependencyBuilds {
+func (r *Gobuild) Dependencies(base *Container, tools *Directory, platform string, modRoot string, moduleNames []string, moduleDirs []*Directory, packages *File, opts ...GobuildDependenciesOpts) *GobuildDependencyBuilds {
 	assertNotNil("base", base)
-	assertNotNil("hdr", hdr)
 	assertNotNil("tools", tools)
 	assertNotNil("packages", packages)
 	q := r.query.Select("dependencies")
@@ -323,7 +326,6 @@ func (r *Gobuild) Dependencies(base *Container, hdr *Directory, tools *Directory
 		}
 	}
 	q = q.Arg("base", base)
-	q = q.Arg("hdr", hdr)
 	q = q.Arg("tools", tools)
 	q = q.Arg("platform", platform)
 	q = q.Arg("modRoot", modRoot)
@@ -357,9 +359,8 @@ type GobuildDiscoverOpts struct {
 // go.sums, finds it in one request, instead of two for each module, and an
 // edit of the build's own source that changes none of those imports leaves
 // it as it is.
-func (r *Gobuild) Discover(public *Container, hdr *Directory, gomodcache string, sums string, goenv string, imports []string, planImports []string, own []string, opts ...GobuildDiscoverOpts) *GobuildDiscovery {
+func (r *Gobuild) Discover(public *Container, gomodcache string, sums string, goenv string, imports []string, planImports []string, own []string, opts ...GobuildDiscoverOpts) *GobuildDiscovery {
 	assertNotNil("public", public)
-	assertNotNil("hdr", hdr)
 	q := r.query.Select("discover")
 	for i := len(opts) - 1; i >= 0; i-- {
 		// `private` optional argument
@@ -376,7 +377,6 @@ func (r *Gobuild) Discover(public *Container, hdr *Directory, gomodcache string,
 		}
 	}
 	q = q.Arg("public", public)
-	q = q.Arg("hdr", hdr)
 	q = q.Arg("gomodcache", gomodcache)
 	q = q.Arg("sums", sums)
 	q = q.Arg("goenv", goenv)
@@ -920,30 +920,6 @@ func (r *GobuildArchiveCache) UnmarshalJSON(bs []byte) error {
 	return nil
 }
 
-func (r *GobuildArchiveCache) ManifestSource() *Directory {
-	q := r.query.Select("manifestSource")
-
-	return new(Directory).WithGraphQLQuery(q)
-}
-
-// golangci-lint's write-manifest, which writes the archives' manifest,
-// for every machine an engine runs on (machineTools), and the source it
-// is built from, which a fresh engine would otherwise fetch to find the
-// build.
-func (r *GobuildArchiveCache) ManifestTool() *Directory {
-	q := r.query.Select("manifestTool")
-
-	return new(Directory).WithGraphQLQuery(q)
-}
-
-// gohdr, the tool the build's execs run, for every machine an engine
-// runs on (machineTools).
-func (r *GobuildArchiveCache) Tool() *Directory {
-	q := r.query.Select("tool")
-
-	return new(Directory).WithGraphQLQuery(q)
-}
-
 // Go's own tools the build's execs run, built by its toolchain for every
 // machine an engine runs on: pack, which packages with assembly run.
 func (r *GobuildArchiveCache) Tools() *Directory {
@@ -1355,9 +1331,11 @@ func (r *GobuildScoped) StandIn(ctx context.Context) (bool, error) {
 	return response, q.Execute(ctx)
 }
 
-func (r *Query) Gobuild(toolImage string) *Gobuild { // gobuild (../../:0:0)
+func (r *Query) Gobuild(toolImage string, gohdr *Directory) *Gobuild { // gobuild (../../:0:0)
+	assertNotNil("gohdr", gohdr)
 	q := r.query.Select("gobuild")
 	q = q.Arg("toolImage", toolImage)
+	q = q.Arg("gohdr", gohdr)
 
 	return &Gobuild{
 		query:     q,

@@ -108,7 +108,7 @@ type walker struct {
 	// platform is the build's target, as a Platform, which each package's
 	// output is declared for.
 	platform string
-	// hdr is gohdr, for every machine an engine runs on (hdrTools).
+	// hdr is gohdr, for every machine an engine runs on (Gobuild's gohdr).
 	hdr   *dagger.Directory
 	tools *dagger.Directory
 	// mods is the module cache's modules, each on its own.

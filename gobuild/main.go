@@ -30,17 +30,23 @@ import (
 type Gobuild struct {
 	// +private
 	ToolImage string
+	// +private
+	Gohdr *dagger.Directory
 }
 
 func New(
-	// The image gohdr, the build's own tool, is built in, which every plan and
-	// download mounts. It is the image of the Go version gomod's tools build
-	// with (Gomod.goImage of its scannerVersion), pinned by digest there, so a
-	// build pulls one Go image, which an engine image can ship, and gohdr is
-	// the same input in every build.
+	// The image the build's own steps that run gohdr alone run in. It is the
+	// image of the Go version gomod's tools build with (Gomod.goImage of its
+	// scannerVersion), pinned by digest there, so a build pulls one Go
+	// image, which an engine image can ship.
 	toolImage string,
+	// gohdr, the build's own tool, which every plan, download and link that
+	// needs it mounts, for every machine an engine runs on (Gomod.gohdr).
+	// The caller builds it, so its build can start before this module's
+	// own.
+	gohdr *dagger.Directory,
 ) *Gobuild {
-	return &Gobuild{ToolImage: toolImage}
+	return &Gobuild{ToolImage: toolImage, Gohdr: gohdr}
 }
 
 // bare runs an exec as its command alone: none of these execs call Dagger,
@@ -110,7 +116,7 @@ func (m *Gobuild) Binary(
 	sharedImports []string,
 ) (_ *dagger.Directory, rerr error) {
 	defer reportExec(&rerr)
-	blocks, linked, err := run(ctx, m.ToolImage, base, image, from, downloads, source, headers, mountPath, workdir, pkg, flags, false, sharedImports)
+	blocks, linked, err := run(ctx, m, base, image, from, downloads, source, headers, mountPath, workdir, pkg, flags, false, sharedImports)
 	if err != nil {
 		return nil, err
 	}
@@ -190,10 +196,10 @@ func (m *Gobuild) TestBinary(
 			return nil, fmt.Errorf("GOFLAGS: %w", err)
 		}
 		if !commandLineFlags(append(envFlags, flags...)) {
-			return setMember(ctx, m.ToolImage, base, image, from, downloads, source, headers, mountPath, workdir, pkg, set, flags, sharedImports)
+			return setMember(ctx, m, base, image, from, downloads, source, headers, mountPath, workdir, pkg, set, flags, sharedImports)
 		}
 	}
-	_, linked, err := run(ctx, m.ToolImage, base, image, from, downloads, source, headers, mountPath, workdir, pkg, flags, true, sharedImports)
+	_, linked, err := run(ctx, m, base, image, from, downloads, source, headers, mountPath, workdir, pkg, flags, true, sharedImports)
 	if err != nil {
 		return nil, err
 	}
@@ -244,13 +250,13 @@ func (m *Gobuild) TestBinaries(
 	sharedImports []string,
 ) (_ *dagger.Directory, rerr error) {
 	defer reportExec(&rerr)
-	return runTests(ctx, m.ToolImage, base, image, from, downloads, source, headers, mountPath, workdir, pkgs, flags, sharedImports)
+	return runTests(ctx, m, base, image, from, downloads, source, headers, mountPath, workdir, pkgs, flags, sharedImports)
 }
 
 // setMember builds pkg's test binary from the plan of set's, as TestBinary
 // with a set does.
-func setMember(ctx context.Context, toolImage string, base *dagger.Container, image string, from, downloads *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir, pkg string, set, flags, shared []string) (*dagger.File, error) {
-	t, err := planTestSet(ctx, toolImage, base, image, from, downloads, source, headers, mountPath, workdir, set, flags, shared)
+func setMember(ctx context.Context, m *Gobuild, base *dagger.Container, image string, from, downloads *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir, pkg string, set, flags, shared []string) (*dagger.File, error) {
+	t, err := planTestSet(ctx, m, base, image, from, downloads, source, headers, mountPath, workdir, set, flags, shared)
 	if err != nil {
 		return nil, err
 	}
@@ -271,9 +277,9 @@ func setMember(ctx context.Context, toolImage string, base *dagger.Container, im
 }
 
 // runTests builds pkgs' test binaries from one plan, as TestBinaries does.
-func runTests(ctx context.Context, toolImage string, base *dagger.Container, image string, from, downloads *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir string, pkgs, flags, shared []string) (*dagger.Directory, error) {
+func runTests(ctx context.Context, m *Gobuild, base *dagger.Container, image string, from, downloads *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir string, pkgs, flags, shared []string) (*dagger.Directory, error) {
 	out := core.NewDirectory()
-	t, err := planTestSet(ctx, toolImage, base, image, from, downloads, source, headers, mountPath, workdir, pkgs, flags, shared)
+	t, err := planTestSet(ctx, m, base, image, from, downloads, source, headers, mountPath, workdir, pkgs, flags, shared)
 	if err != nil || t == nil {
 		return out, err
 	}
@@ -310,7 +316,7 @@ type testsPlan struct {
 // setup, plan and listing for every caller with the same pkgs, flags and
 // shared imports, so the engine runs each of their steps once. It is nil
 // when none of pkgs has test files for the target.
-func planTestSet(ctx context.Context, toolImage string, base *dagger.Container, image string, from, downloads *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir string, pkgs, flags, shared []string) (*testsPlan, error) {
+func planTestSet(ctx context.Context, m *Gobuild, base *dagger.Container, image string, from, downloads *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir string, pkgs, flags, shared []string) (*testsPlan, error) {
 	if len(pkgs) == 0 {
 		return nil, nil
 	}
@@ -321,7 +327,7 @@ func planTestSet(ctx context.Context, toolImage string, base *dagger.Container, 
 	for i, pkg := range pkgs {
 		dirs[i] = path.Join(workdir, pkg)
 	}
-	b, err := newBuild(ctx, toolImage, base, image, from, downloads, source, headers, dirs, true, mountPath, cwd, flags)
+	b, err := newBuild(ctx, m, base, image, from, downloads, source, headers, dirs, true, mountPath, cwd, flags)
 	if err != nil {
 		return nil, err
 	}
@@ -483,6 +489,10 @@ func (m *Gobuild) Archives(
 	// The header pack of source's Go files, test files included, and go.mod
 	// files, from the go module's scan.
 	headers *dagger.File,
+	// golangci-lint's write-manifest, which writes manifest.json in the
+	// format its export driver reads, for every machine an engine runs on
+	// (Gomod.writeManifest).
+	writeManifest *dagger.Directory,
 	// Where source is mounted.
 	mountPath string,
 	// The module's directory, relative to mountPath.
@@ -512,7 +522,7 @@ func (m *Gobuild) Archives(
 	sharedImports []string,
 ) (_ *dagger.Directory, rerr error) {
 	defer reportExec(&rerr)
-	w, err := archiveWalk(ctx, m.ToolImage, base, image, from, source, headers, mountPath, workdir, flags, dependencies, downloads, packages, tests, sharedImports)
+	w, err := archiveWalk(ctx, m, base, image, from, source, headers, writeManifest, mountPath, workdir, flags, dependencies, downloads, packages, tests, sharedImports)
 	if err != nil {
 		return nil, err
 	}
@@ -588,13 +598,13 @@ type archiveWalked struct {
 	blocks   map[string]*block
 	results  map[string]*result
 	order    []*block
-	// manifestTool is write-manifest, for the build's target, which the
-	// plan's exec ran to record the go command's settings.
+	// manifestTool is write-manifest, which the plan's exec ran to record
+	// the go command's settings.
 	manifestTool *dagger.Directory
 }
 
 // archiveWalk plans and walks what Archives compiles, with Archives' arguments.
-func archiveWalk(ctx context.Context, toolImage string, base *dagger.Container, image string, from *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir string, flags []string, dependencies bool, downloads *dagger.Container, packages []string, tests bool, shared []string) (*archiveWalked, error) {
+func archiveWalk(ctx context.Context, m *Gobuild, base *dagger.Container, image string, from *dagger.Container, source *dagger.Directory, headers *dagger.File, writeManifest *dagger.Directory, mountPath, workdir string, flags []string, dependencies bool, downloads *dagger.Container, packages []string, tests bool, shared []string) (*archiveWalked, error) {
 	cwd := path.Join(mountPath, workdir)
 	// Discovery follows the imports of the one package archived, as a
 	// binary's build follows its package's; of every package otherwise.
@@ -602,7 +612,7 @@ func archiveWalk(ctx context.Context, toolImage string, base *dagger.Container, 
 	if len(packages) == 1 && !strings.Contains(packages[0], "...") {
 		pkgDirs = []string{path.Join(workdir, packages[0])}
 	}
-	b, err := newBuild(ctx, toolImage, base, image, from, downloads, source, headers, pkgDirs, tests, mountPath, cwd, flags)
+	b, err := newBuild(ctx, m, base, image, from, downloads, source, headers, pkgDirs, tests, mountPath, cwd, flags)
 	if err != nil {
 		return nil, err
 	}
@@ -625,8 +635,7 @@ func archiveWalk(ctx context.Context, toolImage string, base *dagger.Container, 
 		packages = []string{"./..."}
 	}
 	goCmd := shJoin(append(append(listCmd, flags...), packages...)) + " > /gobuild/list.json"
-	tool := manifestTools(toolImage, b.target.platform())
-	p, err := b.planWith(ctx, headers, goCmd, tool)
+	p, err := b.planWith(ctx, headers, goCmd, writeManifest)
 	if err != nil {
 		return nil, err
 	}
@@ -660,7 +669,7 @@ func archiveWalk(ctx context.Context, toolImage string, base *dagger.Container, 
 		}
 	}
 	sort.Slice(order, func(i, j int) bool { return order[i].importPath < order[j].importPath })
-	return &archiveWalked{build: b, plan: p, envFlags: envFlags, blocks: blocks, results: results, order: order, manifestTool: tool}, nil
+	return &archiveWalked{build: b, plan: p, envFlags: envFlags, blocks: blocks, results: results, order: order, manifestTool: writeManifest}, nil
 }
 
 // ArchiveCache is what a build reads from the cache that every build of its
@@ -672,15 +681,6 @@ type ArchiveCache struct {
 	// Each module version the build downloaded (go mod download), with its
 	// plan pack and its zip, in the order of its module cache directory name.
 	Downloads []*dagger.Directory
-	// gohdr, the tool the build's execs run, for every machine an engine
-	// runs on (machineTools).
-	Tool *dagger.Directory
-	// golangci-lint's write-manifest, which writes the archives' manifest,
-	// for every machine an engine runs on (machineTools), and the source it
-	// is built from, which a fresh engine would otherwise fetch to find the
-	// build.
-	ManifestTool   *dagger.Directory
-	ManifestSource *dagger.Directory
 	// Go's own tools the build's execs run, built by its toolchain for every
 	// machine an engine runs on: pack, which packages with assembly run.
 	Tools *dagger.Directory
@@ -688,8 +688,8 @@ type ArchiveCache struct {
 
 // ArchiveBuilds compiles what Archives compiles, with its arguments, and
 // returns what it read from the cache instead of the export driver's
-// directory: each package's build, each module download, gohdr,
-// write-manifest and its source, and Go's pack. A cache that is to have exactly these results, such as the cache an
+// directory: each package's build, each module download, and Go's pack;
+// gohdr and write-manifest are the caller's. A cache that is to have exactly these results, such as the cache an
 // engine image pre-warms, is filled from them.
 func (m *Gobuild) ArchiveBuilds(
 	ctx context.Context,
@@ -705,6 +705,8 @@ func (m *Gobuild) ArchiveBuilds(
 	source *dagger.Directory,
 	// The header pack of source's Go files, as for Archives.
 	headers *dagger.File,
+	// write-manifest, as for Archives.
+	writeManifest *dagger.Directory,
 	// Where source is mounted.
 	mountPath string,
 	// The module's directory, relative to mountPath.
@@ -731,7 +733,7 @@ func (m *Gobuild) ArchiveBuilds(
 	sharedImports []string,
 ) (_ *ArchiveCache, rerr error) {
 	defer reportExec(&rerr)
-	w, err := archiveWalk(ctx, m.ToolImage, base, image, from, source, headers, mountPath, workdir, flags, dependencies, downloads, packages, tests, sharedImports)
+	w, err := archiveWalk(ctx, m, base, image, from, source, headers, writeManifest, mountPath, workdir, flags, dependencies, downloads, packages, tests, sharedImports)
 	if err != nil {
 		return nil, err
 	}
@@ -739,7 +741,7 @@ func (m *Gobuild) ArchiveBuilds(
 	for _, bl := range w.order {
 		dirs = append(dirs, w.results[bl.id].dir)
 	}
-	return &ArchiveCache{Builds: dirs, Downloads: w.build.downloads, Tool: w.build.hdr, ManifestTool: manifestTools(w.build.toolImage, w.build.target.platform()), ManifestSource: manifestSource(), Tools: w.build.tools}, nil
+	return &ArchiveCache{Builds: dirs, Downloads: w.build.downloads, Tools: w.build.tools}, nil
 }
 
 // listFields are the fields of go list's output Archives reads: the
@@ -868,14 +870,14 @@ func buildTags(flags []string) []string {
 
 // run builds pkg's binary, or with test its test binary, and returns the
 // plan's blocks and the link's result.
-func run(ctx context.Context, toolImage string, base *dagger.Container, image string, from, downloads *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir, pkg string, flags []string, test bool, shared []string) (map[string]*block, *result, error) {
+func run(ctx context.Context, m *Gobuild, base *dagger.Container, image string, from, downloads *dagger.Container, source *dagger.Directory, headers *dagger.File, mountPath, workdir, pkg string, flags []string, test bool, shared []string) (map[string]*block, *result, error) {
 	cwd := path.Join(mountPath, workdir)
 	if test {
 		// Vet is go test's, not the binary's, and is left to the lint
 		// checks: the per-package build doesn't replay it.
 		flags = append([]string{"-vet=off"}, flags...)
 	}
-	b, err := newBuild(ctx, toolImage, base, image, from, downloads, source, headers, []string{path.Join(workdir, pkg)}, test, mountPath, cwd, flags)
+	b, err := newBuild(ctx, m, base, image, from, downloads, source, headers, []string{path.Join(workdir, pkg)}, test, mountPath, cwd, flags)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1057,7 +1059,7 @@ type build struct {
 	// download per module.
 	fetch func(name string) *dagger.File
 	tools *dagger.Directory
-	// hdr is gohdr, for every machine an engine runs on (hdrTools).
+	// hdr is gohdr, for every machine an engine runs on (Gobuild's gohdr).
 	hdr   *dagger.Directory
 	roots roots
 	// toolImage is the image the tools are built in, which the build's own
@@ -1074,28 +1076,18 @@ type build struct {
 // the packages it builds, relative to the source, or none for every package
 // of the module, and tests whether it builds tests: they decide which modules the
 // build downloads.
-func newBuild(ctx context.Context, toolImage string, ctr *dagger.Container, image string, from, downloads *dagger.Container, source *dagger.Directory, headers *dagger.File, pkgDirs []string, tests bool, mountPath, cwd string, flags []string) (*build, error) {
+func newBuild(ctx context.Context, m *Gobuild, ctr *dagger.Container, image string, from, downloads *dagger.Container, source *dagger.Directory, headers *dagger.File, pkgDirs []string, tests bool, mountPath, cwd string, flags []string) (*build, error) {
 	// The plan's view of the source is a filtered copy, as slow on a large
 	// source as the rest of this setup, which it doesn't depend on: it's
 	// made alongside it. An error shows again where the plan mounts it.
 	go planSource(source).Sync(ctx)
-	b, err := setup(ctx, toolImage, ctr, image, from, downloads, source, headers, pkgDirs, tests, mountPath, cwd, flags)
-	if err != nil {
-		return nil, err
-	}
-	// Go 1.25 and later run "go tool pack" for each package with assembly,
-	// the runtime among them, so a build on them needs pack and its runtime
-	// waits for it there: it's built alongside the plan instead. Earlier Go
-	// runs the toolchain's own pack. An error shows again where it's used.
-	if b.target.goMinor >= 25 {
-		go b.tools.Sync(ctx)
-	}
-	return b, nil
+	return setup(ctx, m, ctr, image, from, downloads, source, headers, pkgDirs, tests, mountPath, cwd, flags, true)
 }
 
 // setup is newBuild without what only a build reads, which Scope doesn't:
-// the plan's view of the source, and the pack tool.
-func setup(ctx context.Context, toolImage string, ctr *dagger.Container, image string, from, downloads *dagger.Container, source *dagger.Directory, headers *dagger.File, pkgDirs []string, tests bool, mountPath, cwd string, flags []string) (*build, error) {
+// the plan's view of the source, and with pack unset, building the pack
+// tool.
+func setup(ctx context.Context, m *Gobuild, ctr *dagger.Container, image string, from, downloads *dagger.Container, source *dagger.Directory, headers *dagger.File, pkgDirs []string, tests bool, mountPath, cwd string, flags []string, pack bool) (*build, error) {
 	var err error
 	if image != "" {
 		from = core.NewContainer().From(image)
@@ -1123,12 +1115,7 @@ func setup(ctx context.Context, toolImage string, ctr *dagger.Container, image s
 	if tests {
 		importsMode = "tests"
 	}
-	// The tools are for the build's target, as the builds that run them.
-	platform, err := targetPlatform(ctx, ctr)
-	if err != nil {
-		return nil, err
-	}
-	hdr := hdrTools(toolImage, platform)
+	toolImage, hdr := m.ToolImage, m.Gohdr
 	type listing struct {
 		out string
 		err error
@@ -1320,6 +1307,25 @@ go env GOOS GOARCH CGO_ENABLED GOVERSION > /gobuild/goenv
 	}
 	tags := buildTags(append(append([]string(nil), envFlags...), flags...))
 	b.target = newTarget(goenv, tags)
+	// Built by the build's own toolchain, for every machine an engine runs
+	// on.
+	b.tools = machineTools("pack", b.target.platform(), func(goarch string) *dagger.File {
+		return base.
+			WithEnvVariable("GOOS", "linux").
+			WithEnvVariable("GOARCH", goarch).
+			WithEnvVariable("GOFLAGS", "").
+			WithEnvVariable("GOCACHE", "/gobuild/cache").
+			WithExec([]string{"go", "build", "-o", "/gobuild/pack", "cmd/pack"}, bare).
+			File("/gobuild/pack")
+	})
+	// Go 1.25 and later run "go tool pack" for each package with assembly,
+	// the runtime among them, so a build on them needs pack and its runtime
+	// waits for it there: it's built alongside the rest of the setup
+	// instead, from when the target is known. Earlier Go runs the
+	// toolchain's own pack. An error shows again where it's used.
+	if pack && b.target.goMinor >= 25 {
+		go b.tools.Sync(ctx)
+	}
 	switched, err := first.Directory("/gobuild").Glob(ctx, "switched")
 	if err != nil {
 		return nil, err
@@ -1369,17 +1375,6 @@ go env GOOS GOARCH CGO_ENABLED GOVERSION > /gobuild/goenv
 			b.sums[escapeModule(e.path)+"@"+escapeModule(e.version)] = e.zip
 		}
 	}
-	// Built by the build's own toolchain, for every machine an engine runs
-	// on.
-	b.tools = machineTools("pack", b.target.platform(), func(goarch string) *dagger.File {
-		return base.
-			WithEnvVariable("GOOS", "linux").
-			WithEnvVariable("GOARCH", goarch).
-			WithEnvVariable("GOFLAGS", "").
-			WithEnvVariable("GOCACHE", "/gobuild/cache").
-			WithExec([]string{"go", "build", "-o", "/gobuild/pack", "cmd/pack"}, bare).
-			File("/gobuild/pack")
-	})
 	return b, nil
 }
 

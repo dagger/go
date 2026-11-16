@@ -136,7 +136,7 @@ func (m *Gobuild) Scope(
 			listed <- globbed{p, paths, err}
 		}()
 	}
-	b, err := setup(ctx, m.ToolImage, base, image, from, downloads, source, headers, pkgDirs, tests, mountPath, cwd, flags)
+	b, err := setup(ctx, m, base, image, from, downloads, source, headers, pkgDirs, tests, mountPath, cwd, flags, false)
 	if err != nil {
 		return nil, err
 	}

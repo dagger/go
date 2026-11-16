@@ -70,10 +70,6 @@ func (m *Gobuild) ModuleProxy(
 	if err != nil {
 		return nil, err
 	}
-	platform, err := targetPlatform(ctx, public)
-	if err != nil {
-		return nil, err
-	}
 	sums, err := goSum.Contents(ctx)
 	if err != nil {
 		return nil, err
@@ -82,7 +78,7 @@ func (m *Gobuild) ModuleProxy(
 	// The download's own module cache, as the one to read first, is one
 	// downloadModule skips.
 	d := &downloader{public: public, private: caller, privatePatterns: privatePatterns, gomodcache: modCacheDir,
-		sums: parseGoSums([]string{sums}), hdr: hdrTools(m.ToolImage, platform)}
+		sums: parseGoSums([]string{sums}), hdr: m.Gohdr}
 	var entries []sumEntry
 	for _, e := range d.sums {
 		if e.zip != "" || e.mod != "" {

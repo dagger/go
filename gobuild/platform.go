@@ -1,9 +1,6 @@
 package main
 
 import (
-	"context"
-	"strings"
-
 	"dagger.io/dagger/core"
 	"dagger/gobuild/internal/dagger"
 )
@@ -26,38 +23,6 @@ func machineTools(name, platform string, build func(goarch string) *dagger.File)
 		dir = dir.WithFile(m.uname+"/"+name, build(m.goarch))
 	}
 	return dir.WithPlatform(core.Platform(platform))
-}
-
-// targetPlatform is the GOOS/GOARCH ctr builds for, as a Platform: its
-// GOOS and GOARCH, or the engine's platform's.
-func targetPlatform(ctx context.Context, ctr *dagger.Container) (string, error) {
-	names, values, err := envOf(ctx, ctr)
-	if err != nil {
-		return "", err
-	}
-	var goos, goarch string
-	for i, n := range names {
-		switch n {
-		case "GOOS":
-			goos = values[i]
-		case "GOARCH":
-			goarch = values[i]
-		}
-	}
-	if goos == "" || goarch == "" {
-		engine, err := core.DefaultPlatform(ctx)
-		if err != nil {
-			return "", err
-		}
-		f := strings.Split(string(engine), "/")
-		if goos == "" {
-			goos = f[0]
-		}
-		if goarch == "" && len(f) > 1 {
-			goarch = f[1]
-		}
-	}
-	return goos + "/" + goarch, nil
 }
 
 // platform is the target's GOOS/GOARCH, as a Platform.

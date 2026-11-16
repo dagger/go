@@ -31,12 +31,7 @@ const depsModule = "gobuild.invalid/deps"
 // then names, so one may import the module's packages back; or when the
 // build may run another toolchain than the base's.
 func (m *Gobuild) dependencyScope(ctx context.Context, base *dagger.Container, env map[string]string, source *dagger.Directory, headers *dagger.File, workdir, pkgDir string, flags []string) (*Scoped, bool, error) {
-	// What the source's packages import, listed alongside the rest: on a
-	// fresh engine its exec waits on gohdr's build.
-	platform, err := targetPlatform(ctx, base)
-	if err != nil {
-		return nil, false, err
-	}
+	// What the source's packages import, listed alongside the rest.
 	type listing struct {
 		out string
 		err error
@@ -44,7 +39,7 @@ func (m *Gobuild) dependencyScope(ctx context.Context, base *dagger.Container, e
 	listed := make(chan listing, 1)
 	go func() {
 		out, err := core.NewContainer().From(m.ToolImage).
-			WithMountedDirectory(hdrDir, hdrTools(m.ToolImage, platform), dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true}).
+			WithMountedDirectory(hdrDir, m.Gohdr, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true}).
 			WithMountedFile("/gobuild/src.hdr", headers, dagger.ContainerWithMountedFileOpts{ReadOnly: true}).
 			WithExec([]string{hdrBin, "imports", "/gobuild/src.hdr", "build"}, bare).
 			Stdout(ctx)

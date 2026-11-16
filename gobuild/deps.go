@@ -41,8 +41,6 @@ func (m *Gobuild) Dependencies(
 	ctx context.Context,
 	// The container each package's exec runs in.
 	base *dagger.Container,
-	// gohdr, for every machine an engine runs on (hdrTools).
-	hdr *dagger.Directory,
 	// Go's pack, for every machine an engine runs on.
 	tools *dagger.Directory,
 	// The platform the packages are compiled for, which their builds are
@@ -98,7 +96,7 @@ func (m *Gobuild) Dependencies(
 		close(r.linkDone)
 		done[name] = r
 	}
-	w := &walker{base: base, platform: platform, hdr: hdr, tools: tools, mods: mods, roots: roots{Mod: modRoot},
+	w := &walker{base: base, platform: platform, hdr: m.Gohdr, tools: tools, mods: mods, roots: roots{Mod: modRoot},
 		heights: nodeHeights(nodes)}
 	results, err := w.walk(ctx, nodes, done)
 	if err != nil {
@@ -281,7 +279,7 @@ func (b *build) dependencies(ctx context.Context, w *walker, nodes map[string]*n
 	}
 	if len(split) > 0 {
 		go func() {
-			files, err := dagger.Connect().Gobuild(b.toolImage).LinkObjects(ctx, splitDirs, splitFiles)
+			files, err := dagger.Connect().Gobuild(b.toolImage, b.hdr).LinkObjects(ctx, splitDirs, splitFiles)
 			if err == nil && len(files) != len(split) {
 				err = fmt.Errorf("the object code call read %d files for %d packages", len(files), len(split))
 			}
@@ -337,7 +335,7 @@ func (b *build) dependencyCall(ctx context.Context, w *walker, pkgs []*node, lay
 	if err != nil {
 		return nil, err
 	}
-	return dagger.Connect().Gobuild(b.toolImage).Dependencies(w.base, w.hdr, w.tools, w.platform, b.roots.Mod, names, dirs, file,
+	return dagger.Connect().Gobuild(b.toolImage, b.hdr).Dependencies(w.base, w.tools, w.platform, b.roots.Mod, names, dirs, file,
 		dagger.GobuildDependenciesOpts{ImportedNames: importedNames, Imported: imported}), nil
 }
 

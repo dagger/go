@@ -48,8 +48,6 @@ func (m *Gobuild) Discover(
 	// The modules private downloads, as GONOPROXY or GOPRIVATE names them.
 	// +optional
 	privatePatterns string,
-	// gohdr, for every machine an engine runs on (hdrTools).
-	hdr *dagger.Directory,
 	// The caller's GOMODCACHE, a module cache its image may come with.
 	gomodcache string,
 	// The module versions the build may read, as a go.sum lists them (goSum).
@@ -70,7 +68,7 @@ func (m *Gobuild) Discover(
 ) (_ *Discovery, rerr error) {
 	defer reportExec(&rerr)
 	d := &downloader{public: public, private: private, privatePatterns: privatePatterns, gomodcache: gomodcache,
-		sums: parseGoSums([]string{sums}), target: newTarget(goenv, tags), hdr: hdr, own: own}
+		sums: parseGoSums([]string{sums}), target: newTarget(goenv, tags), hdr: m.Gohdr, own: own}
 	// They are followed as from a package of a source that imports them
 	// and provides none of them.
 	found, err := d.discover(ctx, sourceImports{pkgs: map[string][]string{".": imports}, all: map[string][]string{".": planImports}}, []string{"."})
@@ -116,7 +114,7 @@ func (d *downloader) discoverOnce(ctx context.Context, toolImage, goenv string, 
 	if d.privatePatterns != "" {
 		opts.Private, opts.PrivatePatterns = d.private, d.privatePatterns
 	}
-	call := dagger.Connect().Gobuild(toolImage).Discover(d.public, d.hdr, d.gomodcache, goSum(d.sums), goenv, imports, plan, own, opts)
+	call := dagger.Connect().Gobuild(toolImage, d.hdr).Discover(d.public, d.gomodcache, goSum(d.sums), goenv, imports, plan, own, opts)
 	followed, err := call.Followed(ctx)
 	if err != nil {
 		return nil, err

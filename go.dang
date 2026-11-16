@@ -466,7 +466,7 @@ type Go {
   fails, or doesn't match, fails the call.
   """
   moduleProxy(goSum: File!): Directory! {
-    gobuild(toolImage: gomod.goImage(gomod.scannerVersion)).moduleProxy(
+    gobuild(toolImage: gomod.goImage(gomod.scannerVersion), gohdr: gomod.gohdr).moduleProxy(
       goSum: goSum,
       image: if (base == null) { gomod.goImage(version ?? gomod.scannerVersion) } else { "" },
       from: if (base == null) { null } else { base!.withoutEntrypoint },
@@ -772,20 +772,20 @@ type GoArchiveBuilds {
   downloads: [Directory!]!
 
   """
-  gobuild's gohdr, the tool the builds' execs run, for every machine an
-  engine runs on.
+  gohdr, the tool the builds' execs run, for every machine an engine runs
+  on (Gomod.gohdr).
   """
   tool: Directory!
 
   """
   golangci-lint's write-manifest, which writes the archives' manifest, for
-  every machine an engine runs on.
+  every machine an engine runs on (Gomod.writeManifest).
   """
   manifestTool: Directory!
 
   """
   The source write-manifest is built from, golangci-lint's manifest module at
-  gobuild's pin, which a fresh engine would otherwise fetch to find its build.
+  gomod's pin, which a fresh engine would otherwise fetch to find its build.
   """
   manifestSource: Directory!
 
@@ -951,11 +951,12 @@ type GoModule {
   let lib: Gomod! { gomod(includeExtraFiles: includeExtraFiles) }
 
   """
-  The per-package builder. Its own tool is built in the image of the Go
-  version the library's tools build with, which the library pins, so a build
-  pulls one Go image, which an engine image can ship.
+  The per-package builder. Its own tool, gohdr, is the library's, built in
+  the image of the Go version the library's tools build with, which the
+  library pins, so a build pulls one Go image, which an engine image can
+  ship.
   """
-  let builder: Gobuild! { gobuild(toolImage: gomod.goImage(gomod.scannerVersion)) }
+  let builder: Gobuild! { gobuild(toolImage: gomod.goImage(gomod.scannerVersion), gohdr: gomod.gohdr) }
 
   """
   Whether tests are skipped for this module.
@@ -1390,7 +1391,7 @@ type GoModule {
       configs: gomod.daggerConfigs(ws),
       version: if (baseImage == null) { toolchainVersion(ws) } else { "" },
       importPath: importPath(ws),
-      headers: lib.scan(ws).sync.file("_headers_.gohdr"),
+      headers: headers(ws),
     )
   }
 
@@ -1403,7 +1404,7 @@ type GoModule {
       configs: gomod.daggerConfigs(ws),
       version: if (baseImage == null) { toolchainVersion(ws) } else { "" },
       importPath: importPath(ws),
-      headers: lib.scan(ws).sync.file("_headers_.gohdr"),
+      headers: headers(ws),
     )
   }
 
@@ -1936,17 +1937,33 @@ type GoModule {
       .directory("/out")
   }
 
+  # The workspace's header pack, from the scan, with the builds a
+  # per-package build runs before its first package started at the same
+  # time: gobuild's own, gohdr's, and with manifest, write-manifest's. On an
+  # engine that holds none of them, each is a Go build from nothing, which
+  # nothing would otherwise ask for until the scan is done, and then one
+  # after another. The fields of {{ }} run at once.
+  let headers(ws: Workspace!, manifest: Boolean! = false): File! {
+    let started = {{
+      builder: builder.id,
+      gohdr: gomod.gohdr.sync,
+      manifest: if (manifest) { gomod.writeManifest.sync } else { null },
+      scan: lib.scan(ws).sync,
+    }}
+    started.scan.file("_headers_.gohdr")
+  }
+
   # What a per-package build of pkgs in ctr reads of the workspace's source
   # and header pack, with the packages' test files when test is set
   # (Gobuild.scope): given it, the build is cached across an edit of any
-  # other file.
-  let scoped(ws: Workspace!, ctr: Container!, pkgs: [String!]!, test: Boolean!, dependencies: Boolean! = false): GobuildScoped! {
+  # other file. manifest starts write-manifest's build too, for archives.
+  let scoped(ws: Workspace!, ctr: Container!, pkgs: [String!]!, test: Boolean!, dependencies: Boolean! = false, manifest: Boolean! = false): GobuildScoped! {
     builder.scope(
       base: ctr,
       image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
       from: if (baseImage == null) { null } else { baseImage.withoutEntrypoint },
       source: source(ws, test: test),
-      headers: lib.scan(ws).sync.file("_headers_.gohdr"),
+      headers: headers(ws, manifest: manifest),
       mountPath: mountPath,
       workdir: path,
       packages: pkgs,
@@ -2191,7 +2208,7 @@ type GoModule {
     if (gccgo(flags)) {
       raise "Go module " + path + ": a gccgo build has no archives for the export driver, which reads gc's"
     }
-    let read = scoped(ws, ctr, packages, noTests == false, dependencies: dependencies)
+    let read = scoped(ws, ctr, packages, noTests == false, dependencies: dependencies, manifest: true)
     let out = if (read.standIn) {
       # A stand-in for the module's own packages (Gobuild.scope) whose
       # build fails may fail where the module's own wouldn't, such as when
@@ -2200,7 +2217,7 @@ type GoModule {
       {
         archivesOf(ws, ctr, read.source, read.headers, dependencies, packages, noTests).sync
       } rescue {
-        err: Error => archivesOf(ws, ctr, source(ws, test: noTests == false), lib.scan(ws).sync.file("_headers_.gohdr"), dependencies, packages, noTests)
+        err: Error => archivesOf(ws, ctr, source(ws, test: noTests == false), headers(ws, manifest: true), dependencies, packages, noTests)
       }
     } else {
       archivesOf(ws, ctr, read.source, read.headers, dependencies, packages, noTests)
@@ -2220,6 +2237,7 @@ type GoModule {
       from: if (baseImage == null) { null } else { baseImage.withoutEntrypoint },
       source: source,
       headers: headers,
+      writeManifest: gomod.writeManifest,
       mountPath: mountPath,
       workdir: path,
       flags: buildFlags,
@@ -2270,7 +2288,8 @@ type GoModule {
         image: if (baseImage == null) { gomod.goImage(toolchainVersion(ws)) } else { "" },
         from: if (baseImage == null) { null } else { baseImage.withoutEntrypoint },
         source: source(ws, test: noTests == false),
-        headers: lib.scan(ws).sync.file("_headers_.gohdr"),
+        headers: headers(ws, manifest: true),
+        writeManifest: gomod.writeManifest,
         mountPath: mountPath,
         workdir: path,
         flags: buildFlags,
@@ -2285,9 +2304,9 @@ type GoModule {
       GoArchiveBuilds(
         builds: cache.builds.{{sync}}.map { build => build.sync },
         downloads: cache.downloads.{{sync}}.map { download => download.sync },
-        tool: cache.tool,
-        manifestTool: cache.manifestTool,
-        manifestSource: cache.manifestSource,
+        tool: gomod.gohdr,
+        manifestTool: gomod.writeManifest,
+        manifestSource: gomod.writeManifestSource,
         tools: cache.tools,
         helper: gomod.includesHelper,
         helperBinary: gomod.includesHelperBinary(platform ?? gomod.hostPlatform),

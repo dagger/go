@@ -138,7 +138,7 @@ type downloader struct {
 	sums            []sumEntry
 	// target is what discover evaluates build constraints against.
 	target target
-	// hdr is gohdr, for every machine an engine runs on (hdrTools).
+	// hdr is gohdr, for every machine an engine runs on (Gobuild's gohdr).
 	hdr *dagger.Directory
 	// own is the paths of modules the build's source provides, whose
 	// packages discover follows into the source when it has it, and

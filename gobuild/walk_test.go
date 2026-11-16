@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -20,5 +21,15 @@ func TestWalkLinkDependencyError(t *testing.T) {
 	_, err := w.walk(context.Background(), nodes, map[string]*result{"b1": dep})
 	if err == nil || !strings.Contains(err.Error(), "example.com/dep: object code unreadable") {
 		t.Fatalf("walk: %v, want the dependency's error named by its import path", err)
+	}
+}
+
+// A filter pattern made for a path matches that path as written, whatever
+// glob characters it holds.
+func TestLiteralPatterns(t *testing.T) {
+	got := literalPatterns([]string{"a.go/x.go", "b.go/[x]*?^.go", "!c.go/d.go", `e.go/f\g.go`})
+	want := []string{"a.go/x.go", `b.go/\[x\]\*\?\^.go`, `\!c.go/d.go`, `e.go/f\\g.go`}
+	if !slices.Equal(got, want) {
+		t.Errorf("literalPatterns: %q", got)
 	}
 }
