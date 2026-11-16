@@ -350,7 +350,7 @@ type E2e {
   report indexer and the per-package build's gohdr.
   """
   helperCheck(ws: Workspace!): Void @check {
-    [helperPath, "gomod/helpers/go-test-report", "gomod/helpers/gohdr"].map { helper =>
+    [helperPath, "gomod/helpers/go-test-report"].map { helper =>
       gomod
         .withGoCaches(container.from("golang:" + gomod.scannerVersion + "-alpine"))
         .withDirectory("/src", ws.directory("/" + helper))
@@ -358,6 +358,13 @@ type E2e {
         .withExec(["go", "test", "./..."])
         .sync
     }
+    # No Go cache volumes: Dagger caches the run by its inputs.
+    container
+      .from("golang:" + gomod.scannerVersion + "-alpine")
+      .withDirectory("/src", ws.directory("/gomod/helpers/gohdr"))
+      .withWorkdir("/src")
+      .withExec(["go", "test", "./..."])
+      .sync
     null
   }
 }
