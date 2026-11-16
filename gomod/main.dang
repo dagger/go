@@ -297,7 +297,23 @@ type Gomod {
   link's build ID.
   """
   gohdr: Directory! {
-    machineTools("gohdr", currentModule.source.directory("helpers/gohdr"), ".")
+    gohdrFrom(currentModule.source.directory("helpers/gohdr"))
+  }
+
+  """
+  gohdr, as gohdr builds it, from source, a directory holding its go.mod
+  and main.go. Its build is keyed by those two files' contents alone: it is
+  written out from them, so a source that holds the same gohdr, such as
+  another dagger/go's that leaves gohdr as it is, gives the same build.
+  Read as the directory it is, a module's source would key it by the whole
+  module, and every module download, plan and link that mounts it would run
+  again for each dagger/go.
+  """
+  gohdrFrom(source: Directory!): Directory! {
+    let files = directory
+      .withNewFile("go.mod", source.file("go.mod").contents)
+      .withNewFile("main.go", source.file("main.go").contents)
+    machineTools("gohdr", files, ".")
   }
 
   """

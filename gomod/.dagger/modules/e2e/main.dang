@@ -346,6 +346,26 @@ type E2e {
   }
 
   """
+  gohdr's build is keyed by its own source alone: built from two directories
+  that hold the same gohdr but were made differently, as the sources of two
+  dagger/go versions that leave gohdr as it is are, an exec that mounts it
+  runs once.
+  """
+  gohdrKeyCheck(ws: Workspace!): Void @check {
+    let source = ws.directory("/gomod/helpers/gohdr")
+    let remade = directory.withDirectory(".", source).withNewFile("unrelated", "").withoutFile("unrelated")
+    let runs = [source, remade].map { dir =>
+      container
+        .from("alpine:3.22")
+        .withMountedDirectory("/gohdr", gomod.gohdrFrom(dir))
+        .withExec(["cat", "/proc/sys/kernel/random/uuid"])
+        .stdout
+    }
+    assert(runs[0] == runs[1], "an exec that mounts gohdr ran again for another source holding the same gohdr")
+    null
+  }
+
+  """
   The unit tests of the library's helpers: the source scanner, the test
   report indexer and the per-package build's gohdr.
   """
