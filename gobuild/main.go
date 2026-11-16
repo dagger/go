@@ -1664,11 +1664,14 @@ func (b *build) testmains(ctx context.Context, headers *dagger.File, flags, pkgs
 // output that aren't the plan's steps: its errors and their hints. A step is
 // a "#" comment, a shell command the go command writes (mkdir, cat, cd,
 // cp, mv, rm, ln, touch, echo, chmod), a tool it runs by path or as "go
-// tool", a command with environment assignments before it, or a here
-// document's lines up to EOF. It holds no single quote: the plan's script
-// quotes it with them.
+// tool", a command with environment assignments before it, a C compiler
+// probe whose failure it ignores ("|| true"), or a here document's lines up
+// to EOF. Blank lines are left out too: there are hundreds around the steps
+// before an error the go command gives only once it plans the package
+// itself. It holds no single quote: the plan's script quotes it with them.
 const planErrors = `h { if ($0 == "EOF") h = 0; next }
 /<< .EOF./ { h = 1; next }
+/^[ \t]*$/ || / \|\| true$/ { next }
 /^#/ || /^(mkdir|cat|cd|cp|mv|rm|ln|touch|echo|chmod) / { next }
 /^go tool / || /^[A-Za-z_][A-Za-z0-9_]*=/ || /^\$WORK\// || /^\/[^ ]*\/pkg\/tool\// { next }
 { print }`
