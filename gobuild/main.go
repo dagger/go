@@ -1567,13 +1567,15 @@ func (b *build) planWith(ctx context.Context, headers *dagger.File, goCmd string
 		WithMountedFile("/gobuild/src.hdr", planHdr).
 		// An empty build cache, so the plan holds every step.
 		WithEnvVariable("GOCACHE", "/gobuild/plancache").
-		// A failed plan prints go build's error, such as a //go:embed
+		// A failed plan prints the go command's error, such as a //go:embed
 		// pattern it rejects, rather than leaving it in the plan file: the
-		// end of go build's output, where it writes the error, and not the
-		// plan before it, which a large build makes hundreds of KB long.
+		// lines of its output that aren't the plan's steps (planErrors),
+		// which go list -e may print before planning hundreds of KB more,
+		// or with none, the end of its output.
 		WithExec([]string{"sh", "-c", b.unpackHeaders() +
 			" && cd " + shQuote(b.roots.Cwd) + " && { " + goCmd + " 2> /gobuild/plan.txt" +
-			" || { status=$?; tail -n 40 /gobuild/plan.txt >&2; exit $status; }; }" +
+			" || { status=$?; awk '" + planErrors + "' /gobuild/plan.txt | head -n 60 > /gobuild/planerr.txt;" +
+			" if [ -s /gobuild/planerr.txt ]; then cat /gobuild/planerr.txt >&2; else tail -n 40 /gobuild/plan.txt >&2; fi; exit $status; }; }" +
 			" && " + hdrBin + " weigh /gobuild/plan.txt > /gobuild/weights.txt" +
 			" && " + hdrBin + " cc /gobuild/plan.txt > /gobuild/cc.txt" + env}, bare)
 	plan, err := ran.File("/gobuild/plan.txt").Contents(ctx)
@@ -1652,6 +1654,19 @@ func (b *build) testmains(ctx context.Context, headers *dagger.File, flags, pkgs
 		return dir.File(id + "/_testmain.go"), nil
 	}
 }
+
+// planErrors is an awk program that prints the lines of a go command's -n
+// output that aren't the plan's steps: its errors and their hints. A step is
+// a "#" comment, a shell command the go command writes (mkdir, cat, cd,
+// cp, mv, rm, ln, touch, echo, chmod), a tool it runs by path or as "go
+// tool", a command with environment assignments before it, or a here
+// document's lines up to EOF. It holds no single quote: the plan's script
+// quotes it with them.
+const planErrors = `h { if ($0 == "EOF") h = 0; next }
+/<< .EOF./ { h = 1; next }
+/^#/ || /^(mkdir|cat|cd|cp|mv|rm|ln|touch|echo|chmod) / { next }
+/^go tool / || /^[A-Za-z_][A-Za-z0-9_]*=/ || /^\$WORK\// || /^\/[^ ]*\/pkg\/tool\// { next }
+{ print }`
 
 // planError is a failed plan's error with go build's own message first, then
 // the exec's, which holds its exit code. The plan read Go files as their

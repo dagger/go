@@ -1382,6 +1382,43 @@ type GoDev {
   }
 
   """
+  A build whose plan fails reports the go command's own error, though the
+  plan printed many build steps after it: here the archives of a module whose
+  dependency imports a package of a module the go.sum has no checksum for,
+  which go list reports and then plans the rest.
+  """
+  planErrorCheck: Void @check {
+    let c = directory
+      .withNewFile("go.mod", "module example.com/c\n\ngo 1.22\n")
+      .withNewFile("lib/lib.go", "package lib\n\n// Name is the package's name.\nconst Name = \"c\"\n")
+    let b = directory
+      .withNewFile("go.mod", "module example.com/b\n\ngo 1.22\n\nrequire example.com/c v1.0.0\n")
+      .withNewFile("b.go", "package b\n\nimport \"example.com/c/lib\"\n\n// Name is the package's name.\nvar Name = lib.Name\n")
+    let main = directory
+      .withNewFile("go.mod", "module example.com/m\n\ngo 1.22\n\nrequire example.com/b v1.0.0\n")
+      .withNewFile("main.go", "package main\n\nimport (\n\t\"net/http\"\n\t\"strings\"\n\n\t\"example.com/b\"\n)\n\nfunc main() { println(strings.ToUpper(b.Name), http.StatusOK) }\n")
+    let image = container.from("golang:1.27.3-alpine")
+    let made = image
+      .withExec(["apk", "add", "--no-cache", "zip"])
+      .withDirectory("/z/example.com/c@v1.0.0", c)
+      .withDirectory("/z/example.com/b@v1.0.0", b)
+      .withDirectory("/ws", main)
+      .withExec(["sh", "-c", "set -e; cd /z; for m in c@v1.0.0 b@v1.0.0; do n=${m%@*}; v=${m#*@}; p=/proxy/example.com/$n/@v; mkdir -p $p; zip -qr $p/$v.zip example.com/$m; cp example.com/$m/go.mod $p/$v.mod; printf '%s\\n' $v > $p/list; printf '{\"Version\":\"%s\"}' $v > $p/$v.info; done; cd /ws; GOFLAGS=-mod=mod GOPROXY=file:///proxy GOSUMDB=off go mod tidy; sed -i '/^example.com\\/c /d' go.sum; grep -q '^example.com/b ' go.sum; ! grep -q '^example.com/c ' go.sum"])
+    let base = image
+      .withDirectory("/proxy", made.directory("/proxy"))
+      .withEnvVariable("GOPROXY", "file:///proxy")
+      .withEnvVariable("GOSUMDB", "off")
+    let ws = made.directory("/ws").asWorkspace
+    let failure = {
+      go(base: base).module(ws, ".").archives(ws, packages: ["."], noTests: true).directory("archives").entries.length
+      "no failure"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(failure.contains("missing go.sum entry"), "the plan's error: " + failure)
+  }
+
+  """
   A package's test binary, taken from a subset of its module's collection,
   builds when a sibling in the subset with tests that it doesn't import can't
   load, as go test -c of the package alone does: the subset's shared plan
