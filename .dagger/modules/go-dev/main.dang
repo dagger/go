@@ -1382,6 +1382,27 @@ type GoDev {
   }
 
   """
+  A build whose step fails reports what the failed exec printed, though the
+  exec is one the build's call only forced: here a base whose last exec
+  fails, which the build runs only when it first uses the base.
+  """
+  failedBaseCheck: Void @check {
+    let main = directory
+      .withNewFile("go.mod", "module example.com/m\n\ngo 1.22\n")
+      .withNewFile("main.go", "package main\n\nfunc main() { println(1) }\n")
+    let image = container.from("golang:1.27.3-alpine")
+    let ws = image.withDirectory("/ws", main).directory("/ws").asWorkspace
+    let base = image.withExec(["sh", "-c", "echo the base failed here >&2; exit 1"])
+    let failure = {
+      go(base: base).module(ws, ".").archives(ws, packages: ["."], noTests: true).directory("archives").entries.length
+      "no failure"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(failure.contains("the base failed here"), "the build's error: " + failure)
+  }
+
+  """
   A build whose plan fails reports the go command's own error, though the
   plan printed many build steps after it: here the archives of a module whose
   dependency imports a package of a module the go.sum has no checksum for,

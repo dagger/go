@@ -67,7 +67,8 @@ func (m *Gobuild) Discover(
 	// of (sourceImports.ownModules), whose packages the call neither
 	// downloads nor follows, and reports as followed.
 	own []string,
-) (*Discovery, error) {
+) (_ *Discovery, rerr error) {
+	defer reportExec(&rerr)
 	d := &downloader{public: public, private: private, privatePatterns: privatePatterns, gomodcache: gomodcache,
 		sums: parseGoSums([]string{sums}), target: newTarget(goenv, tags), hdr: hdr, own: own}
 	// They are followed as from a package of a source that imports them

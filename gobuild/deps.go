@@ -65,7 +65,8 @@ func (m *Gobuild) Dependencies(
 	importedNames []string,
 	// +optional
 	imported []*dagger.File,
-) (*DependencyBuilds, error) {
+) (_ *DependencyBuilds, rerr error) {
+	defer reportExec(&rerr)
 	js, err := readPackages(ctx, packages)
 	if err != nil {
 		return nil, err
@@ -127,7 +128,8 @@ func (m *Gobuild) LinkObjects(
 	dirs []*dagger.Directory,
 	// The object code's file in each directory.
 	files []string,
-) ([]*dagger.File, error) {
+) (_ []*dagger.File, rerr error) {
+	defer reportExec(&rerr)
 	if len(dirs) != len(files) {
 		return nil, fmt.Errorf("%d object code files for %d directories", len(files), len(dirs))
 	}

@@ -108,7 +108,8 @@ func (m *Gobuild) Binary(
 	// as an engine image's, serves it whole.
 	// +optional
 	sharedImports []string,
-) (*dagger.Directory, error) {
+) (_ *dagger.Directory, rerr error) {
+	defer reportExec(&rerr)
 	blocks, linked, err := run(ctx, m.ToolImage, base, image, from, downloads, source, headers, mountPath, workdir, pkg, flags, false, sharedImports)
 	if err != nil {
 		return nil, err
@@ -177,7 +178,8 @@ func (m *Gobuild) TestBinary(
 	// is go test -c's of pkg alone.
 	// +optional
 	set []string,
-) (*dagger.File, error) {
+) (_ *dagger.File, rerr error) {
+	defer reportExec(&rerr)
 	if len(set) > 0 {
 		goflags, err := base.EnvVariable(ctx, "GOFLAGS")
 		if err != nil {
@@ -240,7 +242,8 @@ func (m *Gobuild) TestBinaries(
 	// own, as for Binary.
 	// +optional
 	sharedImports []string,
-) (*dagger.Directory, error) {
+) (_ *dagger.Directory, rerr error) {
+	defer reportExec(&rerr)
 	return runTests(ctx, m.ToolImage, base, image, from, downloads, source, headers, mountPath, workdir, pkgs, flags, sharedImports)
 }
 
@@ -507,7 +510,8 @@ func (m *Gobuild) Archives(
 	// own, as for Binary.
 	// +optional
 	sharedImports []string,
-) (*dagger.Directory, error) {
+) (_ *dagger.Directory, rerr error) {
+	defer reportExec(&rerr)
 	w, err := archiveWalk(ctx, m.ToolImage, base, image, from, source, headers, mountPath, workdir, flags, dependencies, downloads, packages, tests, sharedImports)
 	if err != nil {
 		return nil, err
@@ -725,7 +729,8 @@ func (m *Gobuild) ArchiveBuilds(
 	// own, as for Binary.
 	// +optional
 	sharedImports []string,
-) (*ArchiveCache, error) {
+) (_ *ArchiveCache, rerr error) {
+	defer reportExec(&rerr)
 	w, err := archiveWalk(ctx, m.ToolImage, base, image, from, source, headers, mountPath, workdir, flags, dependencies, downloads, packages, tests, sharedImports)
 	if err != nil {
 		return nil, err
@@ -1667,6 +1672,28 @@ const planErrors = `h { if ($0 == "EOF") h = 0; next }
 /^#/ || /^(mkdir|cat|cd|cp|mv|rm|ln|touch|echo|chmod) / { next }
 /^go tool / || /^[A-Za-z_][A-Za-z0-9_]*=/ || /^\$WORK\// || /^\/[^ ]*\/pkg\/tool\// { next }
 { print }`
+
+// reportExec adds to *err, a function's error, what the failed exec it
+// carries printed, unless its message holds that already. The module's
+// entrypoint reports a function's error as its message alone, and an exec's
+// error says only its exit code, though the exec may be one the function
+// only forced, such as a base's. The output is the exec's stderr, or with
+// none, its stdout, as withStderr reads it.
+func reportExec(err *error) {
+	var execErr *dagger.ExecError
+	if *err == nil || !errors.As(*err, &execErr) {
+		return
+	}
+	out := strings.TrimSpace(execErr.Stderr)
+	if out == "" {
+		out = strings.TrimSpace(execErr.Stdout)
+	}
+	first, _, _ := strings.Cut(out, "\n")
+	if first == "" || strings.Contains((*err).Error(), first) {
+		return
+	}
+	*err = withStderr(*err)
+}
 
 // planError is a failed plan's error with go build's own message first, then
 // the exec's, which holds its exit code. The plan read Go files as their

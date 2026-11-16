@@ -45,7 +45,8 @@ func (m *Gobuild) ModuleProxy(
 	// The container module downloads run with, as for Binary.
 	// +optional
 	downloads *dagger.Container,
-) (*dagger.Directory, error) {
+) (_ *dagger.Directory, rerr error) {
+	defer reportExec(&rerr)
 	var err error
 	if image != "" {
 		from = core.NewContainer().From(image)

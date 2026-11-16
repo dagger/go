@@ -86,7 +86,8 @@ func (m *Gobuild) Scope(
 	// The container module downloads run with, as for Binary.
 	// +optional
 	downloads *dagger.Container,
-) (*Scoped, error) {
+) (_ *Scoped, rerr error) {
+	defer reportExec(&rerr)
 	whole := &Scoped{Source: source, Headers: headers}
 	// A build of every package reads the module's whole source: the scope
 	// would cost its own work and save nothing.
