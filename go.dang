@@ -1385,26 +1385,30 @@ type GoModule {
 
   # Form source views during input preparation, without setting up tools.
   let testInputs(ws: Workspace!): GoTestInputs! {
+    # Started first: before anything here reads the scan (headers).
+    let started = headers(ws)
     GoTestInputs(
       source: lib.at(path).sourceFromScan(ws, tool.discoveryScan(ws)),
       testData: testData(ws),
       configs: gomod.daggerConfigs(ws),
       version: if (baseImage == null) { toolchainVersion(ws) } else { "" },
       importPath: importPath(ws),
-      headers: headers(ws),
+      headers: started,
     )
   }
 
   # The inputs of a test run made with the workspace at hand: the source go
   # test is given for this module, which a module or package test reads.
   let wsTestInputs(ws: Workspace!): GoTestInputs! {
+    # Started first: before anything here reads the scan (headers).
+    let started = headers(ws)
     GoTestInputs(
       source: source(ws, test: true),
       testData: testData(ws),
       configs: gomod.daggerConfigs(ws),
       version: if (baseImage == null) { toolchainVersion(ws) } else { "" },
       importPath: importPath(ws),
-      headers: headers(ws),
+      headers: started,
     )
   }
 
@@ -1942,7 +1946,10 @@ type GoModule {
   # time: gobuild's own, gohdr's, and with manifest, write-manifest's. On an
   # engine that holds none of them, each is a Go build from nothing, which
   # nothing would otherwise ask for until the scan is done, and then one
-  # after another. The fields of {{ }} run at once.
+  # after another. The fields of {{ }} run at once. A build asks for it
+  # first, before its Go version, which the scan gives, and whatever else
+  # reads the scan: otherwise the scan runs first, and gobuild's build, the
+  # longest, after it.
   let headers(ws: Workspace!, manifest: Boolean! = false): File! {
     let started = {{
       builder: builder.id,
@@ -2041,6 +2048,8 @@ type GoModule {
   # One package's binary for a platform with what go build writes next to
   # it: the C header of a c-archive or c-shared build.
   let binaryOutputs(ws: Workspace!, platform: String!, pkgPath: String!): Directory! {
+    # Started first: before anything here reads the scan (headers).
+    let started = headers(ws)
     buildOutputs(ws, platform, selectedMain(ws, pkgPath), binaryFileName(
       ws,
       pkgPath,
@@ -2062,6 +2071,8 @@ type GoModule {
   # A gc build runs one cached exec per package, as a binary's does. With
   # other packages in set, it is planned with theirs (GoPackage.testBinary).
   let testBinaryFile(ws: Workspace!, platform: String!, pkgPath: String!, set: [String!]!): File! {
+    # Started first: before anything here reads the scan (headers).
+    let started = headers(ws)
     let rel = relativeDir(pkgPath)
     # go test -c's own rule: a package with test files has a test binary,
     # whatever they hold.
@@ -2203,6 +2214,8 @@ type GoModule {
     """
     platform: String,
   ): Directory! {
+    # Started first: before anything here reads the scan (headers).
+    let started = headers(ws, manifest: true)
     let ctr = platformBase(ws, platform ?? gomod.hostPlatform)
     let flags = buildFlags + (ctr.envVariable("GOFLAGS") ?? "").split(" ").filter { f => f != "" }
     if (gccgo(flags)) {
@@ -2277,6 +2290,8 @@ type GoModule {
     """
     platform: String,
   ): GoArchiveBuilds! {
+    # Started first: before anything here reads the scan (headers).
+    let started = headers(ws, manifest: true)
     let ctr = platformBase(ws, platform ?? gomod.hostPlatform)
     let flags = buildFlags + (ctr.envVariable("GOFLAGS") ?? "").split(" ").filter { f => f != "" }
     if (gccgo(flags)) {
