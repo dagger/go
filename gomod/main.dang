@@ -268,6 +268,16 @@ type Gomod {
   engine image's, holds it.
   """
   includesHelperBinary(platform: String!): File! {
+    includesHelperBinaryFrom(currentModule.source.directory("helpers/go-includes"), platform)
+  }
+
+  """
+  go-includes for a platform, as includesHelperBinary builds it, from source,
+  the directory that holds it. Its build is keyed by the content of the files
+  it builds from (toolSource), so a source that holds the same go-includes,
+  such as another dagger/go's that leaves it as it is, gives the same build.
+  """
+  includesHelperBinaryFrom(source: Directory!, platform: String!): File! {
     let target = platform.split("/")
     container.from(goImage(scannerVersion))
       # The same download retry as withGoCaches.
@@ -276,7 +286,7 @@ type Gomod {
       .withEnvVariable("GOARCH", target.takeFirst(2).takeLast(1).join(""))
       .withoutEntrypoint
       .withWorkdir("/helpers/go-includes")
-      .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
+      .withDirectory("/helpers/go-includes", toolSource(source))
       # A fresh engine compiles the standard library for this build, and
       # skipping inlining there cuts the build by about a quarter. The scan
       # loses about 25 ms without inlining, and the GC setting it runs with
@@ -301,19 +311,28 @@ type Gomod {
   }
 
   """
-  gohdr, as gohdr builds it, from source, a directory holding its go.mod
-  and main.go. Its build is keyed by those two files' contents alone: it is
-  written out from them, so a source that holds the same gohdr, such as
-  another dagger/go's that leaves gohdr as it is, gives the same build.
-  Read as the directory it is, a module's source would key it by the whole
-  module, and every module download, plan and link that mounts it would run
-  again for each dagger/go.
+  gohdr, as gohdr builds it, from source, the directory that holds it. Its
+  build is keyed by the content of the files it builds from (toolSource), so
+  a source that holds the same gohdr, such as another dagger/go's that leaves
+  gohdr as it is, gives the same build.
   """
   gohdrFrom(source: Directory!): Directory! {
-    let files = directory
-      .withNewFile("go.mod", source.file("go.mod").contents)
-      .withNewFile("main.go", source.file("main.go").contents)
-    machineTools("gohdr", files, ".")
+    machineTools("gohdr", toolSource(source), ".")
+  }
+
+  # What a tool of this module is built from: the Go files of the main package
+  # in source that aren't tests', and its go.mod and go.sum, each keyed by its
+  # content. A module's source is keyed by the whole module, so a tool built
+  # from it would be built again, and every exec that mounts it would run
+  # again, for each dagger/go, even one that leaves the tool as it is. A file
+  # keyed by its content is the same for any source that holds the same bytes
+  # at the same path, as every dagger/go's source does for a tool it leaves as
+  # it is.
+  let toolSource(source: Directory!): Directory! {
+    let names = source.glob("*").filter { name =>
+      (name.hasSuffix(".go") and name.hasSuffix("_test.go") == false) or name == "go.mod" or name == "go.sum"
+    }
+    directory.withFiles(".", names.map { name => source.file(name).sync(keyByContent: true) })
   }
 
   """

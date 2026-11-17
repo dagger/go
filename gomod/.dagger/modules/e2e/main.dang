@@ -346,22 +346,34 @@ type E2e {
   }
 
   """
-  gohdr's build is keyed by its own source alone: built from two directories
-  that hold the same gohdr but were made differently, as the sources of two
-  dagger/go versions that leave gohdr as it is are, an exec that mounts it
-  runs once.
+  The helper tools' builds are keyed by their own source alone: built from
+  two dagger/go sources that differ only in a file outside the tools, as two
+  dagger/go versions that leave the tools as they are do, an exec that mounts
+  go-includes, or one that mounts gohdr, runs once.
   """
-  gohdrKeyCheck(ws: Workspace!): Void @check {
-    let source = ws.directory("/gomod/helpers/gohdr")
-    let remade = directory.withDirectory(".", source).withNewFile("unrelated", "").withoutFile("unrelated")
-    let runs = [source, remade].map { dir =>
+  toolKeyCheck(ws: Workspace!): Void @check {
+    let sources = ["one", "two"].map { mark =>
+      ws.directory("/", include: ["gomod/helpers/**"]).withNewFile("unrelated", mark)
+    }
+    let goIncludes = sources.map { source =>
       container
         .from("alpine:3.22")
-        .withMountedDirectory("/gohdr", gomod.gohdrFrom(dir))
+        .withMountedFile(
+          "/go-includes",
+          gomod.includesHelperBinaryFrom(source.directory("gomod/helpers/go-includes"), gomod.hostPlatform),
+        )
         .withExec(["cat", "/proc/sys/kernel/random/uuid"])
         .stdout
     }
-    assert(runs[0] == runs[1], "an exec that mounts gohdr ran again for another source holding the same gohdr")
+    assert(goIncludes[0] == goIncludes[1], "an exec that mounts go-includes ran again for another source holding the same go-includes")
+    let gohdr = sources.map { source =>
+      container
+        .from("alpine:3.22")
+        .withMountedDirectory("/gohdr", gomod.gohdrFrom(source.directory("gomod/helpers/gohdr")))
+        .withExec(["cat", "/proc/sys/kernel/random/uuid"])
+        .stdout
+    }
+    assert(gohdr[0] == gohdr[1], "an exec that mounts gohdr ran again for another source holding the same gohdr")
     null
   }
 
