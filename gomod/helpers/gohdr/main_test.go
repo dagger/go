@@ -546,3 +546,66 @@ func TestHdrToolImportsLegacyBuild(t *testing.T) {
 		}
 	}
 }
+
+// gohdr imports marks the directories whose build may read more than their
+// Go files: a //go:embed line, an import of "C", a symlink. A test file's
+// mark is listed only with tests. gobuild's TestSourceImportsMarks reads
+// this exact output.
+func TestHdrToolImportsMarks(t *testing.T) {
+	dir := buildHdrTool(t)
+	type file struct{ rel, mode, data string }
+	files := []file{
+		{"go.mod", "644", "module example.com/m\n\ngo 1.22\n"},
+		{"embeds/e.go", "644", "package embeds\n\nimport \"embed\"\n\n//go:embed static\nvar _ embed.FS\n"},
+		{"cgo/c.go", "644", "package cgo\n\n// #include \"../x.h\"\nimport \"C\"\n"},
+		{"links/l.go", strconv.FormatUint(uint64(os.ModeSymlink|0o777), 8), "../plain/p.go"},
+		{"plain/p.go", "644", "package plain\n\nimport \"fmt\"\n"},
+		{"tested/t_test.go", "644", "package tested\n\nimport \"embed\"\n\n//go:embed testdata\nvar _ embed.FS\n"},
+	}
+	var pack bytes.Buffer
+	pack.WriteString("gohdr 1\n")
+	for _, f := range files {
+		fmt.Fprintf(&pack, "%s\n%s\n%d\n%s\n", f.rel, f.mode, len(f.data), f.data)
+	}
+	packPath := filepath.Join(dir, "src.hdr")
+	if err := os.WriteFile(packPath, pack.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for mode, want := range map[string]string{
+		"build": "cgo cgo\n" +
+			"embed embeds\n" +
+			"link links\n" +
+			"mod . example.com/m\n" +
+			"name\tcgo\tcgo\n" +
+			"name\tembeds\tembeds\n" +
+			"name\tplain\tplain\n" +
+			"unparsed links\n" +
+			"embeds\te.go\t-\tembed\n" +
+			"cgo\tc.go\t-\t\n" +
+			"links\tl.go\t-\t\n" +
+			"plain\tp.go\t-\tfmt\n",
+		"tests": "cgo cgo\n" +
+			"embed embeds\n" +
+			"embed tested\n" +
+			"link links\n" +
+			"mod . example.com/m\n" +
+			"name\tcgo\tcgo\n" +
+			"name\tembeds\tembeds\n" +
+			"name\tplain\tplain\n" +
+			"name\ttested\ttested\n" +
+			"unparsed links\n" +
+			"embeds\te.go\t-\tembed\n" +
+			"cgo\tc.go\t-\t\n" +
+			"links\tl.go\t-\t\n" +
+			"plain\tp.go\t-\tfmt\n" +
+			"tested\tt_test.go\t-\tembed\n",
+	} {
+		out, err := exec.Command(filepath.Join(dir, "gohdr"), "imports", packPath, mode).Output()
+		if err != nil {
+			t.Fatalf("imports %s: %v", mode, err)
+		}
+		if string(out) != want {
+			t.Errorf("imports %s:\n%s\nwant:\n%s", mode, out, want)
+		}
+	}
+}

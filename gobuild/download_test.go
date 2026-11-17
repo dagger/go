@@ -395,3 +395,61 @@ func TestOwnModules(t *testing.T) {
 		}
 	}
 }
+
+// What gohdr imports prints for a pack holding an embed, a cgo package, a
+// symlink, a plain package and a test file's embed, in build and tests
+// mode: gohdr's TestHdrToolImportsMarks checks gohdr prints exactly this.
+var hdrImportsMarks = map[string]string{
+	"build": "cgo cgo\n" +
+		"embed embeds\n" +
+		"link links\n" +
+		"mod . example.com/m\n" +
+		"name\tcgo\tcgo\n" +
+		"name\tembeds\tembeds\n" +
+		"name\tplain\tplain\n" +
+		"unparsed links\n" +
+		"embeds\te.go\t-\tembed\n" +
+		"cgo\tc.go\t-\t\n" +
+		"links\tl.go\t-\t\n" +
+		"plain\tp.go\t-\tfmt\n",
+	"tests": "cgo cgo\n" +
+		"embed embeds\n" +
+		"embed tested\n" +
+		"link links\n" +
+		"mod . example.com/m\n" +
+		"name\tcgo\tcgo\n" +
+		"name\tembeds\tembeds\n" +
+		"name\tplain\tplain\n" +
+		"name\ttested\ttested\n" +
+		"unparsed links\n" +
+		"embeds\te.go\t-\tembed\n" +
+		"cgo\tc.go\t-\t\n" +
+		"links\tl.go\t-\t\n" +
+		"plain\tp.go\t-\tfmt\n" +
+		"tested\tt_test.go\t-\tembed\n",
+}
+
+// The source's imports, as gohdr lists them, mark the directories whose
+// build may read more than their Go files: a //go:embed line, an import of
+// "C", a symlink. A test file's mark is listed only with tests.
+func TestSourceImportsMarks(t *testing.T) {
+	for mode, want := range map[string]map[string][]string{
+		"build": {"embeds": {"embed"}, "cgo": {"cgo"}, "links": {"link", "unparsed"}},
+		"tests": {"embeds": {"embed"}, "cgo": {"cgo"}, "links": {"link", "unparsed"}, "tested": {"embed"}},
+	} {
+		src := parseSourceImports(newTarget("linux\namd64\n1\ngo1.27.3\n", nil), hdrImportsMarks[mode])
+		if !reflect.DeepEqual(src.marks, want) {
+			t.Errorf("imports %s: marks %v, want %v", mode, src.marks, want)
+		}
+		if want := map[string][]string{"embeds": {"embeds"}, "cgo": {"cgo"}, "plain": {"plain"}}; mode == "build" && !reflect.DeepEqual(src.names, want) {
+			t.Errorf("imports %s: package names %v, want %v", mode, src.names, want)
+		}
+		// The marks are neither Go files' lines nor modules.
+		if _, ok := src.all["embed embeds"]; ok {
+			t.Errorf("imports %s: a mark read as a package", mode)
+		}
+		if len(src.mods) != 1 || src.mods[0] != (sourceModule{dir: ".", path: "example.com/m"}) {
+			t.Errorf("imports %s: modules %+v", mode, src.mods)
+		}
+	}
+}

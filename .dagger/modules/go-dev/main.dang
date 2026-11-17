@@ -3088,15 +3088,13 @@ type GoDev {
 
   """
   gobuild's own unit tests: the build plan's parsing and scripts, and its
-  reading of what gohdr lists.
+  reading of what gohdr lists (gohdr's own tests check that it lists it).
   """
   gobuildCheck(ws: Workspace!): Void @check {
     container
       .from("golang:1.27.3-alpine")
-      .withDirectory("/src/gobuild", ws.directory("/gobuild"))
-      # A test checks what gohdr lists against what gobuild reads of it.
-      .withDirectory("/src/gomod/helpers/gohdr", ws.directory("/gomod/helpers/gohdr"))
-      .withWorkdir("/src/gobuild")
+      .withDirectory("/src", ws.directory("/gobuild"))
+      .withWorkdir("/src")
       .withExec(["go", "test", "./..."])
       .sync
     null
