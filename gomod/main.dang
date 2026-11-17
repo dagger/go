@@ -268,6 +268,16 @@ type Gomod {
   engine image's, holds it.
   """
   includesHelperBinary(platform: String!): File! {
+    includesHelperBinaryFrom(currentModule.source.directory("helpers/go-includes"), platform)
+  }
+
+  """
+  go-includes for a platform, as includesHelperBinary builds it, from source,
+  the directory that holds it. Its build is keyed by the content of the files
+  it builds from (toolSource), so a source that holds the same go-includes,
+  such as another dagger/go's that leaves it as it is, gives the same build.
+  """
+  includesHelperBinaryFrom(source: Directory!, platform: String!): File! {
     let target = platform.split("/")
     container.from(goImage(scannerVersion))
       # The same download retry as withGoCaches.
@@ -276,7 +286,7 @@ type Gomod {
       .withEnvVariable("GOARCH", target.takeFirst(2).takeLast(1).join(""))
       .withoutEntrypoint
       .withWorkdir("/helpers/go-includes")
-      .withDirectory("/helpers/go-includes", currentModule.source.directory("helpers/go-includes"))
+      .withDirectory("/helpers/go-includes", toolSource(source))
       # A fresh engine compiles the standard library for this build, and
       # skipping inlining there cuts the build by about a quarter. The scan
       # loses about 25 ms without inlining, and the GC setting it runs with
@@ -285,6 +295,116 @@ type Gomod {
       .directory("/out")
       .withPlatform(platform: (platform :: Platform!))
       .file("go-includes")
+  }
+
+  """
+  gohdr (helpers/gohdr), the per-package build's tool, for every machine an
+  engine runs on (machineTools). "gohdr unpack" writes out a header pack, the
+  scan's copy of each Go file up to the end of its imports, for a build's
+  plan, and lists the pack's Go files in directories named like Go files.
+  "gohdr weigh" weighs the plan's steps by the Go source they compile.
+  "gohdr cc" answers the plan's C compiler probes. "gohdr linkid" makes a
+  link's build ID.
+  """
+  gohdr: Directory! {
+    gohdrFrom(currentModule.source.directory("helpers/gohdr"))
+  }
+
+  """
+  gohdr, as gohdr builds it, from source, the directory that holds it. Its
+  build is keyed by the content of the files it builds from (toolSource), so
+  a source that holds the same gohdr, such as another dagger/go's that leaves
+  gohdr as it is, gives the same build.
+  """
+  gohdrFrom(source: Directory!): Directory! {
+    machineTools("gohdr", toolSource(source), ".")
+  }
+
+  # What a tool is built from: the Go files of the package in source that
+  # aren't tests', and its go.mod and go.sum, each keyed by its
+  # content. A module's source is keyed by the whole module, so a tool built
+  # from it would be built again, and every exec that mounts it would run
+  # again, for each dagger/go, even one that leaves the tool as it is. A file
+  # keyed by its content is the same for any source that holds the same bytes
+  # at the same path, as every dagger/go's source does for a tool it leaves as
+  # it is.
+  let toolSource(source: Directory!): Directory! {
+    let names = source.glob("*").filter { name =>
+      (name.hasSuffix(".go") and name.hasSuffix("_test.go") == false) or name == "go.mod" or name == "go.sum"
+    }
+    directory.withFiles(".", names.map { name => source.file(name).sync(keyByContent: true) })
+  }
+
+  """
+  golangci-lint's write-manifest, which writes the manifest.json of a
+  directory of per-package archives in the format its export driver reads,
+  for every machine an engine runs on (machineTools).
+
+  Its build is keyed by the content of the files it builds from
+  (toolSource), the manifest package and its main package. Keyed by its
+  checkout, it would be found only on an engine of the platform that built
+  it: an engine learns a checkout's content key only once the checkout has
+  run, so the engine that built it, which hadn't checked it out, keyed the
+  build by the checkout's recipe, and an engine that reads the checkout from
+  a cache, such as a fresh engine of an image made on another platform,
+  keys it by the checkout's content, and builds it again.
+  """
+  writeManifest: Directory! {
+    let source = writeManifestSource
+    let files = toolSource(source)
+      .withDirectory("cmd/write-manifest", toolSource(source.directory("cmd/write-manifest")))
+    machineTools("write-manifest", files, "./cmd/write-manifest")
+  }
+
+  """
+  The module write-manifest is built from: the manifest module beside
+  golangci-lint's export driver, at golangciLintCommit, which needs only the
+  standard library. A cache that is to hold write-manifest's build, such as
+  an engine image's, holds it too: an engine reads its files to find the
+  build (writeManifest), so a fresh engine need not fetch them.
+  """
+  writeManifestSource: Directory! {
+    git("https://github.com/dagger/golangci-lint")
+      .commit(golangciLintCommit)
+      .tree
+      .directory("helpers/export-driver/manifest")
+  }
+
+  """
+  The dagger/golangci-lint commit whose manifest module write-manifest is
+  built from, in the format its export driver at that commit reads.
+  """
+  let golangciLintCommit: String! = "7d9cbaf83a85addefb99346297301eeb321d98c6"
+
+  # A tool's directory: the main package pkg of source, built for each
+  # machine an engine runs on under that machine's uname -m, and at name a
+  # script that runs the one for the exec's machine. Each is built in the
+  # pinned image, statically, so it runs in whatever image a build runs it
+  # in. An exec that mounts it is the same on every machine, so what it makes
+  # is the same whichever machine's tool ran.
+  #
+  # Its contents are the same whichever engine builds it and whatever a build
+  # targets: both binaries are cross-compiled from the same source and image.
+  # So it is declared for one platform (Directory.withPlatform) for every
+  # build: an engine of another platform, or an engine image made on one,
+  # then finds the one that was built, without building it again.
+  let machineTools(name: String!, source: Directory!, pkg: String!): Directory! {
+    directory
+      .withNewFile(name, "#!/bin/sh\nexec \"${0%/*}/$(uname -m)/" + name + "\" \"$@\"\n", permissions: 493)
+      .withFile("x86_64/" + name, toolBinary(source, pkg, "amd64"))
+      .withFile("aarch64/" + name, toolBinary(source, pkg, "arm64"))
+      .withPlatform(platform: ("linux/amd64" :: Platform!))
+  }
+
+  let toolBinary(source: Directory!, pkg: String!, goarch: String!): File! {
+    container.from(goImage(scannerVersion))
+      .withEnvVariable("CGO_ENABLED", "0")
+      .withEnvVariable("GOOS", "linux")
+      .withEnvVariable("GOARCH", goarch)
+      .withMountedDirectory("/src", source)
+      .withWorkdir("/src")
+      .withExec(["go", "build", "-o", "/out", pkg], disableDaggerInDagger: true, noInit: true)
+      .file("/out")
   }
 
   """
@@ -576,18 +696,6 @@ type Gomod {
   the whole workspace instead of once per module.
   """
   toolBuilder: Container! { goContainer(scannerVersion) }
-
-  """
-  Streams a shared Go test report into bounded per-check results.
-  """
-  testReportIndexer: File! {
-    toolBuilder
-      .withDirectory("/helpers/go-test-report", currentModule.source.directory("helpers/go-test-report"))
-      .withWorkdir("/helpers/go-test-report")
-      .withEnvVariable("CGO_ENABLED", "0")
-      .withExec(["go", "build", "-o", "/usr/local/bin/go-test-report", "."])
-      .file("/usr/local/bin/go-test-report")
-  }
 
   """
   Every Dagger module config file in the workspace, at its workspace path.

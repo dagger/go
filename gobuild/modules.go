@@ -20,8 +20,8 @@ import (
 // changes only that module's packages and what imports them. A package
 // mounts each module it reads whole, so its C and assembly can include any
 // file of the module, which the plan never names, and nothing is selected
-// file by file. What no build of a module reads, its tests and testdata,
-// is left out (testExclude), but for what the build does read.
+// file by file. What almost no build of a module reads, its tests and
+// testdata, is left out (testExclude), but for what the build does read.
 type modules struct {
 	// root is where they are, GOMODCACHE.
 	root string
@@ -85,8 +85,10 @@ func (m *modules) dir(name string) *dagger.Directory {
 }
 
 // testExclude is the patterns of what a module holds that building it
-// never reads: its tests, and its testdata directories, which the go
-// command ignores. In some modules they are most of the files. They match
+// almost never reads: its tests, and its testdata directories, whose
+// packages no pattern matches, though a build may import one by its path
+// (excludeUnread puts back what it reads). In some modules they are most of
+// the files. They match
 // under the module's directory in its zip, mod, the module path not
 // escaped, so the module's own path never matches.
 func testExclude(mod string) []string {
@@ -97,7 +99,8 @@ func testExclude(mod string) []string {
 // excludeUnread sets, in m.exclude, what each downloaded module blocks read
 // leaves out of its extraction: testExclude, with patterns that put back
 // what the build reads from there, such as a dependency's tests that go
-// test -c compiles, a file a package embeds from testdata, or a directory
+// test -c compiles, a package in testdata the build imports, or a file a
+// package embeds from testdata, or a directory
 // a package's C reads whole. A module a package reads whole, for its C or
 // assembly, which can include any of its files, is extracted whole. A
 // module the build reads none of those from, nearly every one, extracts

@@ -178,7 +178,7 @@ func TestPlanDirsOf(t *testing.T) {
 			},
 		},
 	}
-	got, _ := planDirsOf(src, "cmd", byPath, pkgs)
+	got, _ := planDirsOf(src, []string{"cmd"}, byPath, pkgs)
 	want := planDirs{
 		src:  []string{"cmd", "lib", "sub/inner"},
 		mods: []string{"github.com/dep/x@v1.0.0", "github.com/dep/x@v1.0.0/win"},
@@ -204,6 +204,24 @@ func TestPlanDirsOfTestdata(t *testing.T) {
 	}
 }
 
+// A build of every package of a module that is itself under a testdata
+// directory has the module's own packages, and leaves out only a testdata
+// directory below its working directory, as the go command's "./..." in it
+// does.
+func TestPlanDirsOfModuleInTestdata(t *testing.T) {
+	src := parseSourceImports(newTarget("linux\namd64\n0\ngo1.27.3\n", nil), "mod testdata/fixture example.com/fixture\n"+
+		"testdata/fixture\tmain.go\t-\texample.com/fixture/inner\n"+
+		"testdata/fixture/inner\tinner.go\t-\tgithub.com/dep/x\n"+
+		"testdata/fixture/testdata/skipped\tskipped.go\t-\tgithub.com/dep/skipped\n")
+	src.root = "testdata/fixture"
+	if got, want := planSrcDirs(src, ""), []string{"testdata/fixture", "testdata/fixture/inner"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("planDirsOf(every package, root testdata/fixture).src = %q, want %q", got, want)
+	}
+	if imports, _, _ := src.outside(); !reflect.DeepEqual(imports, []string{"github.com/dep/x"}) {
+		t.Errorf("outside(every package) = %q, want [github.com/dep/x]: the module's own packages' import, not its testdata's", imports)
+	}
+}
+
 // A package in a directory a go.mod replaces a module with is followed by the
 // replaced module's import paths, whatever module path its own go.mod
 // declares, as the go command accepts.
@@ -221,7 +239,7 @@ func TestPlanDirsOfReplace(t *testing.T) {
 
 // planSrcDirs is the source directories planDirsOf reaches from pkgDir.
 func planSrcDirs(src sourceImports, pkgDir string) []string {
-	dirs, _ := planDirsOf(src, pkgDir, nil, nil)
+	dirs, _ := planDirsOf(src, []string{pkgDir}, nil, nil)
 	return dirs.src
 }
 
@@ -287,9 +305,9 @@ func TestPlanDirsOfOutside(t *testing.T) {
 			dirs: map[string]string{"github.com/dep/z/zz": "github.com/dep/z@v1.0.0/zz"},
 		},
 	}
-	want, _ := planDirsOf(src, "cmd", byPath, pkgs)
+	want, _ := planDirsOf(src, []string{"cmd"}, byPath, pkgs)
 	imports, plan, _ := src.outside("cmd")
-	called, followed := planDirsOf(sourceImports{pkgs: map[string][]string{".": imports}, all: map[string][]string{".": plan}}, ".", byPath, pkgs)
+	called, followed := planDirsOf(sourceImports{pkgs: map[string][]string{".": imports}, all: map[string][]string{".": plan}}, []string{"."}, byPath, pkgs)
 	if !reflect.DeepEqual(called.mods, want.mods) {
 		t.Errorf("mods through the call = %q, want %q", called.mods, want.mods)
 	}
@@ -374,6 +392,64 @@ func TestOwnModules(t *testing.T) {
 	} {
 		if got := inModules(ip, []string{"example.com/inner", "example.com/lib"}); got != want {
 			t.Errorf("inModules(%q) = %v, want %v", ip, got, want)
+		}
+	}
+}
+
+// What gohdr imports prints for a pack holding an embed, a cgo package, a
+// symlink, a plain package and a test file's embed, in build and tests
+// mode: gohdr's TestHdrToolImportsMarks checks gohdr prints exactly this.
+var hdrImportsMarks = map[string]string{
+	"build": "cgo cgo\n" +
+		"embed embeds\n" +
+		"link links\n" +
+		"mod . example.com/m\n" +
+		"name\tcgo\tcgo\n" +
+		"name\tembeds\tembeds\n" +
+		"name\tplain\tplain\n" +
+		"unparsed links\n" +
+		"embeds\te.go\t-\tembed\n" +
+		"cgo\tc.go\t-\t\n" +
+		"links\tl.go\t-\t\n" +
+		"plain\tp.go\t-\tfmt\n",
+	"tests": "cgo cgo\n" +
+		"embed embeds\n" +
+		"embed tested\n" +
+		"link links\n" +
+		"mod . example.com/m\n" +
+		"name\tcgo\tcgo\n" +
+		"name\tembeds\tembeds\n" +
+		"name\tplain\tplain\n" +
+		"name\ttested\ttested\n" +
+		"unparsed links\n" +
+		"embeds\te.go\t-\tembed\n" +
+		"cgo\tc.go\t-\t\n" +
+		"links\tl.go\t-\t\n" +
+		"plain\tp.go\t-\tfmt\n" +
+		"tested\tt_test.go\t-\tembed\n",
+}
+
+// The source's imports, as gohdr lists them, mark the directories whose
+// build may read more than their Go files: a //go:embed line, an import of
+// "C", a symlink. A test file's mark is listed only with tests.
+func TestSourceImportsMarks(t *testing.T) {
+	for mode, want := range map[string]map[string][]string{
+		"build": {"embeds": {"embed"}, "cgo": {"cgo"}, "links": {"link", "unparsed"}},
+		"tests": {"embeds": {"embed"}, "cgo": {"cgo"}, "links": {"link", "unparsed"}, "tested": {"embed"}},
+	} {
+		src := parseSourceImports(newTarget("linux\namd64\n1\ngo1.27.3\n", nil), hdrImportsMarks[mode])
+		if !reflect.DeepEqual(src.marks, want) {
+			t.Errorf("imports %s: marks %v, want %v", mode, src.marks, want)
+		}
+		if want := map[string][]string{"embeds": {"embeds"}, "cgo": {"cgo"}, "plain": {"plain"}}; mode == "build" && !reflect.DeepEqual(src.names, want) {
+			t.Errorf("imports %s: package names %v, want %v", mode, src.names, want)
+		}
+		// The marks are neither Go files' lines nor modules.
+		if _, ok := src.all["embed embeds"]; ok {
+			t.Errorf("imports %s: a mark read as a package", mode)
+		}
+		if len(src.mods) != 1 || src.mods[0] != (sourceModule{dir: ".", path: "example.com/m"}) {
+			t.Errorf("imports %s: modules %+v", mode, src.mods)
 		}
 	}
 }

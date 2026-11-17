@@ -48,8 +48,6 @@ func (m *Gobuild) Discover(
 	// The modules private downloads, as GONOPROXY or GOPRIVATE names them.
 	// +optional
 	privatePatterns string,
-	// gohdr, for every machine an engine runs on (hdrTools).
-	hdr *dagger.Directory,
 	// The caller's GOMODCACHE, a module cache its image may come with.
 	gomodcache string,
 	// The module versions the build may read, as a go.sum lists them (goSum).
@@ -67,12 +65,13 @@ func (m *Gobuild) Discover(
 	// of (sourceImports.ownModules), whose packages the call neither
 	// downloads nor follows, and reports as followed.
 	own []string,
-) (*Discovery, error) {
+) (_ *Discovery, rerr error) {
+	defer reportExec(&rerr)
 	d := &downloader{public: public, private: private, privatePatterns: privatePatterns, gomodcache: gomodcache,
-		sums: parseGoSums([]string{sums}), target: newTarget(goenv, tags), hdr: hdr, own: own}
+		sums: parseGoSums([]string{sums}), target: newTarget(goenv, tags), hdr: m.Gohdr, own: own}
 	// They are followed as from a package of a source that imports them
 	// and provides none of them.
-	found, err := d.discover(ctx, sourceImports{pkgs: map[string][]string{".": imports}, all: map[string][]string{".": planImports}}, ".")
+	found, err := d.discover(ctx, sourceImports{pkgs: map[string][]string{".": imports}, all: map[string][]string{".": planImports}}, []string{"."})
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +99,7 @@ func goSum(entries []sumEntry) string {
 	return b.String()
 }
 
-// discoverOnce is discover's result for the source's package in pkgDir, or
+// discoverOnce is discover's result for the source's packages in pkgDirs, or
 // every package of the source, found by the discovery call: once per set of
 // packages the source imports from outside it, for every build and every
 // call of one. goenv and tags are the target's. When a module's package
@@ -108,14 +107,14 @@ func goSum(entries []sumEntry) string {
 // call couldn't follow it, and discover runs here instead. So it does when a
 // dependency's package imports one of the source's modules that go.sum also
 // names, which the call doesn't download.
-func (d *downloader) discoverOnce(ctx context.Context, toolImage, goenv string, tags []string, src sourceImports, pkgDir string) (*discovered, error) {
-	imports, plan, srcDirs := src.outside(pkgDir)
+func (d *downloader) discoverOnce(ctx context.Context, toolImage, goenv string, tags []string, src sourceImports, pkgDirs []string) (*discovered, error) {
+	imports, plan, srcDirs := src.outside(pkgDirs...)
 	own := src.ownModules(d.sums)
 	opts := dagger.GobuildDiscoverOpts{Tags: tags}
 	if d.privatePatterns != "" {
 		opts.Private, opts.PrivatePatterns = d.private, d.privatePatterns
 	}
-	call := dagger.Connect().Gobuild(toolImage).Discover(d.public, d.hdr, d.gomodcache, goSum(d.sums), goenv, imports, plan, own, opts)
+	call := dagger.Connect().Gobuild(toolImage, d.hdr).Discover(d.public, d.gomodcache, goSum(d.sums), goenv, imports, plan, own, opts)
 	followed, err := call.Followed(ctx)
 	if err != nil {
 		return nil, err
@@ -125,7 +124,7 @@ func (d *downloader) discoverOnce(ctx context.Context, toolImage, goenv string, 
 		return nil, err
 	}
 	if src.providesAny(followed, planFollowed) || slices.ContainsFunc(followed, func(ip string) bool { return inModules(ip, own) }) {
-		return d.discover(ctx, src, pkgDir)
+		return d.discover(ctx, src, pkgDirs)
 	}
 	names, err := call.Names(ctx)
 	if err != nil {
