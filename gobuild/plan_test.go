@@ -1,9 +1,12 @@
 package main
 
 import (
+	"fmt"
+	"os/exec"
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -1577,4 +1580,64 @@ func TestClosure(t *testing.T) {
 	if !reflect.DeepEqual(got, map[string]bool{"b001": true, "b003": true, "b004": true}) {
 		t.Errorf("closure of b001: %v", got)
 	}
+}
+
+// The go command quotes for display, not for shell replay. In particular,
+// the dev engine's RunnerHost URL has bare ampersands in go build -n.
+func TestScriptLinkerValues(t *testing.T) {
+	values := []string{
+		"docker-image://localhost/dagger-engine.dev?container=dagger-engine.dev&volume=dagger-engine.dev&cleanup=false",
+		"hello world",
+		"it's literal",
+		"$HOME `printf expanded` $(printf expanded)",
+		"a;b|c>d<e*?[f]",
+		"line one\nline two\tend",
+		`C:\some\path`,
+	}
+	for _, value := range values {
+		for _, joined := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%q/joined=%t", value, joined), func(t *testing.T) {
+				arg := "main.RunnerHost=" + value
+				flag := "-X " + goPlanArg(arg)
+				want := []string{"-X", arg, "-X", "main.Tag=next"}
+				if joined {
+					flag = goPlanArg("-X=" + arg)
+					want = []string{"-X=" + arg, "-X", "main.Tag=next"}
+				}
+				plan := strings.Replace(mainLink(), "-buildmode=exe ", "-buildmode=exe "+flag+" -X main.Tag=next ", 1)
+				blocks, err := parsePlan(plan, testRoots)
+				if err != nil {
+					t.Fatal(err)
+				}
+				script := blocks["b001"].script(blocks, soloCompileC)
+				at := strings.Index(script, "/link ")
+				if at < 0 {
+					t.Fatalf("no linker command:\n%s", script)
+				}
+				command := "capture " + script[at+len("/link "):]
+				// Exercise the shell without executing the compiler or linker.
+				cmd := exec.Command("sh", "-c", "capture() { printf '%s\\000' \"$@\"; }; "+command)
+				cmd.Dir = t.TempDir()
+				out, err := cmd.Output()
+				if err != nil {
+					t.Fatalf("replay: %v\n%s", err, command)
+				}
+				args := strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00")
+				// Five fixed arguments precede the values; the archive follows.
+				if len(args) < 6 || !slices.Equal(args[5:len(args)-1], want) {
+					t.Fatalf("linker arguments: %q; want values %q", args, want)
+				}
+			})
+		}
+	}
+}
+
+// Match cmd/go's joinUnambiguously, including its deliberately incomplete
+// shell quoting, so regression inputs look like actual dry-run output.
+func goPlanArg(s string) string {
+	q := strconv.Quote(s)
+	if s == "" || strings.ContainsAny(s, " ()>;") || len(q) > len(s)+2 {
+		return q
+	}
+	return s
 }

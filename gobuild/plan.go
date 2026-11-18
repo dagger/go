@@ -928,6 +928,9 @@ func (b *block) script(blocks map[string]*block, conc string) string {
 		})
 		// What's left is $WORK itself, as in cgo's "cd $WORK".
 		l = strings.ReplaceAll(l, "$WORK", "/work")
+		if link {
+			l = quoteLinkerValues(l)
+		}
 		// The link's build ID, from which the linker also makes the
 		// binary's GNU build ID, is made in the exec from what the link
 		// reads, as go build makes it: the plan's is made from headers, so
@@ -1201,6 +1204,37 @@ func flagList(flags []string) string {
 		return ""
 	}
 	return " " + strings.Join(flags, " ")
+}
+
+// The go command's joinUnambiguously prints each argument either bare or
+// as a Go double-quoted string. It does not quote all shell metacharacters.
+var rePlanArg = regexp.MustCompile(`"(?:\\.|[^"\\])*"|[^ \t]+`)
+
+// quoteLinkerValues makes -X definitions literal shell arguments. Preserve
+// the rest of the command: it includes the script's own $gohost expansion,
+// and its build ID is replaced with $id after this step.
+func quoteLinkerValues(line string) string {
+	var out strings.Builder
+	last := 0
+	valueNext := false
+	for _, loc := range rePlanArg.FindAllStringIndex(line, -1) {
+		word := line[loc[0]:loc[1]]
+		if strings.HasPrefix(word, `"`) {
+			decoded, err := strconv.Unquote(word)
+			if err == nil {
+				word = decoded
+			}
+		}
+		value := valueNext || strings.HasPrefix(word, "-X=")
+		valueNext = !valueNext && word == "-X"
+		if value {
+			out.WriteString(line[last:loc[0]])
+			out.WriteString(quoteArg(word))
+			last = loc[1]
+		}
+	}
+	out.WriteString(line[last:])
+	return out.String()
 }
 
 // quoteArg quotes a word for the shell when it needs it.
