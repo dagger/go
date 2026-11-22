@@ -29,8 +29,7 @@ non-root type and because the type is that tool's public API.
 When changing a module, always make sure the tests are up to date.
 
 To run tests: `dagger check` runs all four suites, because each is installed in
-the root `dagger.toml`, with go-dev as the entrypoint. Every module needs
-v1.0.0-beta.15 or later.
+the root `dagger.toml`, with go-dev as the entrypoint.
 
 One suite, or one check, at a time:
 
