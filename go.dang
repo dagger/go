@@ -178,7 +178,7 @@ type Go {
   # modules, pointing at one catalogue file per module. Reading it replaces a
   # search, glob or field read per result.
   let discoveryIndex(ws: Workspace!): JSONValue! {
-    discoveryScan(ws).file("_discovery_index_.json").asJSON
+    discoveryScan(ws).file("_discovery_index_.json").asJson
   }
 
   # The scan, discovering the tests go test builds as the test containers are
@@ -202,7 +202,7 @@ type Go {
         goflags: goflags ?? base!.envVariable("GOFLAGS") ?? "",
         cgo: cgoEnv == "1",
       )
-      let toolchain = fromEnv.file("_discovery_index_.json").asJSON
+      let toolchain = fromEnv.file("_discovery_index_.json").asJson
       let release = JSON.decode(`${toolchain.field(path: ["toolchain", "release"]).contents}`) :: Boolean!
       let cgo = JSON.decode(`${toolchain.field(path: ["toolchain", "cgo"]).contents}`) :: Boolean!
       if (release or (cgo and cgoEnv != "0" and cgoEnv != "1")) {
@@ -235,7 +235,7 @@ type Go {
 
   let moduleDiscovery(ws: Workspace!, root: String!): JSONValue! {
     let ordinal = JSON.decode(`${discoveryIndex(ws).field(path: ["modules", root]).contents}`) :: Int!
-    discoveryScan(ws).file("_discovery_modules_/" + `${ordinal}` + ".json").asJSON
+    discoveryScan(ws).file("_discovery_modules_/" + `${ordinal}` + ".json").asJson
   }
 
   # A module's "module" line, then a "package" line per package directory
