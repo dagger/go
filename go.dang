@@ -1347,8 +1347,9 @@ type GoModule {
   }
 
   # The otel-go commit otelgotest is built from: one with its prebuilt mode,
-  # which runs a test binary as go test -json runs one.
-  let testRunnerCommit: String! = "aa07da582c215c85056429e152a261717003244d"
+  # which runs a test binary as go test -json runs one, and which logs output
+  # outside any test, such as TestMain's, on the package span.
+  let testRunnerCommit: String! = "a45ecd01b19eb5714bf24b189bd6b16c63c0b447"
 
   """
   The helper that turns each package's go test -json report into one result

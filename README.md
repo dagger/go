@@ -150,7 +150,7 @@ The shared run streams its JSON report through an indexer once. Each check reads
 its own one-line result, so total report size is independent of `File.contents`
 limits. Failure messages say only what failed: test output is in otelgotest's
 test spans, a failed build's in the build's span, and output outside any test,
-such as `TestMain`'s, in the indexer's logs.
+such as `TestMain`'s, in the package's span.
 
 The helper reads the filtered package and test collections. The command names
 only the packages that hold a selected test, so the module's other packages do

@@ -2979,8 +2979,8 @@ type GoDev {
       selectionArgs,
       passed: 6,
       failed: 2,
-      # TestMain's own output is in the report indexer's logs: otelgotest logs
-      # no package-level output on the package span.
+      # TestMain's own output is on the package span, which a cached run does
+      # not report again; the check's error is the same either way.
       messages: ["Go tests in m1/p1: package failed outside a selected test check"],
     )
   }

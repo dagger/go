@@ -45,7 +45,7 @@ func TestSummarizeAttribution(t *testing.T) {
 		}, map[check]string{{"example.com/p", "TestOK"}: "package failed outside a selected test check", {"example.com/p", "TestBad"}: "package failed outside a selected test check", {"example.com/q", "TestOther"}: ""}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := summarize(report(append(append([]event{}, base...), tc.events...)...), selected, 1, io.Discard)
+			got, err := summarize(report(append(append([]event{}, base...), tc.events...)...), selected, 1)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -55,24 +55,6 @@ func TestSummarizeAttribution(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// Output outside any test, which no otelgotest span logs, is copied out;
-// a test's own output is not.
-func TestPackageOutput(t *testing.T) {
-	var out strings.Builder
-	_, err := summarize(report(
-		event{Action: "output", Package: "example.com/p", Test: "TestOK", Output: "test log\n"},
-		event{Action: "pass", Package: "example.com/p", Test: "TestOK"},
-		event{Action: "output", Package: "example.com/p", Output: "teardown failure\n"},
-		event{Action: "fail", Package: "example.com/p"},
-	), []selection{{"example.com/p", []string{"TestOK"}}}, 1, &out)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if out.String() != "teardown failure\n" {
-		t.Errorf("package output: %q", out.String())
 	}
 }
 
@@ -86,7 +68,7 @@ func TestAbsentAndInterruptedTests(t *testing.T) {
 		event{Action: "fail", Package: "example.com/p", Test: "TestBad"},
 		event{Action: "run", Package: "example.com/p", Test: "TestInterrupted"},
 		event{Action: "fail", Package: "example.com/p"},
-	), selected, 1, io.Discard)
+	), selected, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +91,7 @@ func TestSelectedTestThatNeverRan(t *testing.T) {
 	got, err := summarize(report(
 		event{Action: "pass", Package: "example.com/p", Test: "TestRan"},
 		event{Action: "pass", Package: "example.com/p"},
-	), selected, 0, io.Discard)
+	), selected, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +110,7 @@ func TestPackageNeverStarted(t *testing.T) {
 	got, err := summarize(report(
 		event{Action: "fail", Package: "example.com/p", Test: "TestBad"},
 		event{Action: "fail", Package: "example.com/p"},
-	), selected, 1, io.Discard)
+	), selected, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,10 +121,10 @@ func TestPackageNeverStarted(t *testing.T) {
 
 func TestMalformedReportAndCommandFailure(t *testing.T) {
 	selected := []selection{{"example.com/p", []string{"TestOK"}}}
-	if _, err := summarize(strings.NewReader("not JSON"), selected, 1, io.Discard); err == nil {
+	if _, err := summarize(strings.NewReader("not JSON"), selected, 1); err == nil {
 		t.Fatal("accepted malformed JSON")
 	}
-	got, err := summarize(report(event{Action: "pass", Package: "example.com/p", Test: "TestOK"}), selected, 1, io.Discard)
+	got, err := summarize(report(event{Action: "pass", Package: "example.com/p", Test: "TestOK"}), selected, 1)
 	if err != nil || got[check{"example.com/p", "TestOK"}] != "shared test command failed (go test exit 1)" {
 		t.Fatalf("lost command failure: %v %v", got, err)
 	}

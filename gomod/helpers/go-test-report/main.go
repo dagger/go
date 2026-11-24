@@ -1,6 +1,6 @@
 // go-test-report reads a go test -json report and writes each selected test's
-// verdict: empty when it passed, else a one-line reason. Test output belongs to
-// otelgotest's test spans; output outside any test is copied to stdout.
+// verdict: empty when it passed, else a one-line reason. The output belongs to
+// otelgotest's test and package spans.
 package main
 
 import (
@@ -34,7 +34,7 @@ type packageResult struct {
 	tests                                                       map[string]*testResult
 }
 
-func summarize(report io.Reader, selections []selection, exitCode int, packageOutput io.Writer) (map[check]string, error) {
+func summarize(report io.Reader, selections []selection, exitCode int) (map[check]string, error) {
 	packages := make(map[string]*packageResult)
 	for _, s := range selections {
 		if s.Pkg == "" {
@@ -79,8 +79,6 @@ func summarize(report io.Reader, selections []selection, exitCode int, packageOu
 			anyFailure = true
 		}
 		if e.Test == "" {
-			// Such as TestMain's: otelgotest logs it on no span.
-			_, _ = io.WriteString(packageOutput, e.Output)
 			p.failed = p.failed || e.Action == "fail"
 			p.passed = p.passed || e.Action == "pass" || e.Action == "skip"
 			continue
@@ -161,7 +159,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("read exit code: %w", err)
 	}
-	results, err := summarize(report, selections, exitCode, os.Stdout)
+	results, err := summarize(report, selections, exitCode)
 	if err != nil {
 		return err
 	}
