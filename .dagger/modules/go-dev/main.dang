@@ -340,8 +340,9 @@ type GoDev {
     } rescue {
       err: Error => err.message
     }
-    assert(failed.contains("Go tests in sub:"), "a package failure did not name the package: " + failed)
-    assert(failed.contains("ran in sub"), "a test failure lost its subtest diagnostics: " + failed)
+    # The test's output is in its span, not repeated in the error.
+    assert(failed.contains("Go tests in sub: TestShared failed"), "a package failure did not name the package: " + failed)
+    assert(!failed.contains("\n"), "a test failure is not one line: " + failed)
     null
   }
 
@@ -2978,7 +2979,9 @@ type GoDev {
       selectionArgs,
       passed: 6,
       failed: 2,
-      messages: ["Go tests in m1/p1: package failed outside a selected test check", "teardown failure"],
+      # TestMain's own output is on the package span, which a cached run does
+      # not report again; the check's error is the same either way.
+      messages: ["Go tests in m1/p1: package failed outside a selected test check"],
     )
   }
 
@@ -2986,13 +2989,14 @@ type GoDev {
     let fixture = selectionFixture.withNewFile("m1/p1/tests_test.go", "package p1\nimport \"testing\"\nfunc TestFoo(t *testing.T) { t.Fatal(\"selected failure\") }\nfunc TestBar(t *testing.T) {}\n")
     # A test go test never builds is no check, even when selected by name.
     let constrained = fixture.withNewFile("m1/p1/constrained_test.go", "//go:build never\n\npackage p1\nimport \"testing\"\nfunc TestConstrained(t *testing.T) {}\n")
-    selectedCheck(ws, constrained, selectionArgs + ["--go-test=TestConstrained"], passed: 7, failed: 1, messages: ["selected failure"])
+    # The test's output is in its span, which a cached run does not report
+    # again; the check's error is the same either way.
+    selectedCheck(ws, constrained, selectionArgs + ["--go-test=TestConstrained"], passed: 7, failed: 1, messages: ["Go tests in m1/p1: TestFoo failed"])
   }
 
   # -failfast stops m1/p1 at TestFoo, so TestBar there never runs and fails.
-  # The helper's unit tests check its message: the report may show the shared
-  # run's test spans for TestBar's check instead of its error. m1/p2 is left
-  # out: go test starts no further package after a failure, so whether it runs
+  # The helper's unit tests check TestBar's message. m1/p2 is left out: go
+  # test starts no further package after a failure, so whether it runs
   # depends on whether it started before m1/p1 failed.
   selectedFailfastCheck(ws: Workspace!): Void @check {
     let fixture = selectionFixture.withNewFile("m1/p1/tests_test.go", "package p1\nimport \"testing\"\nfunc TestFoo(t *testing.T) { t.Fatal(\"selected failure\") }\nfunc TestBar(t *testing.T) {}\n")
@@ -3002,7 +3006,7 @@ type GoDev {
       selectionArgs.filter { arg => arg != "--go-package=m1/p2" },
       passed: 4,
       failed: 2,
-      messages: ["selected failure"],
+      messages: ["Go tests in m1/p1: TestFoo failed"],
       goflags: "-failfast",
     )
   }
@@ -3041,9 +3045,7 @@ type GoDev {
       ["--go-module=reporting"],
       passed: 1,
       failed: 1,
-      # The report shows the failing check and test diagnostics, but may hide
-      # the check's internal error when it has failing test spans.
-      messages: ["go-package=reporting/hidden&go-test=TestVisible", "undiscovered failure"],
+      messages: ["go-package=reporting/hidden&go-test=TestVisible", "Go tests in reporting/hidden: package failed outside a selected test check"],
     )
   }
 
@@ -3058,7 +3060,7 @@ type GoDev {
       ["--go-module=reporting"],
       passed: 1,
       failed: 2,
-      messages: ["undiscovered failure"],
+      messages: ["Go tests in reporting/hidden: TestKnownFailure failed", "Go tests in reporting/hidden: package failed outside a selected test check"],
     )
   }
 

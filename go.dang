@@ -1219,25 +1219,12 @@ type GoModule {
   Run tests in this module.
   """
   test(ws: Workspace!): Void {
-    let failure = testFailure(ws)
-    if (failure != null) {
-      raise "Go module " + path + ": " + failure
-    }
-    null
-  }
-
-  """
-  Error message from running this module's tests, or null when they pass or
-  this module is configured to skip tests.
-  """
-  let testFailure(ws: Workspace!): String {
-    if (skipTest) {
-      null
-    } else {
-      { testExec(ws).sync; null } rescue {
-        err: Error => err.message
+    if (!skipTest) {
+      testExec(ws).sync rescue {
+        err: Error => raise "Go module " + path + ": " + err.message
       }
     }
+    null
   }
 
   """
@@ -1360,8 +1347,9 @@ type GoModule {
   }
 
   # The otel-go commit otelgotest is built from: one with its prebuilt mode,
-  # which runs a test binary as go test -json runs one.
-  let testRunnerCommit: String! = "aa07da582c215c85056429e152a261717003244d"
+  # which runs a test binary as go test -json runs one, and which logs output
+  # outside any test, such as TestMain's, on the package span.
+  let testRunnerCommit: String! = "a45ecd01b19eb5714bf24b189bd6b16c63c0b447"
 
   """
   The helper that turns each package's go test -json report into one result
@@ -1527,7 +1515,8 @@ type GoModule {
   # set builds, every package of it has its binary, or none when its test
   # files are all for other platforms. When it fails, as go test still runs
   # the packages that build, each package is built alone, and the one that
-  # fails has its error in place of a binary. A gccgo build has no set.
+  # fails is marked so; its build's own span carries the error. A gccgo
+  # build has no set.
   # tools, which the tests will run with, build at the same time as the set,
   # rather than after it: they are a block, so that nothing builds them
   # before this, and the two are fields of one {{ }}, whose fields run at
@@ -1548,14 +1537,12 @@ type GoModule {
       let name = testBinaryName(inputs.importPath, dir)
       let at = if (dir == ".") { name } else { dir + "/" + name }
       if (set != null) {
-        GoTestBinary(directory: dir, name: name, file: if (set!.exists(at)) { set!.file(at) } else { null })
+        GoTestBinary(directory: dir, name: name, file: if (set!.exists(at)) { set!.file(at) } else { null }, buildFailed: false)
       } else {
         {
           let one = testBinaryOne(inputs, dir).sync
-          GoTestBinary(directory: dir, name: name, file: if (one.exists(at)) { one.file(at) } else { null })
-        } rescue {
-          err: Error => GoTestBinary(directory: dir, name: name, failure: err.message)
-        }
+          GoTestBinary(directory: dir, name: name, file: if (one.exists(at)) { one.file(at) } else { null }, buildFailed: false)
+        } rescue GoTestBinary(directory: dir, name: name, file: null, buildFailed: true)
       }
     }
   }
@@ -1646,22 +1633,15 @@ type GoModule {
     let env = testEnvFrom(inputs)
     # Every package's exec runs at once, as go test runs packages in
     # parallel: one file from each, merged and synced.
-    let ran = {
-      binaries.filter { b => b.file != null }.reduce(directory) { out, binary =>
-        let done = packageTestEnv(env, binary)
-          .withExec(packageTestArgs(env, inputs, binary, false, []), daggerInDaggerNewSession: true)
-          .withNewFile("/dagger-go-test/ran", "")
-          .file("/dagger-go-test/ran")
-        out.withFile(binary.directory + "/" + binary.name + ".ran", done)
-      }.sync
-      ""
-    } rescue {
-      err: Error => err.message
-    }
-    let failures = binaries.filter { b => b.failure != null }.map { b =>
-      "Go tests in " + packagePath(b.directory) + ": " + b.failure!
-    } + [ran].filter { f => f != "" }
-    if (failures.length > 0) { raise failures.join("\n") }
+    binaries.filter { b => b.file != null }.reduce(directory) { out, binary =>
+      let done = packageTestEnv(env, binary)
+        .withExec(packageTestArgs(env, inputs, binary, false, []), daggerInDaggerNewSession: true)
+        .withNewFile("/dagger-go-test/ran", "")
+        .file("/dagger-go-test/ran")
+      out.withFile(binary.directory + "/" + binary.name + ".ran", done)
+    }.sync
+    let broken = binaries.filter { b => b.buildFailed }.map { b => packagePath(b.directory) }
+    if (broken.length > 0) { raise "Go tests in " + broken.join(", ") + ": package failed to build" }
     env
   }
 
@@ -1685,7 +1665,7 @@ type GoModule {
   # which go test leaves out or reports as having none.
   let moduleTestBinaries(inputs: GoTestInputs!, dirs: [String!]!): [GoTestBinary!]! {
     let binaries = testBinaries(inputs, dirs) { directory.withFile("otelgotest", testRunner) }
-    binaries.filter { b => b.file != null or b.failure != null }
+    binaries.filter { b => b.file != null or b.buildFailed }
   }
 
   # Whether the package pattern ./... matches a module-relative directory:
@@ -1698,16 +1678,15 @@ type GoModule {
   }
 
   """
-  Run the named tests in one package, or all of them when names is empty,
-  naming the package when they fail.
+  Run the named tests in one package, or all of them when names is empty.
   """
   let runPackageTests(ws: Workspace!, dir: String!, names: [String!]!): Void {
     let inputs = wsTestInputs(ws)
     let run = if (names.length == 0) { [] } else { ["-test.run=^(" + names.join("|") + ")$"] }
     let binaries = testBinaries(inputs, [dir]) { directory.withFile("otelgotest", testRunner) }
     let binary = binaries[0]!
-    if (binary.failure != null) {
-      raise "Go tests in " + packagePath(dir) + ": " + binary.failure!
+    if (binary.buildFailed) {
+      raise "Go tests in " + packagePath(dir) + ": package failed to build"
     }
     # A package whose test files are all for other platforms has no test
     # binary, and go test reports it has none and passes it.
@@ -1715,9 +1694,7 @@ type GoModule {
       let env = testEnvFrom(inputs)
       packageTestEnv(env, binary)
         .withExec(packageTestArgs(env, inputs, binary, false, run), daggerInDaggerNewSession: true)
-        .sync rescue {
-        err: Error => raise "Go tests in " + packagePath(dir) + ": " + err.message
-      }
+        .sync
     }
     null
   }
@@ -1767,8 +1744,8 @@ type GoModule {
   }
 
   # One package's results for its selected tests, one file per test by its
-  # rank among them, empty when it passed: what its test binary reported, or
-  # its build failure.
+  # rank among them, empty when it passed, else a one-line reason. The output
+  # is in otelgotest's test spans, and a failed build's in the build's.
   let packageResults(
     env: Container!,
     inputs: GoTestInputs!,
@@ -1776,10 +1753,9 @@ type GoModule {
     tests: GoTestSelection!,
     run: [String!]!,
   ): Directory! {
-    if (binary.failure != null) {
-      let failure = "package failed to build\n" + binary.failure!
+    if (binary.buildFailed) {
       tests.names.reduce(directory) { out, name =>
-        out.withNewFile(`${tests.names.filter { other => other < name }.length}`, failure)
+        out.withNewFile(`${tests.names.filter { other => other < name }.length}`, "package failed to build")
       }
     } else {
       let selection = JSON.encode([{{pkg: tests.pkg, names: tests.names}}])
@@ -1793,17 +1769,16 @@ type GoModule {
               + JSON.encode({{Action: "output", Package: tests.pkg, Output: "?   \t" + tests.pkg + "\t[no test files]\n"}}) + "\n"
               + JSON.encode({{Action: "skip", Package: tests.pkg}}) + "\n",
           )
-          .withNewFile("/go-test-stderr.log", "")
           .withNewFile("/go-test-exit-code", "0")
       } else {
         # The shell records the exit status for the report, so the exec is
         # the same whether the tests pass or fail.
         # The files are made first, writable by the test's user, who may not
         # be root and cannot create files under /.
-        ["/go-test-report.json", "/go-test-stderr.log", "/go-test-exit-code"].reduce(packageTestEnv(env, binary)) { ctr, file =>
+        ["/go-test-report.json", "/go-test-exit-code"].reduce(packageTestEnv(env, binary)) { ctr, file =>
           ctr.withNewFile(file, "", permissions: 438)
         }.withExec(
-          ["sh", "-c", "\"$@\" > /go-test-report.json 2> /go-test-stderr.log; echo $? > /go-test-exit-code", "sh"]
+          ["sh", "-c", "\"$@\" > /go-test-report.json; echo $? > /go-test-exit-code", "sh"]
             + packageTestArgs(env, inputs, binary, true, run),
           daggerInDaggerNewSession: true,
         )
@@ -1817,7 +1792,6 @@ type GoModule {
         .withExec([
           "/usr/local/bin/go-test-report",
           "--report", "/go-test-report.json",
-          "--stderr", "/go-test-stderr.log",
           "--selection", "/go-test-selection.json",
           "--exit-code-file", "/go-test-exit-code",
           "--output", "/go-test-results",
@@ -2435,12 +2409,12 @@ type GoTestInputs {
 }
 
 # A package's test binary, as go test -c names it: the file, or none when its
-# test files are all for other platforms, or the build's failure.
+# test files are all for other platforms or its build failed.
 type GoTestBinary {
   let directory: String!
   let name: String!
   let file: File
-  let failure: String
+  let buildFailed: Boolean!
 }
 
 # Prepared source and container inputs. Commands stay in evaluation.
