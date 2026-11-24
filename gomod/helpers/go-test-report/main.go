@@ -1,5 +1,6 @@
-// go-test-report streams a go test -json report once and writes a bounded
-// failure message (or an empty passing result) for each selected test check.
+// go-test-report reads a go test -json report and writes each selected test's
+// verdict: empty when it passed, else a one-line reason. Test output belongs to
+// otelgotest's test spans; output outside any test is copied to stdout.
 package main
 
 import (
@@ -15,8 +16,6 @@ import (
 	"strings"
 )
 
-const diagnosticLimit = 32 << 10
-
 type selection struct {
 	Pkg   string   `json:"pkg"`
 	Names []string `json:"names"`
@@ -28,48 +27,14 @@ type event struct {
 
 type check struct{ pkg, name string }
 
-// tail keeps diagnostic memory bounded even when a passing test logs gigabytes.
-type tail struct {
-	data      []byte
-	truncated bool
-}
-
-func (t *tail) Write(p []byte) (int, error) {
-	n := len(p)
-	if n >= diagnosticLimit {
-		t.truncated = t.truncated || len(t.data) > 0 || n > diagnosticLimit
-		t.data = append(t.data[:0], p[n-diagnosticLimit:]...)
-	} else {
-		if extra := len(t.data) + n - diagnosticLimit; extra > 0 {
-			t.data = append(t.data[:0], t.data[extra:]...)
-			t.truncated = true
-		}
-		t.data = append(t.data, p...)
-	}
-	return n, nil
-}
-
-func (t *tail) add(s string) { _, _ = t.Write([]byte(s)) }
-
-func (t *tail) String() string {
-	if t.truncated {
-		return "[earlier output omitted; showing diagnostic tail]\n" + string(t.data)
-	}
-	return string(t.data)
-}
-
-type testResult struct {
-	observed, failed, finished bool
-	log                        tail
-}
+type testResult struct{ observed, failed, finished bool }
 
 type packageResult struct {
 	started, passed, failed, namedFailure, uncheckedTestFailure bool
 	tests                                                       map[string]*testResult
-	log                                                         tail
 }
 
-func summarize(report io.Reader, selections []selection, exitCode int, stderr io.Reader) (map[check]string, error) {
+func summarize(report io.Reader, selections []selection, exitCode int, packageOutput io.Writer) (map[check]string, error) {
 	packages := make(map[string]*packageResult)
 	for _, s := range selections {
 		if s.Pkg == "" {
@@ -110,11 +75,12 @@ func summarize(report io.Reader, selections []selection, exitCode int, stderr io
 			packages[pkg] = p
 		}
 		p.started = true
-		p.log.add(e.Output)
 		if e.Action == "fail" {
 			anyFailure = true
 		}
 		if e.Test == "" {
+			// Such as TestMain's: otelgotest logs it on no span.
+			_, _ = io.WriteString(packageOutput, e.Output)
 			p.failed = p.failed || e.Action == "fail"
 			p.passed = p.passed || e.Action == "pass" || e.Action == "skip"
 			continue
@@ -127,54 +93,40 @@ func summarize(report io.Reader, selections []selection, exitCode int, stderr io
 		}
 		if t != nil {
 			t.observed = true
-			t.log.add(e.Output)
 			if e.Test == top {
 				t.failed = t.failed || e.Action == "fail"
 				t.finished = t.finished || e.Action == "pass" || e.Action == "skip"
 			}
 		}
 	}
-	var stderrTail tail
-	if _, err := io.Copy(&stderrTail, stderr); err != nil {
-		return nil, fmt.Errorf("read test stderr: %w", err)
-	}
-	globalFailure := ""
-	if exitCode != 0 && !anyFailure {
-		globalFailure = fmt.Sprintf("shared test command failed (go test exit %d)\n%s", exitCode, stderrTail.String())
-	}
 	results := make(map[check]string)
 	for _, s := range selections {
 		p := packages[s.Pkg]
 		for _, name := range s.Names {
 			t := p.tests[name]
-			failure := globalFailure
-			if failure == "" {
-				switch {
-				case t.failed:
-					failure = name + " failed\n" + t.log.String()
-				case p.uncheckedTestFailure || (p.failed && !p.namedFailure):
-					failure = fmt.Sprintf("package failed outside a selected test check (go test exit %d)\n%s%s", exitCode, p.log.String(), stderrTail.String())
-				case t.finished:
-				case !t.observed && p.passed:
-					// go test left the test out: a build constraint excluded the file
-					// declaring it, or TestMain never called m.Run.
-					failure = fmt.Sprintf("%s did not run: go test passed %s without it\n%s", name, s.Pkg, p.log.String())
-				case !t.observed && p.failed && p.namedFailure:
-					// -failfast stopped the package at a represented failure before
-					// this test started, or the test binary left it out.
-					failure = fmt.Sprintf("%s did not run: go test failed %s without running it\n%s", name, s.Pkg, p.log.String())
-				case !p.started && anyFailure:
-					// With -failfast, go test starts no further package once one
-					// fails, and a package it never starts has no events at all.
-					failure = fmt.Sprintf("%s did not run: go test stopped before starting %s, after a failure\n", name, s.Pkg)
-				default:
-					failure = fmt.Sprintf("no successful result for %s (go test exit %d)\n%s%s", name, exitCode, p.log.String(), stderrTail.String())
-				}
-			}
-			// Headers and combined package/stderr logs are bounded too, so every
-			// result stays comfortably below File.contents' limit.
-			if len(failure) > 3*diagnosticLimit {
-				failure = failure[:3*diagnosticLimit] + "\n[remaining diagnostics omitted]\n"
+			var failure string
+			switch {
+			case exitCode != 0 && !anyFailure:
+				failure = fmt.Sprintf("shared test command failed (go test exit %d)", exitCode)
+			case t.failed:
+				failure = name + " failed"
+			case p.uncheckedTestFailure || (p.failed && !p.namedFailure):
+				failure = "package failed outside a selected test check"
+			case t.finished:
+			case !t.observed && p.passed:
+				// go test left the test out: a build constraint excluded the file
+				// declaring it, or TestMain never called m.Run.
+				failure = fmt.Sprintf("%s did not run: go test passed %s without it", name, s.Pkg)
+			case !t.observed && p.failed && p.namedFailure:
+				// -failfast stopped the package at a represented failure before
+				// this test started, or the test binary left it out.
+				failure = fmt.Sprintf("%s did not run: go test failed %s without running it", name, s.Pkg)
+			case !p.started && anyFailure:
+				// With -failfast, go test starts no further package once one
+				// fails, and a package it never starts has no events at all.
+				failure = fmt.Sprintf("%s did not run: go test stopped before starting %s, after a failure", name, s.Pkg)
+			default:
+				failure = fmt.Sprintf("no successful result for %s (go test exit %d)", name, exitCode)
 			}
 			results[check{s.Pkg, name}] = failure
 		}
@@ -185,7 +137,6 @@ func summarize(report io.Reader, selections []selection, exitCode int, stderr io
 func run() error {
 	reportPath := flag.String("report", "", "go test JSON report")
 	selectionPath := flag.String("selection", "", "selected package/test names")
-	stderrPath := flag.String("stderr", "", "go test stderr")
 	exitCodePath := flag.String("exit-code-file", "", "file holding go test's exit code")
 	output := flag.String("output", "", "result directory")
 	flag.Parse()
@@ -202,11 +153,6 @@ func run() error {
 		return err
 	}
 	defer report.Close()
-	stderr, err := os.Open(*stderrPath)
-	if err != nil {
-		return err
-	}
-	defer stderr.Close()
 	code, err := os.ReadFile(*exitCodePath)
 	if err != nil {
 		return err
@@ -215,7 +161,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("read exit code: %w", err)
 	}
-	results, err := summarize(report, selections, exitCode, stderr)
+	results, err := summarize(report, selections, exitCode, os.Stdout)
 	if err != nil {
 		return err
 	}

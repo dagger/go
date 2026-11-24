@@ -147,9 +147,10 @@ The engine deduplicates identical container operations. Separate modules use
 separate commands and their own toolchains.
 
 The shared run streams its JSON report through an indexer once. Each check reads
-one bounded result file, so total report size is independent of `File.contents`
-limits. Failure messages retain the last 32 KiB of each diagnostic stream and
-mark truncated output; the full report remains in the shared execution container.
+its own one-line result, so total report size is independent of `File.contents`
+limits. Failure messages say only what failed: test output is in otelgotest's
+test spans, a failed build's in the build's span, and output outside any test,
+such as `TestMain`'s, in the indexer's logs.
 
 The helper reads the filtered package and test collections. The command names
 only the packages that hold a selected test, so the module's other packages do
@@ -162,8 +163,8 @@ tests. Failed `TestMain` setup or teardown and failures from undiscovered tests
 also fail that package's selected checks. A selected test that did not run
 fails, saying so: one in a package that passed without it, one after the
 failure that stopped its package, as `-failfast` does, or one in a package
-`-failfast` never started after another failed. Test failure messages
-include subtest output. Otherwise, passing tests in other packages still pass.
+`-failfast` never started after another failed. Otherwise, passing tests in
+other packages still pass.
 Logs and test spans belong to the check that starts the shared command; other
 checks share its result.
 
