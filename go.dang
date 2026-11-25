@@ -1359,9 +1359,10 @@ type GoModule {
     toolBuild(source, ".", "cmd/otelgotest")
   }
 
-  # The otel-go commit otelgotest is built from, v1.47.0: one with its prebuilt mode,
-  # which runs a test binary as go test -json runs one.
-  let testRunnerCommit: String! = "6db377443d382df0de34a0387351155846587993"
+  # The otel-go commit otelgotest is built from: one with its prebuilt mode,
+  # which runs a test binary as go test -json runs one. otel-go main after
+  # v1.47.0, whose tag predates the semconv v1.43.0 fix.
+  let testRunnerCommit: String! = "e79f0e10530fd3b464640e2fb2036ca19d9c4382"
 
   """
   The helper that turns each package's go test -json report into one result
