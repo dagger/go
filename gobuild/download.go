@@ -613,6 +613,10 @@ func withStderr(err error) error {
 func (d *downloader) lazyZip(ctx context.Context, name string) *dagger.File {
 	for _, e := range d.sums {
 		if e.zip != "" && moduleDirName(e) == name {
+			// The error is left to the zip: with one, dir is the failed
+			// download, unsynced, never nil (fetch), so reading its zip
+			// fails again, with the download's error, where the build
+			// reads it.
 			dir, _ := d.download(ctx, e)
 			return dir.File(zipPath(e))
 		}
@@ -670,7 +674,8 @@ func (d *downloader) download(ctx context.Context, e sumEntry) (*dagger.Director
 
 // fetch runs a download of one module version, which run makes in a
 // container, in the container its path calls for, and returns it synced; or
-// with its error, unsynced, so the error shows again where it's read.
+// with its error, unsynced, so the error shows again where it's read. The
+// directory is never nil, error or not: lazyZip reads it either way.
 //
 // A public module's download whose go command fell back to the module's
 // origin, as GOPROXY's "direct" does once every proxy has failed, and found
@@ -695,7 +700,8 @@ func (d *downloader) fetch(ctx context.Context, e sumEntry, run func(*dagger.Con
 	return synced(ctx, run(vcs))
 }
 
-// synced is dir synced, or dir as it was, with the error syncing it.
+// synced is dir synced, or dir as it was, with the error syncing it: never
+// nil, which fetch promises.
 func synced(ctx context.Context, dir *dagger.Directory) (*dagger.Directory, error) {
 	s, err := dir.Sync(ctx)
 	if err != nil {
