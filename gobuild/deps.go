@@ -506,7 +506,10 @@ func (m *modules) synced(ctx context.Context, names []string) ([]*dagger.Directo
 			}
 			gate <- struct{}{}
 			defer func() { <-gate }()
-			d, err := m.dir(name).Sync(ctx)
+			d, err := m.dir(name)
+			if err == nil {
+				d, err = d.Sync(ctx)
+			}
 			if err != nil {
 				errs[i] = fmt.Errorf("module %s: %w", name, err)
 				return

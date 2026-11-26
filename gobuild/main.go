@@ -541,9 +541,11 @@ func (m *Gobuild) Archives(
 		modFiles = append(modFiles, bl.modFiles...)
 	}
 	tool := w.manifestTool
-	ctr := b.modules.mount(b.base.
-		WithMountedDirectory(writeManifestDir, tool), modFiles).
-		WithMountedDirectory(b.roots.Src, b.src)
+	ctr, err := b.modules.mount(b.base.WithMountedDirectory(writeManifestDir, tool), modFiles)
+	if err != nil {
+		return nil, err
+	}
+	ctr = ctr.WithMountedDirectory(b.roots.Src, b.src)
 	out := core.NewDirectory()
 	var entries strings.Builder
 	var archives []*dagger.File
@@ -1016,7 +1018,10 @@ func (b *build) profileStep(ctx context.Context, bl *block, blocks map[string]*b
 		srcDir, at := selected(b.src, bl.srcFiles)
 		ctr = ctr.WithMountedDirectory(path.Join(b.roots.Src, at), srcDir, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
 	}
-	ctr = mods.mount(ctr, bl.modFiles)
+	ctr, err := mods.mount(ctr, bl.modFiles)
+	if err != nil {
+		return nil, err
+	}
 	out := "/work/" + bl.name
 	dir, err := ctr.WithExec([]string{"sh", "-c", bl.script(blocks, soloCompileC)}, bare).
 		Directory(out).Sync(ctx)
@@ -1064,7 +1069,7 @@ type build struct {
 	// fetch downloads, on its own, the zip of a module the build reads that
 	// discover didn't find, by its directory name; nil when the build didn't
 	// download per module.
-	fetch func(name string) *dagger.File
+	fetch func(name string) (*dagger.File, error)
 	tools *dagger.Directory
 	// hdr is gohdr, for every machine an engine runs on (Gobuild's gohdr).
 	hdr   *dagger.Directory
@@ -1373,7 +1378,7 @@ go env GOOS GOARCH CGO_ENABLED GOVERSION > /gobuild/goenv
 			src := strings.Join(dirs.src, "\n")
 			b.planSrc = &src
 		}
-		b.fetch = func(name string) *dagger.File { return d.lazyZip(ctx, name) }
+		b.fetch = func(name string) (*dagger.File, error) { return d.lazyZip(ctx, name) }
 	}
 	listedSums := <-startSums
 	if listedSums.err != nil {

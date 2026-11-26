@@ -608,20 +608,18 @@ func withStderr(err error) error {
 }
 
 // lazyZip is the zip of the module version with the module cache directory
-// name, downloaded on its own; nil for one no go.sum names a zip for. A
-// failed download's error shows where the zip is read.
-func (d *downloader) lazyZip(ctx context.Context, name string) *dagger.File {
+// name, downloaded on its own; nil for one no go.sum names a zip for.
+func (d *downloader) lazyZip(ctx context.Context, name string) (*dagger.File, error) {
 	for _, e := range d.sums {
 		if e.zip != "" && moduleDirName(e) == name {
-			// The error is left to the zip: with one, dir is the failed
-			// download, unsynced, never nil (fetch), so reading its zip
-			// fails again, with the download's error, where the build
-			// reads it.
-			dir, _ := d.download(ctx, e)
-			return dir.File(zipPath(e))
+			dir, err := d.download(ctx, e)
+			if err != nil {
+				return nil, withStderr(err)
+			}
+			return dir.File(zipPath(e)), nil
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 // providers is the module versions that may provide the package with import
@@ -673,9 +671,7 @@ func (d *downloader) download(ctx context.Context, e sumEntry) (*dagger.Director
 }
 
 // fetch runs a download of one module version, which run makes in a
-// container, in the container its path calls for, and returns it synced; or
-// with its error, unsynced, so the error shows again where it's read. The
-// directory is never nil, error or not: lazyZip reads it either way.
+// container, in the container its path calls for, and returns it synced.
 //
 // A public module's download whose go command fell back to the module's
 // origin, as GOPROXY's "direct" does once every proxy has failed, and found
@@ -687,27 +683,17 @@ func (d *downloader) download(ctx context.Context, e sumEntry) (*dagger.Director
 // it ran.
 func (d *downloader) fetch(ctx context.Context, e sumEntry, run func(*dagger.Container) *dagger.Directory) (*dagger.Directory, error) {
 	if d.privatePatterns != "" && matchPrefixPatterns(d.privatePatterns, e.path) {
-		return synced(ctx, run(d.private))
+		return run(d.private).Sync(ctx)
 	}
-	dir, err := synced(ctx, run(d.public))
+	dir, err := run(d.public).Sync(ctx)
 	if err == nil || d.vcsImage == "" || !missingVCS(err) {
 		return dir, err
 	}
-	vcs, verr := withEnvOnly(ctx, d.public, core.NewContainer().From(d.vcsImage), func(name string) bool { return slices.Contains(downloadEnv, name) })
-	if verr != nil {
-		return dir, verr
-	}
-	return synced(ctx, run(vcs))
-}
-
-// synced is dir synced, or dir as it was, with the error syncing it: never
-// nil, which fetch promises.
-func synced(ctx context.Context, dir *dagger.Directory) (*dagger.Directory, error) {
-	s, err := dir.Sync(ctx)
+	vcs, err := withEnvOnly(ctx, d.public, core.NewContainer().From(d.vcsImage), func(name string) bool { return slices.Contains(downloadEnv, name) })
 	if err != nil {
-		return dir, err
+		return nil, fmt.Errorf("download container with version control commands: %w", err)
 	}
-	return s, nil
+	return run(vcs).Sync(ctx)
 }
 
 // missingVCS reports whether err is a failed exec whose go command needed a
