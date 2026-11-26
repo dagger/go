@@ -33,8 +33,9 @@ type modules struct {
 	// directory name.
 	zips map[string]*dagger.File
 	// fetchZip downloads the zip of a module zips lacks, by its directory
-	// name; nil when the build downloaded per project.
-	fetchZip func(name string) *dagger.File
+	// name, or returns nil for one it has no download for; nil when the
+	// build downloaded per project.
+	fetchZip func(name string) (*dagger.File, error)
 	// sums holds the checksum of each module the build downloaded, by its
 	// directory name, as the go command recorded it in the module cache.
 	sums map[string]string
@@ -45,6 +46,9 @@ type modules struct {
 
 	mu   sync.Mutex
 	dirs map[string]*dagger.Directory
+	// errs holds the modules whose zip fetchZip failed to download, with
+	// its error.
+	errs map[string]error
 	// ready holds the modules whose directory in dirs is synced, so it
 	// carries its ID.
 	ready map[string]bool
@@ -59,18 +63,39 @@ type modules struct {
 // environment would otherwise decide the install. A Go toolchain, which
 // the go command downloads as a module when the build asks for a newer Go,
 // comes out runnable: its zip records its commands' modes, which extraction
-// keeps.
-func (m *modules) dir(name string) *dagger.Directory {
+// keeps. A zip fetchZip fails to download fails it.
+func (m *modules) dir(name string) (*dagger.Directory, error) {
+	m.mu.Lock()
+	if d, ok := m.dirs[name]; ok {
+		m.mu.Unlock()
+		return d, nil
+	}
+	zip, ok := m.zips[name]
+	m.mu.Unlock()
+	// Outside the lock: the download waits for its exec, and the modules
+	// mounted meanwhile shouldn't.
+	var fetchErr error
+	if !ok && m.fetchZip != nil {
+		zip, fetchErr = m.fetchZip(name)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if d, ok := m.dirs[name]; ok {
-		return d
+		return d, nil
+	}
+	if err := m.errs[name]; err != nil {
+		return nil, err
+	}
+	// Kept, so the packages that read the module don't download it again
+	// only to fail again.
+	if fetchErr != nil {
+		if m.errs == nil {
+			m.errs = map[string]error{}
+		}
+		m.errs[name] = fetchErr
+		return nil, fetchErr
 	}
 	at := strings.LastIndex(name, "@")
-	zip, ok := m.zips[name]
-	if !ok && m.fetchZip != nil {
-		zip = m.fetchZip(name)
-	}
 	if zip == nil {
 		zip = m.all.File(path.Join("cache/download", name[:at], "@v", name[at+1:]+".zip"))
 	}
@@ -81,7 +106,7 @@ func (m *modules) dir(name string) *dagger.Directory {
 		m.dirs = map[string]*dagger.Directory{}
 	}
 	m.dirs[name] = d
-	return d
+	return d, nil
 }
 
 // testExclude is the patterns of what a module holds that building it
@@ -175,7 +200,7 @@ func (m *modules) downloaded(f string) string {
 
 // mount mounts in ctr the downloaded modules files, relative to the module
 // cache, are in, each whole, read-only, and any other files on their own.
-func (m *modules) mount(ctr *dagger.Container, files []string) *dagger.Container {
+func (m *modules) mount(ctr *dagger.Container, files []string) (*dagger.Container, error) {
 	var names, loose []string
 	for _, f := range files {
 		if name := m.downloaded(f); name != "" {
@@ -189,9 +214,13 @@ func (m *modules) mount(ctr *dagger.Container, files []string) *dagger.Container
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		ctr = ctr.WithMountedDirectory(path.Join(m.root, name), m.dir(name), dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
+		dir, err := m.dir(name)
+		if err != nil {
+			return nil, fmt.Errorf("module %s: %w", name, err)
+		}
+		ctr = ctr.WithMountedDirectory(path.Join(m.root, name), dir, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
 	}
-	return ctr
+	return ctr, nil
 }
 
 // fetch downloads every module blocks read now, a few at once, so a
@@ -218,7 +247,11 @@ func (m *modules) fetch(ctx context.Context, blocks map[string]*block, heights m
 			for name := range queue {
 				// The synced directory carries its ID, so a package that
 				// mounts it doesn't ask for the ID in its slot.
-				if d, err := m.dir(name).Sync(ctx); err == nil {
+				d, err := m.dir(name)
+				if err != nil {
+					continue
+				}
+				if d, err = d.Sync(ctx); err == nil {
 					m.setReady(name, d)
 				}
 			}

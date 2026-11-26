@@ -279,7 +279,7 @@ func (b *build) dependencies(ctx context.Context, w *walker, nodes map[string]*n
 	}
 	if len(split) > 0 {
 		go func() {
-			files, err := dagger.Connect().Gobuild(b.toolImage, b.hdr).LinkObjects(ctx, splitDirs, splitFiles)
+			files, err := dagger.Connect().Gobuild(b.toolImage, b.hdr, b.vcsImage).LinkObjects(ctx, splitDirs, splitFiles)
 			if err == nil && len(files) != len(split) {
 				err = fmt.Errorf("the object code call read %d files for %d packages", len(files), len(split))
 			}
@@ -335,7 +335,7 @@ func (b *build) dependencyCall(ctx context.Context, w *walker, pkgs []*node, lay
 	if err != nil {
 		return nil, err
 	}
-	return dagger.Connect().Gobuild(b.toolImage, b.hdr).Dependencies(w.base, w.tools, w.platform, b.roots.Mod, names, dirs, file,
+	return dagger.Connect().Gobuild(b.toolImage, b.hdr, b.vcsImage).Dependencies(w.base, w.tools, w.platform, b.roots.Mod, names, dirs, file,
 		dagger.GobuildDependenciesOpts{ImportedNames: importedNames, Imported: imported}), nil
 }
 
@@ -506,7 +506,10 @@ func (m *modules) synced(ctx context.Context, names []string) ([]*dagger.Directo
 			}
 			gate <- struct{}{}
 			defer func() { <-gate }()
-			d, err := m.dir(name).Sync(ctx)
+			d, err := m.dir(name)
+			if err == nil {
+				d, err = d.Sync(ctx)
+			}
 			if err != nil {
 				errs[i] = fmt.Errorf("module %s: %w", name, err)
 				return

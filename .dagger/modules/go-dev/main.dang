@@ -1846,7 +1846,10 @@ type GoDev {
   can't, and without a downloads container the same build downloads it.
   A failed download reports every source it tried: the go command's error
   names a direct fetch's failure over a proxy's, so the proxy's is in its
-  log of each request, which the error carries.
+  log of each request, which the error carries. A direct fetch that finds
+  no git, which the alpine image lacks, runs again in the library's
+  vcsImage, which has it, and the build downloads its module from the
+  origin.
   """
   downloadsCheck(ws: Workspace!): Void @check {
     let off = container.from("golang:1.27.3-alpine").withEnvVariable("GOPROXY", "off")
@@ -1858,15 +1861,22 @@ type GoDev {
     }
     assert(offline.contains("GOPROXY=off"), "a build downloaded with GOPROXY=off in its downloads container: " + offline)
     # Nothing listens on port 9: the proxy fails, "|" goes on to a direct
-    # fetch, and that fails too, for the image has no git.
-    let unreachable = container.from("golang:1.27.3-alpine").withEnvVariable("GOPROXY", "http://127.0.0.1:9|direct")
+    # fetch, and GOVCS refuses that one.
+    let refused = container
+      .from("golang:1.27.3-alpine")
+      .withEnvVariable("GOPROXY", "http://127.0.0.1:9|direct")
+      .withEnvVariable("GOVCS", "*:off")
     let tried = {
-      go(version: "1.27.3", downloads: unreachable).module(ws, downloadsFixturePath).packages(ws).get(key: downloadsFixturePath).binary(ws).size
+      go(version: "1.27.3", downloads: refused).module(ws, downloadsFixturePath).packages(ws).get(key: downloadsFixturePath).binary(ws).size
       "built"
     } rescue {
       err: Error => err.message
     }
-    assert(tried.contains("127.0.0.1:9") and tried.contains("git"), "a failed download did not report each source it tried: " + tried)
+    assert(tried.contains("127.0.0.1:9") and tried.contains("GOVCS disallows"), "a failed download did not report each source it tried: " + tried)
+    # Without GOVCS, the direct fetch needs git, and gets it in vcsImage.
+    let unreachable = container.from("golang:1.27.3-alpine").withEnvVariable("GOPROXY", "http://127.0.0.1:9|direct")
+    let direct = go(version: "1.27.3", downloads: unreachable).module(ws, downloadsFixturePath).packages(ws).get(key: downloadsFixturePath).binary(ws).size
+    assert(direct > 0, "the build that fetched its module from the origin made an empty binary")
     let built = go(version: "1.27.3").module(ws, downloadsFixturePath).packages(ws).get(key: downloadsFixturePath).binary(ws).size
     assert(built > 0, "the build without a downloads container made an empty binary")
   }

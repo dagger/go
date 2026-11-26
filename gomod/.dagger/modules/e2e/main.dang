@@ -378,6 +378,99 @@ type E2e {
   }
 
   """
+  A module proxy that fails the first request for each file of
+  example.com/flaky@v1.0.0 with a 502, and serves it after that.
+  """
+  let flakyProxySource: String! = """
+    package main
+
+    import (
+    	"archive/zip"
+    	"bytes"
+    	"net/http"
+    	"sync"
+    )
+
+    func main() {
+    	mod := "module example.com/flaky\\n\\ngo 1.21\\n"
+    	var buf bytes.Buffer
+    	z := zip.NewWriter(&buf)
+    	for name, body := range map[string]string{"go.mod": mod, "flaky.go": "package flaky\\n"} {
+    		w, _ := z.Create("example.com/flaky@v1.0.0/" + name)
+    		w.Write([]byte(body))
+    	}
+    	z.Close()
+    	files := map[string][]byte{
+    		"/example.com/flaky/@v/v1.0.0.info": []byte(`{"Version":"v1.0.0"}`),
+    		"/example.com/flaky/@v/v1.0.0.mod":  []byte(mod),
+    		"/example.com/flaky/@v/v1.0.0.zip":  buf.Bytes(),
+    	}
+    	var mu sync.Mutex
+    	asked := map[string]bool{}
+    	http.ListenAndServe(":8080", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    		body, ok := files[r.URL.Path]
+    		if !ok {
+    			http.NotFound(w, r)
+    			return
+    		}
+    		mu.Lock()
+    		again := asked[r.URL.Path]
+    		asked[r.URL.Path] = true
+    		mu.Unlock()
+    		if !again {
+    			http.Error(w, "flaky", http.StatusBadGateway)
+    			return
+    		}
+    		w.Write(body)
+    	}))
+    }
+    """
+
+  """
+  A proxy error on a module's .info, .mod or zip is retried on the proxy
+  before falling through to the origin, whose fetch needs git, which the
+  golang image lacks: the download from a proxy that fails each file once
+  succeeds. The go command remembers a failed .info or .mod per proxy entry,
+  so a GOPROXY naming the same proxy twice the same way never asked it again
+  and reported the proxy's failure as a missing git.
+  """
+  goProxyRetryCheck: Void @check {
+    let image = "golang:" + gomod.scannerVersion + "-alpine"
+    let proxy = container
+      .from(image)
+      .withNewFile("/src/main.go", flakyProxySource)
+      .withWorkdir("/src")
+      .withExec(["go", "mod", "init", "flakyproxy"])
+      .withExec(["go", "build", "-o", "/usr/local/bin/flakyproxy", "."])
+      .withExposedPort(8080)
+      .asService(args: ["flakyproxy"])
+    container
+      .from(image)
+      .withServiceBinding("flaky-proxy", proxy)
+      .withEnvVariable("GOPROXY", gomod.retryingGoProxy("http://flaky-proxy:8080"))
+      .withEnvVariable("GOSUMDB", "off")
+      .withWorkdir("/tmp")
+      .withExec(["go", "mod", "download", "-x", "example.com/flaky@v1.0.0"])
+      .sync
+    null
+  }
+
+  """
+  The image a download that falls back to a module's origin runs again in
+  has the version control commands the go command fetches public modules
+  with, and the Go of scannerVersion: a bump of one without the other
+  fails here.
+  """
+  vcsImageCheck: Void @check {
+    let out = container
+      .from(gomod.vcsImage)
+      .withExec(["sh", "-c", "set -e; git --version; hg --version >/dev/null; svn --version --quiet >/dev/null; go env GOVERSION"])
+      .stdout
+    assert(out.contains("go" + gomod.scannerVersion + "."), "vcsImage is not Go " + gomod.scannerVersion + ": " + out)
+    null
+  }
+
+  """
   The unit tests of the library's helpers: the source scanner, the test
   report indexer and the per-package build's gohdr.
   """

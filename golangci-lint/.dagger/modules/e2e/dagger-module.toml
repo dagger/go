@@ -2,8 +2,8 @@ name = "e2e"
 engineVersion = "v1.0.0-beta.15"
 
 [runtime]
-  source = "dang"
+source = "dang"
 
 [[dependencies]]
-  name = "golangci-lint"
-  source = "../../.."
+name = "golangci-lint"
+source = "../../.."

@@ -48,9 +48,11 @@ func (r Gobuild) MarshalJSON() ([]byte, error) {
 	var concrete struct {
 		ToolImage string
 		Gohdr     *dagger.Directory
+		VcsImage  string
 	}
 	concrete.ToolImage = r.ToolImage
 	concrete.Gohdr = r.Gohdr
+	concrete.VcsImage = r.VcsImage
 	return json.Marshal(&concrete)
 }
 
@@ -58,6 +60,7 @@ func (r *Gobuild) UnmarshalJSON(bs []byte) error {
 	var concrete struct {
 		ToolImage string
 		Gohdr     *dagger.Directory
+		VcsImage  string
 	}
 	err := json.Unmarshal(bs, &concrete)
 	if err != nil {
@@ -65,6 +68,7 @@ func (r *Gobuild) UnmarshalJSON(bs []byte) error {
 	}
 	r.ToolImage = concrete.ToolImage
 	r.Gohdr = concrete.Gohdr
+	r.VcsImage = concrete.VcsImage
 	return nil
 }
 
@@ -1036,7 +1040,14 @@ func DaggerDispatch(ctx context.Context, parentJSON []byte, parentName string, f
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg gohdr", err))
 				}
 			}
-			return New(toolImage, gohdr), nil
+			var vcsImage string
+			if inputArgs["vcsImage"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["vcsImage"]), &vcsImage)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg vcsImage", err))
+				}
+			}
+			return New(toolImage, gohdr, vcsImage), nil
 		default:
 			return nil, fmt.Errorf("unknown function %s", fnName)
 		}

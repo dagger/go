@@ -134,6 +134,9 @@ var downloadEnv = []string{
 type downloader struct {
 	public, private *dagger.Container
 	privatePatterns string
+	// vcsImage is where a public module's download that needs a version
+	// control command runs again (fetch); empty, it doesn't.
+	vcsImage        string
 	gomodcache      string
 	sums            []sumEntry
 	// target is what discover evaluates build constraints against.
@@ -196,7 +199,9 @@ func (d *downloader) discover(ctx context.Context, src sourceImports, pkgDirs []
 			gate <- struct{}{}
 			defer func() { <-gate }()
 			// A download is the same whichever platform made it.
-			dir, err := d.download(e).WithPlatform(core.Platform(d.target.platform())).Sync(ctx)
+			dir, err := d.fetch(ctx, e, func(ctr *dagger.Container) *dagger.Directory {
+				return downloadModule(ctr, d.hdr, d.gomodcache, e).WithPlatform(core.Platform(d.target.platform()))
+			})
 			var list string
 			if err == nil {
 				list, err = dir.File(packName(e) + ".imports").Contents(ctx)
@@ -604,13 +609,17 @@ func withStderr(err error) error {
 
 // lazyZip is the zip of the module version with the module cache directory
 // name, downloaded on its own; nil for one no go.sum names a zip for.
-func (d *downloader) lazyZip(name string) *dagger.File {
+func (d *downloader) lazyZip(ctx context.Context, name string) (*dagger.File, error) {
 	for _, e := range d.sums {
 		if e.zip != "" && moduleDirName(e) == name {
-			return d.download(e).File(zipPath(e))
+			dir, err := d.download(ctx, e)
+			if err != nil {
+				return nil, withStderr(err)
+			}
+			return dir.File(zipPath(e)), nil
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 // providers is the module versions that may provide the package with import
@@ -653,14 +662,50 @@ func inModule(ip string) bool {
 	return strings.Contains(first, ".")
 }
 
-// download is the download of one module version (downloadModule), in the
-// container its path calls for.
-func (d *downloader) download(e sumEntry) *dagger.Directory {
-	ctr := d.public
+// download is the download of one module version (downloadModule), as fetch
+// runs it.
+func (d *downloader) download(ctx context.Context, e sumEntry) (*dagger.Directory, error) {
+	return d.fetch(ctx, e, func(ctr *dagger.Container) *dagger.Directory {
+		return downloadModule(ctr, d.hdr, d.gomodcache, e)
+	})
+}
+
+// fetch runs a download of one module version, which run makes in a
+// container, in the container its path calls for, and returns it synced.
+//
+// A public module's download whose go command fell back to the module's
+// origin, as GOPROXY's "direct" does once every proxy has failed, and found
+// no version control command there to fetch it with, as the golang alpine
+// images have none, runs again in vcsImage with the public container's
+// download environment: the proxies are asked again, and the origin fetched
+// with git, Mercurial or Subversion. Only that download pulls vcsImage, and
+// only its download is keyed by it. It is checked against go.sum wherever
+// it ran.
+func (d *downloader) fetch(ctx context.Context, e sumEntry, run func(*dagger.Container) *dagger.Directory) (*dagger.Directory, error) {
 	if d.privatePatterns != "" && matchPrefixPatterns(d.privatePatterns, e.path) {
-		ctr = d.private
+		return run(d.private).Sync(ctx)
 	}
-	return downloadModule(ctr, d.hdr, d.gomodcache, e)
+	dir, err := run(d.public).Sync(ctx)
+	if err == nil || d.vcsImage == "" || !missingVCS(err) {
+		return dir, err
+	}
+	vcs, err := withEnvOnly(ctx, d.public, core.NewContainer().From(d.vcsImage), func(name string) bool { return slices.Contains(downloadEnv, name) })
+	if err != nil {
+		return nil, fmt.Errorf("download container with version control commands: %w", err)
+	}
+	return run(vcs).Sync(ctx)
+}
+
+// missingVCS reports whether err is a failed exec whose go command needed a
+// version control command it couldn't find: os/exec's error for git, which
+// the go command reports as it is, or the go command's own for the others.
+func missingVCS(err error) bool {
+	var execErr *dagger.ExecError
+	if !errors.As(err, &execErr) {
+		return false
+	}
+	out := execErr.Stderr + execErr.Stdout
+	return strings.Contains(out, "executable file not found in $PATH") || strings.Contains(out, "/s/gogetcmd")
 }
 
 // moduleDirName is a module version's directory name in the module cache.

@@ -255,7 +255,7 @@ type Gomod {
     container
       .from(goImage(scannerVersion))
       # The same download retry as withGoCaches.
-      .withEnvVariable("GOPROXY", "https://proxy.golang.org|https://proxy.golang.org|direct")
+      .withEnvVariable("GOPROXY", retryingGoProxy("https://proxy.golang.org"))
       .withoutEntrypoint
       .withFile("/usr/local/bin/go-includes", includesHelperBinary(hostPlatform))
   }
@@ -281,7 +281,7 @@ type Gomod {
     let target = platform.split("/")
     container.from(goImage(scannerVersion))
       # The same download retry as withGoCaches.
-      .withEnvVariable("GOPROXY", "https://proxy.golang.org|https://proxy.golang.org|direct")
+      .withEnvVariable("GOPROXY", retryingGoProxy("https://proxy.golang.org"))
       .withEnvVariable("GOOS", target.takeFirst(1).join(""))
       .withEnvVariable("GOARCH", target.takeFirst(2).takeLast(1).join(""))
       .withoutEntrypoint
@@ -588,11 +588,8 @@ type Gomod {
   in the workspace warms one download cache and one build cache rather than
   one each.
 
-  Module downloads also retry. proxy.golang.org sometimes resets a module zip
-  download mid-stream, and with Go's default GOPROXY only a 404 or 410 falls
-  through to the next entry. "|" falls through on any error, so a failed zip
-  download retries the proxy once, then fetches from the origin. A container
-  that sets its own GOPROXY keeps it.
+  Module downloads also retry (retryingGoProxy). A container that sets its own
+  GOPROXY keeps it.
   """
   withGoCaches(ctr: Container!): Container! {
     let cached = ctr
@@ -601,10 +598,30 @@ type Gomod {
       .withMountedCache("/root/.cache/go-build", cacheVolume("go-build"))
       .withEnvVariable("GOCACHE", "/root/.cache/go-build")
     if ((ctr.envVariable("GOPROXY") ?? "") == "") {
-      cached.withEnvVariable("GOPROXY", "https://proxy.golang.org|https://proxy.golang.org|direct")
+      cached.withEnvVariable("GOPROXY", retryingGoProxy("https://proxy.golang.org"))
     } else {
       cached
     }
+  }
+
+  """
+  A GOPROXY that asks proxy twice before fetching from the origin.
+
+  proxy.golang.org sometimes resets a module zip download mid-stream or times
+  out a TLS handshake, and with Go's default GOPROXY only a 404 or 410 falls
+  through to the next entry. "|" falls through on any error. The origin is
+  the last resort: a fetch from it needs git, which the golang images lack,
+  so a proxy error that reaches it is reported as a missing git.
+
+  The second entry is the same proxy with a trailing slash. The go command
+  keeps one repository per proxy entry and module, and remembers a failed
+  .info or .mod fetch for it, so the same proxy spelled the same way twice
+  only retries zips. The go command drops the slash when it builds a URL, so
+  both entries ask the same server.
+  """
+  retryingGoProxy(proxy: String!): String! {
+    let base = proxy.trimSuffix("/")
+    base + "|" + base + "/|direct"
   }
 
   """
@@ -629,6 +646,17 @@ type Gomod {
       "golang:" + version + "-alpine"
     }
   }
+
+  """
+  A Go image of scannerVersion with the version control commands a module's
+  origin may need: Debian's golang image, which has git, Mercurial,
+  Subversion and OpenSSH, pinned by digest. goImage's alpine has none of
+  them, so when GOPROXY falls back to "direct" for a public module, its
+  download finds no git; gobuild then runs that download again here. Only
+  such a download pulls it. The e2e suite checks it has the commands and
+  scannerVersion's Go.
+  """
+  vcsImage: String! = "golang:1.27@sha256:5f1b98fa02fe396ebce2a0227a0e08309e11792915b9dd2e1f71053d7e7e6666"
 
   """
   A Go toolchain container at `version`, with the shared Go caches mounted.

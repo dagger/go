@@ -258,7 +258,11 @@ func (w *walker) walk(ctx context.Context, nodes map[string]*node, done map[stri
 			if srcDir != nil {
 				ctr = ctr.WithMountedDirectory(path.Join(w.roots.Src, at), srcDir, dagger.ContainerWithMountedDirectoryOpts{ReadOnly: true})
 			}
-			ctr = w.mods.mount(ctr, n.ModFiles)
+			ctr, err := w.mods.mount(ctr, n.ModFiles)
+			if err != nil {
+				r.err = err
+				return
+			}
 			// The script goes in as a file the step's container writes, and
 			// the exec names the package instead: its arguments and options
 			// are its title wherever the build is shown, such as over a
