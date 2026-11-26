@@ -456,6 +456,21 @@ type E2e {
   }
 
   """
+  The image a download that falls back to a module's origin runs again in
+  has the version control commands the go command fetches public modules
+  with, and the Go of scannerVersion: a bump of one without the other
+  fails here.
+  """
+  vcsImageCheck: Void @check {
+    let out = container
+      .from(gomod.vcsImage)
+      .withExec(["sh", "-c", "set -e; git --version; hg --version >/dev/null; svn --version --quiet >/dev/null; go env GOVERSION"])
+      .stdout
+    assert(out.contains("go" + gomod.scannerVersion + "."), "vcsImage is not Go " + gomod.scannerVersion + ": " + out)
+    null
+  }
+
+  """
   The unit tests of the library's helpers: the source scanner, the test
   report indexer and the per-package build's gohdr.
   """

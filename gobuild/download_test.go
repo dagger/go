@@ -1,8 +1,11 @@
 package main
 
 import (
+	"errors"
 	"reflect"
 	"testing"
+
+	"dagger/gobuild/internal/dagger"
 )
 
 func TestParseGoSums(t *testing.T) {
@@ -59,6 +62,24 @@ func TestMatchPrefixPatterns(t *testing.T) {
 	} {
 		if got := matchPrefixPatterns(c.patterns, c.path); got != c.want {
 			t.Errorf("matchPrefixPatterns(%q, %q) = %v, want %v", c.patterns, c.path, got, c.want)
+		}
+	}
+}
+
+func TestMissingVCS(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		want bool
+	}{
+		{&dagger.ExecError{Stderr: `"Error": "dagger.io/dagger@v1.0.0-beta.30: unable to resolve git version: failed to execute git version: exec: \"git\": executable file not found in $PATH"`}, true},
+		{&dagger.ExecError{Stdout: "go: missing Mercurial command. See https://go.dev/s/gogetcmd"}, true},
+		{&dagger.ExecError{Stderr: "GOVCS disallows using git for public golang.org/x/sync; see 'go help vcs'"}, false},
+		{&dagger.ExecError{Stderr: "example.com/m@v1.0.0: checksum mismatch: go.sum has h1:x="}, false},
+		{errors.New(`exec: "git": executable file not found in $PATH`), false},
+	} {
+		// An ExecError made here has no error of its own to print.
+		if got := missingVCS(c.err); got != c.want {
+			t.Errorf("missingVCS(%#v) = %v, want %v", c.err, got, c.want)
 		}
 	}
 }

@@ -32,6 +32,8 @@ type Gobuild struct {
 	ToolImage string
 	// +private
 	Gohdr *dagger.Directory
+	// +private
+	VcsImage string
 }
 
 func New(
@@ -45,8 +47,13 @@ func New(
 	// The caller builds it, so its build can start before this module's
 	// own.
 	gohdr *dagger.Directory,
+	// A Go image with the version control commands a module's origin may
+	// need, git among them, pinned by digest (Gomod.vcsImage). A public
+	// module's download that falls back to its origin and finds no such
+	// command runs again in it (downloader.fetch). Empty, it doesn't.
+	vcsImage string,
 ) *Gobuild {
-	return &Gobuild{ToolImage: toolImage, Gohdr: gohdr}
+	return &Gobuild{ToolImage: toolImage, Gohdr: gohdr, VcsImage: vcsImage}
 }
 
 // bare runs an exec as its command alone: none of these execs call Dagger,
@@ -1065,6 +1072,9 @@ type build struct {
 	// toolImage is the image the tools are built in, which the build's own
 	// steps, those that run gohdr alone, run in too.
 	toolImage string
+	// vcsImage is Gobuild's: where a public module's download that needs a
+	// version control command runs again.
+	vcsImage string
 	// target is what the build compiles for.
 	target target
 	// shared is the import paths whose packages the dependency call compiles
@@ -1188,7 +1198,7 @@ func setup(ctx context.Context, m *Gobuild, ctr *dagger.Container, image string,
 	if err := checkFlags(append(append([]string(nil), flags...), envFlags...)); err != nil {
 		return nil, err
 	}
-	b := &build{base: base, src: source, roots: roots{Src: mountPath, Mod: gomodcache, Cwd: cwd}, toolImage: toolImage, hdr: hdr}
+	b := &build{base: base, src: source, roots: roots{Src: mountPath, Mod: gomodcache, Cwd: cwd}, toolImage: toolImage, vcsImage: m.VcsImage, hdr: hdr}
 	// The module cache is made from the build's go.sums: the main module's,
 	// those of a go.work's modules and its go.work.sum, or the alternate
 	// go.mod a -modfile flag names, with its go.sum. The go command lists
@@ -1333,7 +1343,7 @@ go env GOOS GOARCH CGO_ENABLED GOVERSION > /gobuild/goenv
 	if len(switched) > 0 {
 		entries = nil
 	} else {
-		d := &downloader{public: public, private: caller, gomodcache: gomodcache, sums: entries, target: b.target, hdr: b.hdr}
+		d := &downloader{public: public, private: caller, vcsImage: b.vcsImage, gomodcache: gomodcache, sums: entries, target: b.target, hdr: b.hdr}
 		// The modules the go command fetches directly rather than through a
 		// proxy: GONOPROXY's, or GOPRIVATE's when it's unset or empty.
 		if d.privatePatterns, err = firstEnv(ctx, caller, "GONOPROXY", "GOPRIVATE"); err != nil {
@@ -1363,7 +1373,7 @@ go env GOOS GOARCH CGO_ENABLED GOVERSION > /gobuild/goenv
 			src := strings.Join(dirs.src, "\n")
 			b.planSrc = &src
 		}
-		b.fetch = d.lazyZip
+		b.fetch = func(name string) *dagger.File { return d.lazyZip(ctx, name) }
 	}
 	listedSums := <-startSums
 	if listedSums.err != nil {

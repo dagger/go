@@ -62,15 +62,23 @@ type modules struct {
 // keeps.
 func (m *modules) dir(name string) *dagger.Directory {
 	m.mu.Lock()
+	if d, ok := m.dirs[name]; ok {
+		m.mu.Unlock()
+		return d
+	}
+	zip, ok := m.zips[name]
+	m.mu.Unlock()
+	// Outside the lock: the download waits for its exec, and the modules
+	// mounted meanwhile shouldn't.
+	if !ok && m.fetchZip != nil {
+		zip = m.fetchZip(name)
+	}
+	m.mu.Lock()
 	defer m.mu.Unlock()
 	if d, ok := m.dirs[name]; ok {
 		return d
 	}
 	at := strings.LastIndex(name, "@")
-	zip, ok := m.zips[name]
-	if !ok && m.fetchZip != nil {
-		zip = m.fetchZip(name)
-	}
 	if zip == nil {
 		zip = m.all.File(path.Join("cache/download", name[:at], "@v", name[at+1:]+".zip"))
 	}

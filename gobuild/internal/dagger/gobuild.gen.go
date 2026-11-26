@@ -1331,11 +1331,12 @@ func (r *GobuildScoped) StandIn(ctx context.Context) (bool, error) {
 	return response, q.Execute(ctx)
 }
 
-func (r *Query) Gobuild(toolImage string, gohdr *Directory) *Gobuild { // gobuild (../../:0:0)
+func (r *Query) Gobuild(toolImage string, gohdr *Directory, vcsImage string) *Gobuild { // gobuild (../../:0:0)
 	assertNotNil("gohdr", gohdr)
 	q := r.query.Select("gobuild")
 	q = q.Arg("toolImage", toolImage)
 	q = q.Arg("gohdr", gohdr)
+	q = q.Arg("vcsImage", vcsImage)
 
 	return &Gobuild{
 		query:     q,

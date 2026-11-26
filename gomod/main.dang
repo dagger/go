@@ -648,6 +648,17 @@ type Gomod {
   }
 
   """
+  A Go image of scannerVersion with the version control commands a module's
+  origin may need: Debian's golang image, which has git, Mercurial,
+  Subversion and OpenSSH, pinned by digest. goImage's alpine has none of
+  them, so when GOPROXY falls back to "direct" for a public module, its
+  download finds no git; gobuild then runs that download again here. Only
+  such a download pulls it. The e2e suite checks it has the commands and
+  scannerVersion's Go.
+  """
+  vcsImage: String! = "golang:1.27@sha256:5f1b98fa02fe396ebce2a0227a0e08309e11792915b9dd2e1f71053d7e7e6666"
+
+  """
   A Go toolchain container at `version`, with the shared Go caches mounted.
 
   Every tool in the workspace builds its module containers from this, so two

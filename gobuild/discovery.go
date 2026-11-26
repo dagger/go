@@ -67,7 +67,7 @@ func (m *Gobuild) Discover(
 	own []string,
 ) (_ *Discovery, rerr error) {
 	defer reportExec(&rerr)
-	d := &downloader{public: public, private: private, privatePatterns: privatePatterns, gomodcache: gomodcache,
+	d := &downloader{public: public, private: private, privatePatterns: privatePatterns, vcsImage: m.VcsImage, gomodcache: gomodcache,
 		sums: parseGoSums([]string{sums}), target: newTarget(goenv, tags), hdr: m.Gohdr, own: own}
 	// They are followed as from a package of a source that imports them
 	// and provides none of them.
@@ -114,7 +114,7 @@ func (d *downloader) discoverOnce(ctx context.Context, toolImage, goenv string, 
 	if d.privatePatterns != "" {
 		opts.Private, opts.PrivatePatterns = d.private, d.privatePatterns
 	}
-	call := dagger.Connect().Gobuild(toolImage, d.hdr).Discover(d.public, d.gomodcache, goSum(d.sums), goenv, imports, plan, own, opts)
+	call := dagger.Connect().Gobuild(toolImage, d.hdr, d.vcsImage).Discover(d.public, d.gomodcache, goSum(d.sums), goenv, imports, plan, own, opts)
 	followed, err := call.Followed(ctx)
 	if err != nil {
 		return nil, err

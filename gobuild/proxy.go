@@ -77,7 +77,7 @@ func (m *Gobuild) ModuleProxy(
 	// No module cache is read first: the downloads come from GOPROXY alone.
 	// The download's own module cache, as the one to read first, is one
 	// downloadModule skips.
-	d := &downloader{public: public, private: caller, privatePatterns: privatePatterns, gomodcache: modCacheDir,
+	d := &downloader{public: public, private: caller, privatePatterns: privatePatterns, vcsImage: m.VcsImage, gomodcache: modCacheDir,
 		sums: parseGoSums([]string{sums}), hdr: m.Gohdr}
 	var entries []sumEntry
 	for _, e := range d.sums {
@@ -94,13 +94,12 @@ func (m *Gobuild) ModuleProxy(
 	// exec of its own, with its own lookups and connections.
 	eachBounded(len(entries), downloadConcurrency, func(i int) {
 		e := entries[i]
-		var dir *dagger.Directory
 		if e.zip != "" {
-			dir = d.download(e)
+			dirs[i], errs[i] = d.download(ctx, e)
 		} else {
-			dir = d.downloadMeta(e)
+			dirs[i], errs[i] = d.fetch(ctx, e, func(ctr *dagger.Container) *dagger.Directory { return downloadMeta(ctr, e) })
 		}
-		if dirs[i], errs[i] = dir.Sync(ctx); errs[i] != nil {
+		if errs[i] != nil {
 			errs[i] = fmt.Errorf("%s@%s: %w", e.path, e.version, withStderr(errs[i]))
 		}
 	})
@@ -188,12 +187,8 @@ func checkGoModSums(entries []sumEntry, modsums string) error {
 
 // downloadMeta is downloadModule for a module version a go.sum names by
 // its go.mod's checksum alone: its go.mod and info, without its zip, which
-// no build reads. ModuleProxy checks the go.mod against the go.sum.
-func (d *downloader) downloadMeta(e sumEntry) *dagger.Directory {
-	ctr := d.public
-	if d.privatePatterns != "" && matchPrefixPatterns(d.privatePatterns, e.path) {
-		ctr = d.private
-	}
+// no build reads, in ctr. ModuleProxy checks the go.mod against the go.sum.
+func downloadMeta(ctr *dagger.Container, e sumEntry) *dagger.Directory {
 	q := e.path + "@" + e.version
 	meta := strings.TrimSuffix(zipPath(e), ".zip")
 	script := "set -e\nmkdir -p /gobuild/empty\n" +

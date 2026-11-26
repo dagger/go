@@ -466,7 +466,7 @@ type Go {
   fails, or doesn't match, fails the call.
   """
   moduleProxy(goSum: File!): Directory! {
-    gobuild(toolImage: gomod.goImage(gomod.scannerVersion), gohdr: gomod.gohdr).moduleProxy(
+    gobuild(toolImage: gomod.goImage(gomod.scannerVersion), gohdr: gomod.gohdr, vcsImage: gomod.vcsImage).moduleProxy(
       goSum: goSum,
       image: if (base == null) { gomod.goImage(version ?? gomod.scannerVersion) } else { "" },
       from: if (base == null) { null } else { base!.withoutEntrypoint },
@@ -954,9 +954,10 @@ type GoModule {
   The per-package builder. Its own tool, gohdr, is the library's, built in
   the image of the Go version the library's tools build with, which the
   library pins, so a build pulls one Go image, which an engine image can
-  ship.
+  ship. A public module's download that needs git runs again in the
+  library's vcsImage.
   """
-  let builder: Gobuild! { gobuild(toolImage: gomod.goImage(gomod.scannerVersion), gohdr: gomod.gohdr) }
+  let builder: Gobuild! { gobuild(toolImage: gomod.goImage(gomod.scannerVersion), gohdr: gomod.gohdr, vcsImage: gomod.vcsImage) }
 
   """
   Whether tests are skipped for this module.
