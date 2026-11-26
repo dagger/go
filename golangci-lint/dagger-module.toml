@@ -2,8 +2,8 @@ name = "golangci-lint"
 engineVersion = "v1.0.0-beta.15"
 
 [runtime]
-  source = "dang"
+source = "dang"
 
 [[dependencies]]
-  name = "gomod"
-  source = "../gomod"
+name = "gomod"
+source = "../gomod"
